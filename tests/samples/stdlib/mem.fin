@@ -1,0 +1,43 @@
+//@ normative
+//@ ok
+// The mem module run end to end through the routes all three compilers
+// lower: the byte arena and the slot pool, everything the one shared
+// `destroy()` frees after the handouts. The issue's own example line,
+// `let buf <[int]> = arena.alloc::<int>(1024);`, is refused by the shipped
+// module (`Method 'alloc' not found in type 'Arena'`, issue #51's blocking
+// note): no struct in either compiler can carry the typed contract as
+// members today, so the 1024-element typed handout reaches a caller through
+// the module's generic FREE functions (`arena_block`/`mem_release`, lowered
+// on the reference only, run in tests/test_mem.cpp), and the typed-sized
+// request this sample exercises is the byte route's shape, two cells of
+// eight bytes out of the same one region. The ownership rules and every
+// gap stay in lib/std/mem.fin's header.
+//
+// stdout is empty on purpose: the corpus reserves it (ADR 0009), and
+// `blame` is the assertion a broken route would stop the run at.
+import { Arena, Pool } from mem::std;
+
+fun main() <noret> {
+    let arena <Arena> = Arena::create(65536);
+    let cell <&char> = arena.arena_bytes(8);
+    *cell = 'H';
+    let next <&char> = arena.arena_bytes(8);
+    *next = 'y';
+    blame *cell == 'H', "the byte route lost cell one";
+    blame *next == 'y', "the byte route lost cell two";
+    blame arena.used() == 16, "the byte route did not bump the arena's meter";
+    blame arena.has_room(), "the arena reported no room after sixteen bytes";
+
+    let pool <Pool<int>> = Pool::<int>::create(4);
+    let slot <int> = pool.take();
+    pool.write(slot, 42);
+    blame pool.read(slot) == 42, "the pool slot lost its value";
+    pool.give(slot);
+    let again <int> = pool.take();
+    blame again == slot, "the pool did not recycle the handed slot";
+    blame pool.used() == 1, "the pool's meter miscounted the recycle";
+
+    arena.destroy();
+    pool.destroy();
+    blame arena.used() == 0, "a destroyed arena still reports usage";
+}

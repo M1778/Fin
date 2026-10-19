@@ -1,0 +1,334 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Log: one shape for tool output — levels, a LOG_LEVEL filter, and a JSONL mode.
+//
+// `finc --diagnostics=json` emits JSONL (`diagnostic`/`summary` records, with the
+// `kind`/`message` key style this file borrows); `printf` is ambient but
+// unstructured. Every tool around issue #50 (Linf, finls, fin fmt, fin-sdk) needs
+// one logging shape so a process boundary can configure the stream. This is
+// that shape, owned once here.
+//
+// THE LEVELS. `Level` is the issue's `Level { Debug, Info, Warn, Error }` spelled
+// the one way that lowers today: a plain enum is checker-clean (`Level::Warn`
+// resolves at a call site), but a *variable or parameter of that type refuses in
+// codegen* — `a variable of type 'Level' is not lowered yet`, measured 2026-10-19
+// while building this file. So the level is a struct value carrying its rank and
+// the four members are statics that build it: `Level::Warn()` is the spelling the
+// issue's member syntax wanted, and `.rank` is the int the filter compares. When
+// plain enum codegen lands, `Level` becomes the enum and every static keeps its
+// name; that compat note is recorded here and in issue #62, and nowhere in the
+// compiler. `Logger { level <Level>, json <bool> }` is the type the issue names;
+// the running configuration is NOT a Logger object, it is the module's process
+// state (next paragraph), so `init` configures the process.
+//
+// HOW `init`/`debug/info/warn/error` SEE ONE CONFIGURATION WITHOUT GLOBALS. A
+// module-scope mutable `let` refuses in codegen (`an assignment to this target is
+// not lowered yet`; the globals pass reads only the root program), so the state
+// lives where finc's own driver state lives: the process environment. `init`
+// writes `FIN_LOG_RANK`/`FIN_LOG_JSON`; every emitter reads them back through
+// libc `getenv`/`setenv`, declared HERE under module-private spellings
+// (`log_getenv`, `log_setenv`) the way every module declares its externs, rather
+// than importing env::std — whose externs are not #[global] and so do not lower
+// through an import. Every emitted line costs one getenv parse, and the
+// configuration is also inheritable-by-fork process state, which a config struct
+// would not be. That is the recorded trade.
+//
+// THE FILTER. Default level is `info`, exactly as the issue says. `LOG_LEVEL`
+// (values `debug`|`info`|`warn`|`error`, anything else `blame`s with the bad
+// value in the message — never silent) *overrides* the level `init` was handed;
+// when `init` was never called the first emit resolves it, so both routes honour
+// one operator control. debug/info/warn/error each emit iff their own rank is
+// >= the resolved threshold, so an `error` line passes at every level and a
+// `debug` line waits for `debug`.
+//
+// THE MODES. Text: `<rfc3339> [INFO ] message` to fd 2 — stderr, never stdout,
+// because finc's stdout stays reserved for the machine contract. Level names are
+// right-padded to five, so `[INFO ]`/`[WARN ]`/`[ERROR]` align. JSONL:
+// `{"kind":"log","level":"warn","message":"..."}` — same key style the finc JSON
+// contract emits (kind first, message next), with the timestamp appended as
+// `"ts":"..."` so the record's *prefix* stays the contract's shape either way. A
+// timestamp prefix is emitted IFF `time` (#59) has landed — it has, and this
+// module imports `now`/`format_rfc3339` for it; `timestamps(false)` turns it off
+// for callers whose stderr must stay byte-identical across compilers (the corpus's
+// normative sample does exactly that, which is why the knob exists).
+//
+// OWNERSHIP of `message`: caller-owned. Text mode owns no copy of it at all;
+// JSON mode reads it through `log_bytes_in` (own `#[llvm_name="memcpy"]`, the
+// split-name rule strings.fin records) into a staging buffer, escapes it
+// (backslash, quote, newline/CR/tab, other controls as `\u00xx`) and frees the
+// staging buffer before the line is written. Every string this module builds —
+// the assembled line, the timestamp copy — is released inside `emit`.
+//
+// GAPS hit while writing this file:
+//
+//   * `Level` as a real enum, and `Logger.level` as that enum's field, are
+//     refused before any handing at all (`a variable/parameter of type 'Level'
+//     is not lowered yet`). The struct spelling is what shipped; see the
+//     compat note above.
+//   * Emission is not thread-safe: two threads can interleave partial lines
+//     (the escaping + dprintf span). No lock exists in lib/std, so this is
+//     recorded, not papered over.
+//   * `now()` and `format_rfc3339` blame on a nonpositive/over-9999 epoch; that
+//     failure is theirs, not this file's.
+//   * `debug/info/warn/error` return `<noret>`, not an Outcome: a log line either
+//     writes or aborts on a bad operator-controlled level. There is no
+//     configuration an in-program caller can be wrong about.
+
+import { Buffer, new_buffer, free_buffer } from buffer::std;
+import { now, format_rfc3339, free_rfc3339 } from time::std;
+
+namespace std {
+
+// Module-private C names. Every module declares its own (`arg_strcmp`,
+// `fs_fopen`, `time_clock_gettime`...), because a declaration inviting C's
+// symbol belongs to the module that calls it and two externs sharing one
+// `#[llvm_name]` do not both link (strings.fin records the split).
+#[llvm_name="getenv"]
+@define log_getenv(name: string) <string>;
+
+#[llvm_name="setenv"]
+@define log_setenv(name: string, value: string, overwrite: int) <int>;
+
+#[llvm_name="dprintf"]
+@define log_dprintf(fd: int, fmt: string, ...) <int>;
+
+#[llvm_name="strcmp"]
+@define log_strcmp(a: string, b: string) <int>;
+
+#[llvm_name="memcpy"]
+@define log_bytes_in(dst: &char, src: string, count: ulong) <&char>;
+
+#[llvm_name="free"]
+@define log_free(p: string) <noret>;
+
+#[llvm_name="strlen"]
+@define log_strlen(s: string) <ulong>;
+
+// `==` on two `string`s is pointer equality with literals pooled (strings.fin
+// and outcome.fin record the same fact from their sides), and a `setenv`/`getenv`
+// round trip never answers the literal's pointer, so every group comparison below
+// is `log_eq` byte comparison and this comment says why once.
+priv fun log_eq(a: string, b: string) <bool> {
+    if (a == null && b == null) { return true; }
+    if (a == null || b == null) { return false; }
+    return log_strcmp(a, b) == 0;
+}
+
+// The five right-padded level labels; `[INFO ]`/`[WARN ]`/`[ERROR]` align.
+priv fun log_pad(rank: int) <string> {
+    if (rank == 0) { return "DEBUG"; }
+    if (rank == 1) { return "INFO "; }
+    if (rank == 2) { return "WARN "; }
+    return "ERROR";
+}
+
+// The lowercase member names: LOG_LEVEL's accepted values and the JSONL level.
+priv fun log_name(rank: int) <string> {
+    if (rank == 0) { return "debug"; }
+    if (rank == 1) { return "info"; }
+    if (rank == 2) { return "warn"; }
+    return "error";
+}
+
+#[export]
+pub struct Level {
+    pub rank <int> = 0,
+
+      pub static fun Debug() <Level> { return Level{rank: 0}; }
+    pub static fun Info() <Level> { return Level{rank: 1}; }
+    pub static fun Warn() <Level> { return Level{rank: 2}; }
+    pub static fun Error() <Level> { return Level{rank: 3}; }
+}
+
+#[export]
+pub struct Logger {
+    pub level <Level>,
+      pub json <bool> = false,
+      pub ts <bool> = true,
+}
+
+// `LOG_LEVEL`'s four accepted values to a rank, or -1. The blame for a bad
+// value happens at the reading site with the value in the message.
+priv fun log_env_rank(text: string) <int> {
+    if (text == null) { return 1; }
+    if (log_eq(text, "debug")) { return 0; }
+    if (log_eq(text, "info")) { return 1; }
+    if (log_eq(text, "warn")) { return 2; }
+    if (log_eq(text, "error")) { return 3; }
+    return -1;
+}
+
+// The env name for a rank, for `init`'s (and anything else's) write-through.
+priv fun log_rank_text(rank: int) <string> {
+    if (rank == 0) { return "0"; }
+    if (rank == 1) { return "1"; }
+    if (rank == 2) { return "2"; }
+    return "3";
+}
+
+// The blame for an unparseable operator value names the value: "never silent"
+// is the issue's rule for LOG_LEVEL, and one helper keeps both reading sites
+// (init and the no-init default) on the same wording.
+priv fun blame_bad_level(bad: string) <noret> {
+    let b <Buffer> = new_buffer(128);
+    b.write_string("LOG_LEVEL: expected one of debug|info|warn|error, got '");
+    b.write_string(bad);
+    b.write_string("'");
+    let msg <string> = b.to_string();
+    free_buffer(b);
+    blame false, msg;
+}
+
+// Resolves the threshold once per call: `init` writes it, `LOG_LEVEL`
+// overrides it, absence means the issue's `info` default.
+priv fun set_rank_pass(level: Level, json: bool) <noret> {
+    let r <int> = level.rank;
+    let env <string> = log_getenv("LOG_LEVEL");
+    if (env != null) {
+        let parsed <int> = log_env_rank(env);
+        if (parsed < 0) { blame_bad_level(env); }
+        r = parsed;
+    }
+    if (r < 0) { r = 1; }
+    log_setenv("FIN_LOG_RANK", log_rank_text(r), 1);
+    log_setenv("FIN_LOG_JSON", json : "1" ? "0", 1);
+}
+
+#[export]
+pub fun init(level: Level) <noret> {
+    set_rank_pass(level, false);
+}
+
+// The fuller configuration: JSONL mode chosen here. The issue's `init(level)` is
+// the text-mode call (`init_json(level, false)` lowered to the same state).
+#[export]
+pub fun init_json(level: Level, json: bool) <noret> {
+    set_rank_pass(level, json);
+}
+
+// The timestamp prefix, IFF `time` (#59) has landed. It has; this switch exists
+// for the byte-determinism that a [tätte]ed line cannot offer a harness.
+#[export]
+pub fun timestamps(on: bool) <noret> {
+    log_setenv("FIN_LOG_TS", on : "1" ? "0", 1);
+}
+
+// The threshold, read fresh per emit rather than cached at init: the process env
+// (see the ownership note above) is the one copy of the configuration there is.
+// When `init` never wrote it, the first emit resolves `LOG_LEVEL` itself (bad
+// value = blame here, never silent) and stores the rank it chose, so an
+// `init`-free tool still honours the operator's filter.
+priv fun check_rank(rank_of_msg: int) <bool> {
+    let env <string> = log_getenv("FIN_LOG_RANK");
+    if (env == null) {
+        let requested <int> = log_env_rank(log_getenv("LOG_LEVEL"));
+        if (requested < 0) { blame_bad_level(log_getenv("LOG_LEVEL")); }
+        // The stored text is also what the local parse reads below: an `env = "1"`
+        // placeholder here would filter exactly against the wrong rank.
+        env = log_rank_text(requested);
+        log_setenv("FIN_LOG_RANK", env, 1);
+    }
+    let cur <int> = 1;
+    if (env != null) {
+        if (log_eq(env, "0")) { cur = 0; }
+        else if (log_eq(env, "1")) { cur = 1; }
+        else if (log_eq(env, "2")) { cur = 2; }
+        else if (log_eq(env, "3")) { cur = 3; }
+    }
+    return rank_of_msg >= cur;
+}
+
+priv fun json_now() <bool> {
+    return log_eq(log_getenv("FIN_LOG_JSON"), "1");
+}
+
+// The emission one spot: threshold check, line assembly (either mode, one access
+// to the env each), one dprintf(2) write, staging storage freed. Never stdout.
+priv fun emit(msg: string, msg_rank: int, msg_json: bool) <noret> {
+    if (msg == null) { msg = ""; }
+    if (!check_rank(msg_rank)) { return; }
+
+    // The prefix rides by default (time #59 has landed); `FIN_LOG_TS=0` -- what
+    // `timestamps(false)` writes -- is the one OFF spelling, anything else is ON.
+    // The ts is copied out of the owned storage `format_rfc3339` returns below
+    // before that storage is released.
+    let ts <string> = "";
+    if (!log_eq(log_getenv("FIN_LOG_TS"), "0")) {
+        let raw <string> = format_rfc3339(now());
+        if (raw != null) {
+            let tb <Buffer> = new_buffer(24);
+            tb.write_string(raw);
+            ts = tb.to_string();
+            free_buffer(tb);
+        }
+        free_rfc3339(raw);
+    }
+
+    let out <Buffer> = new_buffer(512 + 96);
+    if (msg_json) {
+        out.write_string("{\"kind\":\"log\",\"level\":\"");
+        out.write_string(log_name(msg_rank));
+        out.write_string("\",\"message\":\"");
+        let n <int> = cast<int>(log_strlen(msg));
+        let bytes <[char]> = new [char, n + 1]{};
+        log_bytes_in(&bytes[0], msg, cast<ulong>(n));
+        bytes[n] = cast<char>(0);
+        let i <int> = 0;
+        while (i < n) {
+            let c <char> = bytes[i];
+            let ci <int> = cast<int>(c);
+            if (c == '\\') { out.write_string("\\\\"); }
+            else if (c == '"') { out.write_string("\\\""); }
+            else if (c == '\n') { out.write_string("\\n"); }
+            else if (c == '\r') { out.write_string("\\r"); }
+            else if (c == '\t') { out.write_string("\\t"); }
+            else if (ci < 32) {
+                out.write_string("\\u00");
+                let hi <int> = (ci / 16) % 16;
+                let lo <int> = ci % 16;
+                if (hi < 10) { out.write_char(cast<char>(cast<int>('0') + hi)); }
+                else { out.write_char(cast<char>(cast<int>('a') + hi - 10)); }
+                if (lo < 10) { out.write_char(cast<char>(cast<int>('0') + lo)); }
+                else { out.write_char(cast<char>(cast<int>('a') + lo - 10)); }
+            }
+            else { out.write_char(c); }
+            i = i + 1;
+        }
+        delete bytes;
+        out.write_string("\"");
+        if (ts != "") {
+            out.write_string(",\"ts\":\"");
+            out.write_string(ts);
+            out.write_string("\"");
+        }
+        out.write_string("}");
+    } else {
+        if (ts != "") {
+            out.write_string(ts);
+            out.write_string(" ");
+        }
+        out.write_string("[");
+        out.write_string(log_pad(msg_rank));
+        out.write_string("] ");
+        out.write_string(msg);
+    }
+    out.write_string("\n");
+
+    let line <string> = out.to_string();
+    free_buffer(out);
+    log_dprintf(2, "%s", line);
+    log_free(line);
+}
+
+#[export]
+pub fun debug(msg: string) <noret> { emit(msg, 0, json_now()); }
+
+#[export]
+pub fun info(msg: string) <noret> { emit(msg, 1, json_now()); }
+
+#[export]
+pub fun warn(msg: string) <noret> { emit(msg, 2, json_now()); }
+
+#[export]
+pub fun error(msg: string) <noret> { emit(msg, 3, json_now()); }
+
+}

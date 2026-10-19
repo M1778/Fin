@@ -1,0 +1,536 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Mem: allocators as an interface, in the Zig shape ADR 0003 leaves to the
+// library. `tests/samples/stdlib/mem.fin` runs the routes below end to end,
+// and this module is what that run exercises: one `Allocator` interface with
+// `Arena`, `Pool`, `LibcAlloc` and `NullAlloc` behind it. Nothing else in
+// lib/std imports `mem` and finc/ does not reach it yet, so the module has no
+// consumer beyond that sample and the decisions below are its own.
+//
+// OWNERSHIP: WHO FREES WHAT (issue #51's own line, in the spelling of
+// strings.fin's honesty rule). Every allocation here is freed exactly once,
+// by one of two owners:
+//
+//   * THE ARENA frees ALL of what the bump served, ONE `destroy()` at a time
+//     and with zero per-object bookkeeping. `arena.arena_bytes(n)` hands a
+//     cell out of THE SLAB the arena owns, and every cell dies with the same
+//     `destroy()` -- byte route, no per-object tracking, one free. This is
+//     what "one free, zero per-object tracking" means, and it is the only
+//     route where it is literally true rather than a bookkeeping promise.
+//   * THE CALLER frees every fresh compiler block. `arena_block`, the
+//     `null`-route's unreachable spellings excepted, is a FRESH
+//     malloc-backed block the compiler emitted, and whoever asked for one
+//     owns it and frees it with `mem_release` (`delete` lowers to free,
+//     discovered on the way: the two spellings agree, and `mem_release` is
+//     the spelled one because the `delete`-inside-a-generic-method form
+//     cannot lower). The pool's blocks are the pool's; the caller frees
+//     nothing in `pool.take`-land -- what circulates there never leaves the
+//     pool's own two arrays.
+//
+//   MIXING THE OWNERS IS THE UNSOUND ROUTE: a `&char` handed out by the bump
+//   is arena-owned, and passing one to `mem_free_bytes` (C's `free`) is the
+//   double free of the arena's whole block at the next `destroy()`; a fresh
+//   compiler block stopped being the arena's, and keeping it past the
+//   `destroy()` that has nothing to do with it is the caller's leak, not a
+//   dangling pointer, precisely because the two routes never share storage.
+//   Nothing in the language expresses this rule, so it lives here and in the
+//   callsites it protects.
+//
+// THE INTERFACE, and what the language lets it carry. `Allocator` declares
+// `used` and `has_room` -- the measurement half -- and the analyzer's
+// declaration-site check holds every impl to those names, identically
+// worded on both compilers (Soundness_Mem,
+// AnImplMissingAMemberIsRefusedOnBothCompilers: `Struct 'Imposter' does not
+// implement interface 'Allocator'`). The check is by NAME ONLY -- a `used`
+// that returns `bool` instead of `int` goes through the front end and the
+// whole reference build today (KnownDefect_Mem,
+// AnImplSignatureMismatchGoesUncaught, a failure is good news) -- so
+// nothing here leans on the analyzer knowing more than names.
+//
+// The typed contract the issue spells, `alloc<T>(count)` / `free<T>(buf)`,
+// is NOT a member of any struct here, and the hole the issue's example
+// falls into once the module NAMES it is measured rather than reworded:
+//
+//   * `arena.alloc::<int>(1024)` against THIS module is a front-end
+//     refusal, `error: Method 'alloc' not found in type 'Arena'`, the
+//     same whether or not the turbofish is written
+//     (Soundness_Mem, TheIssueSpellingIsRefusedAsTheHeaderSays). The
+//     routed spellings are the module's generic free functions.
+//   * Where the member exists -- a locally declared generic method, the
+//     shape moving the contract back into the structs would need -- the
+//     turbofish `a.alloc::<int>(4)` type-checks and then refuses in
+//     codegen on all THREE compilers with one sentence, `a call to the
+//     method 'alloc' with explicit generic arguments is not lowered yet`
+//     (the reference prefixes `codegen: `; the stages do not). The
+//     shapes around it misfire worse: the bare `arena.alloc(1024)`
+//     refuses on the reference with `a call to 'alloc' whose type
+//     argument 'T' no argument mentions is not lowered yet`, and on the
+//     stage the same bare spelling lowers the alloc but the `delete buf`
+//     in the same generic method body misfires at RUN with `free():
+//     invalid pointer` -- so no struct here declares the typed
+//     contract, and nothing below builds on the lower half of it.
+//   * The lowered typed routes, both compilers proven by build+run:
+//     `arena_block::<int>(&arena, 1024) <[int]>` and
+//     `mem_release::<int>(buf)` -- the generic FREE FUNCTION with a
+//     turbofish, the same route math.fin's `min` and outcome.fin's `Ok`
+//     lower today. The issue example's `arena.alloc::<int>` stands for
+//     this route; this is the only lowered shape its buf literal has,
+//     and it lowers on the reference only so far (`free generic function
+//     'arena_block' is not lowered yet (needs monomorphization)` on the
+//     stages), so the normative sample keeps to the routes all three
+//     compilers run.
+//
+// DISPATCH-through-an-interface-value -- `fun waste(a: Allocator)
+// { a.used(); }` -- RUNS end to end on the reference backend
+// (Soundness_Mem pins it) and refuses at the stage's codegen with `a call to
+// '<name>' is not lowered yet`, so a program that needs both compilers holds
+// allocators through their concrete struct type, which lowers everywhere.
+// The interface is still the contract: every impl satisfies it at
+// declaration, by name, in every compiler today.
+//
+// GAPS, every one hit while writing this file:
+//
+//   * The byte arena's bump hands out ONE `&char` cell and the language
+//     cannot walk it: `p[1]` on a `&char` is refused (`this index expression
+//     is not lowered yet`, the strings.fin gap; both compilers), and
+//     pointer arithmetic is not an operator (`an operator on a pointer is
+//     not lowered yet`). A byte route of `count` cells is therefore handed
+//     out one cursor per bump, and multi-element buffers go through
+//     `arena_block`, which is a fresh block and caller-owned.
+//   * `cast<&int>(ptr: &char)` -- the reinterpretation that would turn byte
+//     cells into typed cells -- type-checks and refuses in codegen (`this
+//     conversion (from 'a pointer' to 'a pointer') is not lowered yet`).
+//     Every typed handout is therefore a real `[T]` or a `&T` from a
+//     `[T]`-typed slab, never a byte cell recast.
+//   * `sizeof(T)` inside a generic function or method: the reference backend
+//     lowers it (`sizeof(int)` == 4; Soundness_Mem pins the byte math) and
+//     the stage refuses with `sizeof of unlowerable type 'T'`. So NO route
+//     here meters typed counts in bytes: typed handouts are counted in
+//     elements, and the byte cap is the byte route's number alone.
+//   * `sizeof(&int)` -- a pointer type inside `sizeof` -- parses on the
+//     reference and refuses in the stage front (`expected ')' after
+//     sizeof`). Only scalar spellings are used.
+//   * `p[i] = v` through an element pointer `p <&T>` is refused in codegen
+//     (`an assignment to this target is not lowered yet`), so a bump's
+//     `&T` cell goes through the array's own index when the caller needs a
+//     write outside the slab's first cells.
+//   * An interface-typed ARRAY slot dispatch (`slots[0].mark()` on a
+//     `[Chunk]`) RUNS end to end on the reference backend (early a-probes
+//     segfaulted out of exposing a bare `let slots` before create; with the
+//     `new` spelling it exits 0) and the stage refuses the element call
+//     (`codegen: a call to 'Chunk_mark' is not lowered yet`), so both-
+//     compiler programs stay with the concrete-struct spellings -- and no
+//     module route here needs a heterogeneous table: `destroy()` frees the
+//     arena's slab, and the caller-owned typed blocks stay caller-owned
+//     per the rule above.
+//   * The pool's `N` -- issue's `Pool<T, N>` -- is a capacity argument, not a
+//     constant parameter. There is no constant-parameter grammar today, and
+//     `Pool::<int>(64)` is the spelling that build+runs on both compilers.
+//   * The `?`-nullable spelling of struct fields is refused in codegen
+//     (nullifier.fin, ADR 0052's neighborhood), so no allocator field here
+//     hides a may-be-null state; capacities that read zero do the job
+//     explicitly, and `has_room()` is the query.
+//   * Mixing type-specializations across one arena is honest enough to state
+//     and impossible to enforce here: nothing in the language hands a byte
+//     offset back as `&T`, so the typed routes keep their own slabs instead
+//     of bumping the byte slab.
+
+namespace std {
+
+// The C malloc family, named by symbol the way the corpus names every extern
+// (finc/main.fin spells the same shape under `m_` names, strings.fin under
+// `strings_` names). NOT `#[global]`, for the same reason every other module's
+// externs are not: a caller who declares their own `#[llvm_name="free"]`
+// under a DIFFERENT Fin name would collide with one of these at symbol dedup
+// and fail at the link after a compile that exited 0, so the modulePrefixes
+// spell every name and callers call through these module names. A same-
+// signature ambient `@define printf`-style duplicate is the shape the corpus WANTS
+// (Soundness_GlobalAttribute -- the file declares its own copy and one
+// symbol wins); malloc/free are outside that shape, so they stay module-local.
+#[llvm_name="malloc"]
+@define mem_malloc(n: ulong) <&char>;
+
+#[llvm_name="free"]
+@define mem_free(p: &char) <noret>;
+
+#[llvm_name="realloc"]
+@define mem_realloc(p: &char, n: ulong) <&char>;
+
+// The allocator transport contract, as spelled by the issue. Both halves of
+// the interface RUN on the reference backend -- one through an interface
+// value, both through each concrete allocator. The declaration-site impl
+// check holds by NAME (Soundness_Mem pins the shape check with a mismatched
+// signature), so any struct here claiming `Allocator` carries both.
+#[export]
+pub interface Allocator {
+    // Bytes / elements / cells handed out so far -- each allocator counts in
+    // its own unit and documents it where it counts. A dead arena reports 0.
+    pub fun used(self: &Self) <int>;
+
+    // Whether the NEXT request has somewhere to land. `false` is not an
+    // answer to a request: the requesters refuse with a blame, because
+    // there is no language shape to hand back `[_]`-or-null.
+    pub fun has_room(self: &Self) <bool>;
+}
+
+// ---------------------------------------------------------------------------
+// Arena: one bump region, one free.
+//
+// `create(bytes)` allocates the region ONCE; `arena_bytes(count)` bumps by
+// `count` bytes and hands the region's first cell back as `&char`. THE BUMP
+// NEVER REALLOCATES, so byte cells die together: `destroy()` is THE one free
+// of everything the bump served, with no per-object bookkeeping anywhere.
+// The `%c` a cell reads stays readable while the arena is non-destroyed, and
+// a cell used after `destroy()` is the caller's use-after-free -- the
+// ownership rule above, spelled nowhere better than here.
+//
+// Alignment is EXPLICITLY not offered: an int needs a mod-4 offset, and the
+// bump's cursor advances by whatever `count` says; a caller who needs
+// alignment asks the module's... nothing, today (the typed routes with
+// fresh blocks are the only way an unaligned int stays impossible -- and
+// fresh blocks do not bump the byte cursor).
+//
+// The MODULE-internal route the free functions take to the meter is
+// `admit(count)`; it exists so `arena_block`'s handout registers against the
+// byte cap in the unit the free function can express, which is COUNT QUANTUM
+// and not bytes -- see the `sizeof(T)` gap above: `count * sizeof(T)` would
+// be the honest multiply, and it lowers only on the reference backend.
+#[export]
+pub struct Arena : <Allocator> {
+    priv:
+      slab <[char]>,
+      used_now <int>,
+      cap_bytes <int>,
+
+    pub:
+      // The one allocation this arena ever makes. `bytes` is BYTES: the
+      // issue's example asks for 65536 of them and this create() delivers
+      // exactly that many.
+      static fun create(bytes: int) <Arena> {
+        blame bytes >= 0, "an arena cannot hold a negative byte count";
+        let a <Arena>;
+        a.slab = new [char, bytes]{};
+        a.cap_bytes = bytes;
+        a.used_now = 0;
+        return a;
+      }
+
+      // Bump `count` bytes and hand the region's first cell back. The pointer
+      // is arena-owned by the rule above: it is valid until `destroy()` and
+      // it dies with the arena's block, one free, no per-object anything.
+      fun arena_bytes(self: &Self, count: int) <&char> {
+        blame self.cap_bytes > 0, "this arena was destroyed";
+        blame count >= 0, "a negative bump request";
+        blame self.used_now + count <= self.cap_bytes, "the arena is full";
+        let at <int> = self.used_now;
+        self.used_now = self.used_now + count;
+        return &self.slab[at];
+      }
+
+      // The interface. After `destroy()` the numbers still READ -- zero and
+      // `false` -- so a caller can query a dead arena without touching freed
+      // bytes; only the bump and the frees are refused.
+      fun used(self: &Self) <int> {
+        return self.used_now;
+      }
+
+      fun has_room(self: &Self) <bool> {
+        return self.used_now < self.cap_bytes;
+      }
+
+      // Register `count` UNITS against the byte cap without handing a cell
+      // out; the free functions reach the meter through this and ONLY this
+      // (the fields stay `priv`). Units, not bytes, per the `sizeof` gap.
+      fun admit(self: &Self, count: int) <noret> {
+        blame self.cap_bytes > 0, "this arena was destroyed";
+        blame count >= 0, "an arena cannot admit a negative count";
+        blame self.used_now + count <= self.cap_bytes, "the arena is full";
+        self.used_now = self.used_now + count;
+      }
+
+      // THE one free. Everything the bump handed out dies with this --
+      // including every `&char` the caller is still holding, which is the
+      // ownership rule the header states and the reason a use after this is
+      // the caller's, not the module's.
+      fun destroy(self: &Self) <noret> {
+        delete self.slab;
+        self.cap_bytes = 0;
+        self.used_now = 0;
+      }
+}
+
+// ---------------------------------------------------------------------------
+// Pool: fixed slots for hot types, a free list, no per-object allocs.
+//
+// `create(capacity)` allocates ONE `[T]` array of slots and ONE `[int]`
+// array of free indices; `take()` pops an index, `give(index)` pushes it
+// back, and read/write touch the slot behind an index. The slots never
+// individually allocate or free, so a hot bucket's new/delete churn is
+// paid twice in the pool's life: two `new`s at create, one `delete` pair at
+// destroy. Same trick for the free list as for the cells: an array, not a
+// pointer chase, because `[int]` indexing is what lowers everywhere.
+//
+// The issue's `Pool<T, N>` becomes `Pool::<T>(capacity)` here, and the gap
+// is the header's constant-spelling note. Exhaustion refuses with a blame
+// on `take` rather than answering with a pointer-that-does-not-exist,
+// because `[T]`-array indices have no null and a `&T` that answers nothing
+// is not a handout this interface can carry.
+#[export]
+pub struct Pool<T> : <Allocator> {
+    priv:
+      cells <[T]>,
+      free_list <[int]>,
+      free_top <int>,
+      cap_slots <int>,
+
+    pub:
+      // `capacity` slots, each initially free. Zero is legal: a pool that
+      // is born exhausted, which is what makes `has_room()` a question with
+      // an answer rather than an assertion.
+      static fun create(capacity: int) <Pool<T>> {
+        blame capacity >= 0, "a pool cannot hold a negative slot count";
+        let p <Pool<T>>;
+        p.cells = new [T, capacity]{};
+        p.free_list = new [int, capacity]{};
+        p.cap_slots = capacity;
+        let i <int> = 0;
+        while (i < capacity) {
+            p.free_list[i] = i;
+            i = i + 1;
+        }
+        p.free_top = capacity;
+        return p;
+      }
+
+      // Pop a free index. THE pool's whole win is here: after `give(3)` the
+      // third cell is re-claimable with no allocator call behind it.
+      fun take(self: &Self) <int> {
+        blame self.cap_slots > 0, "this pool was destroyed";
+        blame self.free_top > 0, "the pool is exhausted";
+        self.free_top = self.free_top - 1;
+        let idx <int> = self.free_list[self.free_top];
+        return idx;
+      }
+
+      // Return a slot to the free list. Double gives are the caller's
+      // arithmetic error (the free list's top is what protects capacity,
+      // not identity); `has_room()` reads the same number.
+      fun give(self: &Self, index: int) <noret> {
+        blame index >= 0, "a pool index cannot be negative";
+        blame index < self.cap_slots, "a pool index must point at a slot";
+        blame self.free_top < self.cap_slots, "the free list is full";
+        self.free_list[self.free_top] = index;
+        self.free_top = self.free_top + 1;
+      }
+
+      fun read(self: &Self, index: int) <T> {
+        blame index >= 0, "a pool index cannot be negative";
+        blame index < self.cap_slots, "a pool index must point at a slot";
+        return self.cells[index];
+      }
+
+      fun write(self: &Self, index: int, value: T) <noret> {
+        blame index >= 0, "a pool index cannot be negative";
+        blame index < self.cap_slots, "a pool index must point at a slot";
+        self.cells[index] = value;
+      }
+
+      // Interface, in units of slots: however many are claimed and unclaimed.
+      fun used(self: &Self) <int> {
+        return self.cap_slots - self.free_top;
+      }
+
+      fun has_room(self: &Self) <bool> {
+        return self.free_top > 0;
+      }
+
+      // The pool's two arrays, freed together. Slots the caller still needs
+      // were read out first -- the ownership rule above.
+      fun destroy(self: &Self) <noret> {
+        delete self.cells;
+        delete self.free_list;
+        self.cap_slots = 0;
+        self.free_top = 0;
+      }
+}
+
+// ---------------------------------------------------------------------------
+// LibcAlloc: what `new`/`delete` already were, spelled as an allocator.
+//
+// ADR 0003's "document current semantics" is exactly this: the default
+// allocator nobody wires is C's malloc through `new` and `free` through
+// `delete`, and the wrapper below does no more than count what it handed
+// out and spell the two directions. `malloc_bytes`/`grow_bytes`/`free_bytes`
+// are the raw chunks; `alloc`-as-in-compiler-blocks is `new [T, n]{}`
+// reached through the free functions of this module (`arena_block` has the
+// same body with a meter), and `used()` is the running total THIS wrapper
+// handed out -- libc's own bookkeeping stays libc's.
+#[export]
+pub struct LibcAlloc : <Allocator> {
+    priv:
+      handed_out <int>,
+
+    pub:
+      static fun create() <LibcAlloc> {
+        let p <LibcAlloc>;
+        p.handed_out = 0;
+        return p;
+      }
+
+      // One raw malloc. The chunk is CALLER-owned (the rule above), and the
+      // only way to release it is one of the module's free routes -- for a
+      // `delete` to work on it the chunk must still be spelled `&char` at
+      // the point of the free, which is exactly what `free_bytes` +
+      // `mem_free_bytes` do, so nothing here invites pairing `malloc_bytes`
+      // with a compiler `delete`.
+      fun malloc_bytes(self: &Self, bytes: int) <&char> {
+        blame bytes >= 0, "a negative malloc is not a malloc";
+        let cell <&char> = mem_malloc(cast<ulong>(bytes));
+        self.handed_out = self.handed_out + bytes;
+        return cell;
+      }
+
+      // C realloc, verbatim. A NULL first pointer behaves like malloc; a
+      // freed one is the caller's bug and C's undefined behavior, which is
+      // why the wrapper does not invent a guard libc does not have. The
+      // count adds the grow UNCONDITIONALLY: whether realloc moved the block
+      // is the platform's answer, and `used()` differing by that accident on
+      // two backends would make the running total a platform pin -- see
+      // Soundness_Mem, which pins the deterministic sum this fix gives.
+      fun grow_bytes(self: &Self, cell: &char, bytes: int) <&char> {
+        blame bytes >= 0, "a negative grow is not a grow";
+        let fresh <&char> = mem_realloc(cell, cast<ulong>(bytes));
+        self.handed_out = self.handed_out + bytes;
+        return fresh;
+      }
+
+      // Release ONE raw chunk exactly once. This and `mem_free_bytes` are
+      // the same symbol; the wrapper's total drops nothing, because the
+      // unit the total counts is "handed out", and libc freed what it
+      // tracked without a Fin-side opinion.
+      fun free_bytes(self: &Self, cell: &char) <noret> {
+        mem_free(cell);
+      }
+
+      fun used(self: &Self) <int> {
+        return self.handed_out;
+      }
+
+      // There is always room until malloc returns 0, and malloc's null is
+      // not answered here (the `?`-nullable spelling's refusal is the gap
+      // above). The count keeps honest the what: this allocator hands out
+      // and C decides.
+      fun has_room(self: &Self) <bool> {
+        return true;
+      }
+}
+
+// ---------------------------------------------------------------------------
+// NullAlloc: the allocator that always refuses.
+//
+// The "what if allocation failed" harness's whole toolkit: every query
+// answers the impossible, and every handout aborts. The issue's recorded
+// intent -- measure the what-if path -- is this: the refusal happens HERE
+// with the allocator's name, so what a harness measures is that its
+// conditional-on-success logic took the branch that assumes failure, not
+// that malloc's NULL leaked through silently.
+#[export]
+pub struct NullAlloc : <Allocator> {
+    priv:
+      asked <int>,
+
+    pub:
+      static fun create() <NullAlloc> {
+        let n <NullAlloc>;
+        n.asked = 0;
+        return n;
+      }
+
+      fun used(self: &Self) <int> {
+        return self.asked;
+      }
+
+      // Always out.
+      fun has_room(self: &Self) <bool> {
+        return false;
+      }
+
+      // The refusal, byte-shaped: the bump this allocator would have served
+      // aborts, and refuses to hand out memory. The console writes the
+      // allocator's name; the abort stops before `main` can return.
+      fun give(self: &Self, count: int) <&char> {
+        self.asked = self.asked + count;
+        blame false, "NullAlloc refused to hand out memory";
+        return null;
+      }
+
+      // No state of consequence: out-of-scope state reconstructed here is 0
+      // once again.
+      fun destroy(self: &Self) <noret> {
+        self.asked = 0;
+      }
+}
+
+// ---------------------------------------------------------------------------
+// The typed free functions, one per allocator shape that hands a fresh block
+// out. Turbofish-callable from the root program, the same route `min::<int>`
+// and `Ok::<int>` lower, and measured in Soundness_Mem. They are also the
+// only place the typed work can live: inside a generic METHOD body the
+// reference backend refuses the plain `new [T, count]{}` (the same
+// "no argument mentions T" note the method-call refusals give), and the
+// stage lowers the alloc but its `delete buf` misfires at RUN with
+// `free(): invalid pointer` -- so not one struct here declares the typed
+// contract as members, and the module's typed handouts come from these
+// free functions.
+//
+// HANDOUTS FROM HERE ARE CALLER-OWNED. The rule above says what that means
+// and this file proves it with the arena's counting contract:
+// `arena_block(&arena, count)` is metered against the arena's byte-room in
+// `count` units, it is a fresh compiler block, and it is the CALLER's to
+// free -- with `mem_release<T>(buf)` -- NOT the arena's to keep.
+//
+#[export]
+pub fun arena_block<T>(a: &Arena, count: int) <[T]> {
+    a.admit(count);
+    let fresh <[T]> = new [T, count]{};
+    return fresh;
+}
+
+// THE spelling for a caller to free with: (a) it is the ONE that works
+// inside generic method bodies (see note above), (b) `delete buf` lowers to
+// the very same free symbol underneath, and (c) "callers free with
+// mem_release" is one sentence to state instead of a rule per route.
+#[export]
+pub fun mem_release<T>(buf: [T]) <noret> {
+    delete buf;
+}
+
+// The raw routes a caller reaches without the wrapper structs: same bodies,
+// same blames, no counting -- libc keeps its own books and the caller owns
+// the chunks.
+#[export]
+pub fun mem_malloc_bytes(bytes: int) <&char> {
+    blame bytes >= 0, "a negative malloc is not a malloc";
+    return mem_malloc(cast<ulong>(bytes));
+}
+
+#[export]
+pub fun mem_grow_bytes(cell: &char, bytes: int) <&char> {
+    blame bytes >= 0, "a negative grow is not a grow";
+    return mem_realloc(cell, cast<ulong>(bytes));
+}
+
+#[export]
+pub fun mem_free_bytes(cell: &char) <noret> {
+    mem_free(cell);
+}
+
+// The all-failures route in its free-function spelling, so a harness calling
+// the what-if path needs no NullAlloc value in scope.
+#[export]
+pub fun null_alloc<T>(count: int) <[T]> {
+    blame false, "NullAlloc refused to hand out memory";
+    let fresh <[T]> = new [T, count]{};
+    return fresh;
+}
+
+}  // namespace std

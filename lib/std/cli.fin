@@ -1,0 +1,489 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Cli: one surface for a Fin program's command line.
+//
+// argparse.fin parses a caller-supplied `main(args)`; this module parses the
+// process's REAL command line, decides the two contract spells
+// (`--help`/`--version` reserve stdout, exit 0) and leaves the working parse
+// in an `Outcome<Match>` so a caller never `blame`s on a typographic mistake
+// (outcome.fin is the recoverable-error spelling this rides). The surface is
+// the issue's: `Command` with its `Arg`s and subcommands, `parse_args()`,
+// `Match::get`/`is_set`/`subcommand`/`positional`, `get_env_or`,
+// `exit_with`.
+//
+// HOW ARGV ARRIVES. `parse_args()` takes no arguments (the issue's spelling)
+// and reads `/proc/self/cmdline`: open flags 0 (O_RDONLY), one `read` into a
+// 4 KiB heap copy, then `close`. Linux procfs only -- the one platform finc
+// builds for; a failed open or read `blame`s (never a silent empty parse).
+// The buffer copy is kept for the process lifetime and every string the
+// parser hands out points into it, which is exactly the lifetime real argv
+// has: the strings-caller-owned rule of strings.fin settles here as -- the
+// strings `Match` carries are never freed and never need to be; what the
+// caller releases are `Match`'s heap arrays, via `free_match`. finc's own
+// `main(args)` skips argv[0]; so does the segment walk below -- the parse is
+// of user arguments.
+//
+// THE COMMAND LINE GRAMMAR, stated once. A long option is exactly
+// `--name` (value, when the arg takes one, is the NEXT argument); a short
+// option is exactly `-c` with the same next-argument rule; both mirror
+// argparse.fin's grammar. `--name=value` is not a recognized spelling and
+// surfaces as `unknown option` naming the token (argparse.fin too); combined
+// short flags (`-abc`) explicitly unsupported: an unrecognized catenation is
+// `unknown option '-abc'`. The reserved pair is handled before any user
+// option and takes the exit inside `parse_args` -- help page and version
+// line go to fd 1, stdout stays reserved for them per the finc contract this
+// file borrows, and `parse_args` NEVER RETURNS on those tokens.
+//
+// SUBCOMMANDS. Registered first-position words. `args: [Command]` -- the
+// issue's flat array -- refuses in codegen (`a struct field of type
+// '[Command]' is not lowered yet`, measured this slice): Command contains
+// its own args array, so an array of Commands is an infinite type. `subs
+// [<'&Command>]`'s real spelling `subst <[&Command]>` with heap children
+// from `Command::make_sub` is the form that lowers; when `[Command]` codegen
+// lands the field type changes and the surface keeps its names. When no
+// subcommand is registered, the first positional is data like any other
+// (`m.sub` stays ""); when some are registered, an unrecognized first
+// positional is `unknown command '<x>'`. A registered subcommand shares the
+// root's option space (v0: options are per-command tables and the parse runs
+// against the root's; per-sub scoping is a follow-up this file records, not
+// one it fakes).
+//
+// DEFAULTS. A value-carrying arg never seen reports its registered
+// `default` through `get` -- argparse.fin's `get_option` convention -- so
+// `get` never answers an empty string for a defaulted arg, and `is_set`
+// answers the seen-flag, which is how "registered and defaulted" tells
+// itself from "passed".
+//
+// EXIT CODES, the borrowed contract (docs/finc-interface-contract.md,
+// stated as the borrowing it is): finc itself answers 0 compiled / 1 source
+// rejected / 2 bad command line / 3 compiler failure, and reserves stdout
+// for `--help`/`--version`. A tool built on this module maps the SAME four
+// reasons onto ITS outputs: 0 worked / 1 the user was wrong (a refused run:
+// unknown flag, unknown command, missing value -- the issue's "bad flags,
+// show help" line) / 2 the program was wrong (a usage bug worth diagnosing)
+// / 3 the environment refused (nothing the user could have said better --
+// procfs missing, env poisoned). `exit_with(code)` is the one door out and
+// it is `<noret>`: after `exit_with` nothing on the call path is reached,
+// and the issue's "never return-after-exit" is recorded on the function
+// rather than implied.
+//
+// GAPS hit while writing this file:
+//
+//   * `--name=value` and `-abc` are refused spellings (above), not silent
+//     fallbacks: both surface as `unknown option` naming the whole token.
+//   * Options carry no types: `get` hands back a string; strings.fin owns
+//     `parse_int` (which blames a bad number) where a typed API would have
+//     hidden the conversion.
+//   * The 4 KiB cmdline copy caps argv; a longer `/proc/self/cmdline`
+//     truncates the last segment (the walk still terminates). Real argv that
+//     big belongs to a compiler driver, not a utility.
+//   * `get_env_or`/`exit_with` re-declare their externs under module-private
+//     spellings instead of importing env::std: an `#[export]`ed `@define`
+//     does not lower through an import (log.fin records the measurement),
+//     so every module carries its own -- the split-name rule.
+import { Outcome, Ok, Err } from outcome::std;
+import { Buffer, new_buffer, free_buffer } from buffer::std;
+import { from_chars, len } from strings::std;
+
+namespace std {
+
+// Module-private C names. The split-name rule (log.fin, strings.fin): extern
+// declarations belong to the module that calls them, under spellings no
+// other module reuses.
+#[llvm_name="getenv"]
+@define cli_getenv(name: string) <string>;
+
+#[llvm_name="exit"]
+@define cli_exit(code: int) <noret>;
+
+#[llvm_name="dprintf"]
+@define cli_dprintf(fd: int, fmt: string, ...) <int>;
+
+#[llvm_name="strcmp"]
+@define cli_strcmp(a: string, b: string) <int>;
+
+#[llvm_name="strncmp"]
+@define cli_strncmp(a: string, b: string, count: ulong) <int>;
+
+#[llvm_name="open"]
+@define cli_open(path: string, flags: int) <int>;
+
+#[llvm_name="read"]
+@define cli_read(fd: int, buf: &char, count: ulong) <long>;
+
+#[llvm_name="close"]
+@define cli_close(fd: int) <int>;
+
+// The two Buffer-built catenations, because `+` on strings is not a spelled
+// operation here and Buffer copies are the idiom log.fin already used.
+priv fun cli_cat3(a: string, b: string, c: string) <string> {
+    let buf <Buffer> = new_buffer(64);
+    buf.write_string(a);
+    buf.write_string(b);
+    buf.write_string(c);
+    let out <string> = buf.to_string();
+    free_buffer(buf);
+    return out;
+}
+
+priv fun cli_cat2(a: string, b: string) <string> {
+    let buf <Buffer> = new_buffer(64);
+    buf.write_string(a);
+    buf.write_string(b);
+    let out <string> = buf.to_string();
+    free_buffer(buf);
+    return out;
+}
+
+#[export]
+pub struct Arg {
+    pub name <string> = "",
+      pub short <char> = '-',
+      pub takes_value <bool> = false,
+      pub default <string> = "",
+      pub help <string> = "",
+}
+
+#[export]
+pub struct Match {
+    pub prog <string> = "",
+      pub sub <string> = "",
+      pub names <[string]>,
+      pub values <[string]>,
+      pub flags <[bool]>,
+      pub count <int> = 0,
+      pub pos <[string]>,
+      pub pos_count <int> = 0,
+
+      pub fun get(self: &Self, name: string) <string> {
+        for (let i <int> = 0; i < self.count; i++) {
+            if (cli_strcmp(self.names[i], name) == 0) {
+                return self.values[i];
+            }
+        }
+        return "";
+      }
+
+    pub fun is_set(self: &Self, name: string) <bool> {
+        for (let i <int> = 0; i < self.count; i++) {
+            if (cli_strcmp(self.names[i], name) == 0) {
+                return self.flags[i];
+            }
+        }
+        return false;
+    }
+
+    pub fun subcommand(self: &Self) <string> {
+        return self.sub;
+    }
+
+    pub fun positional(self: &Self, i: int) <string> {
+        if (i < 0 || i >= self.pos_count) { return ""; }
+        return self.pos[i];
+    }
+}
+
+// Releases `Match`'s heap arrays. The strings those arrays hold are
+// process-lifetime slices of the command line copy (header); they are never
+// freed and never need to be.
+#[export]
+pub fun free_match(m: Match) <noret> {
+    delete m.names;
+    delete m.values;
+    delete m.flags;
+    delete m.pos;
+}
+
+#[export]
+pub struct Command {
+    pub name <string> = "",
+      pub about <string> = "",
+      pub version <string> = "",
+      pub args <[Arg]>,
+      pub arg_count <int> = 0,
+      pub subs <[&Command]>,
+      pub sub_count <int> = 0,
+
+      pub static fun create(name: string, about: string) <Command> {
+        let args_arr <[Arg]> = new [Arg, 32]{};
+        let subs_arr <[&Command]> = new [&Command, 16]{};
+        return Command{
+            name: name, about: about, version: "",
+              args: args_arr,
+              arg_count: 0,
+              subs: subs_arr,
+              sub_count: 0
+        };
+      }
+
+    pub static fun make_sub(name: string, about: string) <&Command> {
+        let args_arr <[Arg]> = new [Arg, 32]{};
+        let subs_arr <[&Command]> = new [&Command, 16]{};
+        let c <&Command> = new Command{
+            name: name, about: about, version: "",
+              args: args_arr,
+              arg_count: 0,
+              subs: subs_arr,
+              sub_count: 0
+        };
+        return c;
+    }
+
+    // The issue's Arg at its convenience: no short, no default, no help.
+    pub fun arg(self: &Self, name: string, takes_value: bool) <noret> {
+        self.add_arg(name, '-', takes_value, "", "");
+    }
+
+    // The full registration: every Arg field says what it is.
+    pub fun add_arg(self: &Self, name: string, short: char, takes_value: bool, default: string, help: string) <noret> {
+        if (self.arg_count >= 32) { return; }
+        self.args[self.arg_count] = Arg{
+            name: name, short: short, takes_value: takes_value,
+              default: default, help: help
+        };
+        self.arg_count = self.arg_count + 1;
+    }
+
+    pub fun sub(self: &Self, child: &Command) <noret> {
+        if (self.sub_count >= 16) { return; }
+        self.subs[self.sub_count] = child;
+        self.sub_count = self.sub_count + 1;
+    }
+
+    // The help page: usage, about, the reserved pair, registered options,
+    // registered commands. Caller-owned text, always printed by `parse_args`
+    // on `--help` and available to a caller under its own control.
+    pub fun help_text(self: &Self) <string> {
+        let b <Buffer> = new_buffer(256);
+        b.write_string("usage: ");
+        b.write_string(self.name);
+        b.write_string(" [options] [args]\n");
+        if (len(self.about) > 0) {
+            b.write_string(self.about);
+            b.write_string("\n");
+        }
+        b.write_string("options:\n");
+        b.write_string("  -h, --help      show this help and exit\n");
+        b.write_string("  -v, --version   show the version and exit\n");
+        for (let i <int> = 0; i < self.arg_count; i++) {
+            b.write_string("  ");
+            if (self.args[i].short != '-') {
+                b.write_char('-');
+                b.write_char(self.args[i].short);
+                b.write_string(", --");
+            } else {
+                b.write_string("    --");
+            }
+            b.write_string(self.args[i].name);
+            if (self.args[i].takes_value) {
+                b.write_string(" <value>");
+            }
+            if (len(self.args[i].help) > 0) {
+                b.write_string("  ");
+                b.write_string(self.args[i].help);
+            }
+            b.write_string("\n");
+        }
+        if (self.sub_count > 0) {
+            b.write_string("commands:\n");
+            for (let j <int> = 0; j < self.sub_count; j++) {
+                b.write_string("  ");
+                b.write_string(self.subs[j].name);
+                if (len(self.subs[j].about) > 0) {
+                    b.write_string("  ");
+                    b.write_string(self.subs[j].about);
+                }
+                b.write_string("\n");
+            }
+        }
+        let text <string> = b.to_string();
+        free_buffer(b);
+        return text;
+    }
+
+    pub fun parse_args(self: &Self) <Outcome<Match>> {
+        // argv in one read. fd < 0 means no procfs: the refusal names the
+        // construct, per the backend's invariant.
+        let buf <[char]> = new [char, 4096]{};
+        let fd <int> = cli_open("/proc/self/cmdline", 0);
+        if (fd < 0) {
+            blame true, "cli: cannot read /proc/self/cmdline (parse_args needs Linux procfs)";
+        }
+        let got <long> = cli_read(fd, &buf[0], cast<ulong>(4096));
+        cli_close(fd);
+        if (got < 0) {
+            blame true, "cli: cannot read /proc/self/cmdline (read failed)";
+        }
+        let end <int> = cast<int>(got);
+
+        // Split on NUL. Segment 0 is the program path, skipped like finc's
+        // own `main(args)` skips it; empty segments are skipped too.
+        let segs <[string]> = new [string, 256]{};
+        let raw <int> = 0;
+        let start <int> = 0;
+        for (let i <int> = 0; i < end; i++) {
+            if (buf[i] == cast<char>(0)) {
+                if (i > start && raw < 256) {
+                    segs[raw] = from_chars(buf, start, i - start);
+                    raw = raw + 1;
+                }
+                start = i + 1;
+            }
+        }
+        if (start < end && raw < 256) {
+            segs[raw] = from_chars(buf, start, end - start);
+            raw = raw + 1;
+        }
+
+        let names <[string]> = new [string, 32]{};
+        let values <[string]> = new [string, 32]{};
+        let flags <[bool]> = new [bool, 32]{};
+        let pos <[string]> = new [string, 64]{};
+        let pos_count <int> = 0;
+        let sub_word <string> = "";
+
+        // The option bag, spelled once per parse: `--jobs` / `-j` for each
+        // registered arg. The short spelling turns a `char` through the
+        // Buffer because a string-character catenation is not a spelled
+        // operation here.
+        let longs <[string]> = new [string, 32]{};
+        let shorts <[string]> = new [string, 32]{};
+        let spell <Buffer> = new_buffer(32);
+        for (let k <int> = 0; k < self.arg_count; k++) {
+            spell.clear();
+            spell.write_string("--");
+            spell.write_string(self.args[k].name);
+            longs[k] = spell.to_string();
+            spell.clear();
+            spell.write_string("-");
+            spell.write_char(self.args[k].short);
+            shorts[k] = spell.to_string();
+        }
+        free_buffer(spell);
+
+        // The walker. `cur` is the option index still owed its value; -1
+        // while none is owed. Content comparisons only: these strings point
+        // into the NUL-split copy, and `==` would compare pointers.
+        let cur <int> = -1;
+        for (let t <int> = 1; t < raw; t++) {
+            let tok <string> = segs[t];
+
+            // Reserved spellings first. They print to fd 1 and exit, so
+            // control never comes back through them.
+            if (cli_strcmp(tok, "--help") == 0) {
+                cli_dprintf(1, "%s\n", self.help_text());
+                cli_exit(0);
+            }
+            if (cli_strcmp(tok, "-h") == 0) {
+                cli_dprintf(1, "%s\n", self.help_text());
+                cli_exit(0);
+            }
+            if (cli_strcmp(tok, "--version") == 0) {
+                if (len(self.version) > 0) {
+                    cli_dprintf(1, "%s %s\n", self.name, self.version);
+                } else {
+                    cli_dprintf(1, "%s\n", self.name);
+                }
+                cli_exit(0);
+            }
+            if (cli_strcmp(tok, "-v") == 0) {
+                if (len(self.version) > 0) {
+                    cli_dprintf(1, "%s %s\n", self.name, self.version);
+                } else {
+                    cli_dprintf(1, "%s\n", self.name);
+                }
+                cli_exit(0);
+            }
+
+            // Owed a value? The next token is it, whatever it looks like.
+            if (cur >= 0) {
+                values[cur] = tok;
+                cur = -1;
+                continue;
+            }
+
+            if (len(tok) > 1 && cli_strncmp(tok, "-", cast<ulong>(1)) == 0) {
+                let found <int> = -1;
+                for (let k <int> = 0; k < self.arg_count; k++) {
+                    if (cli_strcmp(tok, longs[k]) == 0 || cli_strcmp(tok, shorts[k]) == 0) {
+                        found = k;
+                        break;
+                    }
+                }
+                if (found < 0) {
+                    return Err::<Match>(cli_cat3("unknown option '", tok, "'"));
+                }
+                names[found] = self.args[found].name;
+                values[found] = "";
+                flags[found] = true;
+                if (self.args[found].takes_value) {
+                    if (t + 1 >= raw) {
+                        return Err::<Match>(cli_cat3("missing value for '", tok, "'"));
+                    }
+                    cur = found;
+                }
+                continue;
+            }
+
+            // A positional: the first is the subcommand when any are
+            // registered, and an unregistered word there is the error
+            // dispatch implies.
+            if (self.sub_count > 0 && len(sub_word) == 0) {
+                let is_sub <bool> = false;
+                for (let s <int> = 0; s < self.sub_count; s++) {
+                    if (cli_strcmp(self.subs[s].name, tok) == 0) {
+                        is_sub = true;
+                        break;
+                    }
+                }
+                if (!is_sub) {
+                    return Err::<Match>(cli_cat3("unknown command '", tok, "'"));
+                }
+                sub_word = tok;
+                continue;
+            }
+            if (pos_count >= 64) { continue; }
+            pos[pos_count] = tok;
+            pos_count = pos_count + 1;
+        }
+
+        // Bake the registered table: unseen slots are zero-wiped memory, so
+        // every unseen slot is answered from its registered default --
+        // argparse.fin's get_option convention, baked per-arg-index rather
+        // than per-call. A null name is also the len() used below: strings
+        // here are never null once the walk is over.
+        for (let d <int> = 0; d < self.arg_count; d++) {
+            if (names[d] == null) {
+                names[d] = self.args[d].name;
+            }
+            if (values[d] == null) {
+                values[d] = self.args[d].default;
+            }
+        }
+
+        let m <Match> = Match{
+            prog: self.name, sub: sub_word,
+              names: names, values: values, flags: flags,
+              count: self.arg_count,
+              pos: pos, pos_count: pos_count
+        };
+        return Ok::<Match>(m);
+    }
+}
+
+// env passthroughs, their own externs as the header records. `get_env_or`
+// answers `default` only for a NULL env entry: an explicitly empty entry
+// answers "" -- the empty string is a value.
+#[export]
+pub fun get_env_or(name: string, default_val: string) <string> {
+    let v <string> = cli_getenv(name);
+    if (v == null) { return default_val; }
+    return v;
+}
+
+// The one way out. No returning spelling exists or is offered: see header.
+#[export]
+pub fun exit_with(code: int) <noret> {
+    cli_exit(code);
+}
+
+}

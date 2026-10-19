@@ -1,0 +1,51 @@
+//@ normative
+//@ ok
+// Sync, exercised end to end: one worker thread, one bounded channel carrying
+// the value between them, one join -- the shape issue #56 ruled the module to
+// have. The worker runs on a real OS thread; the main thread blocks on
+// `recv` until the value is queued; `join` closes the timing hole before
+// main prints, so the single number on stdout is deterministic.
+//
+// The module's shape is the `stdio.fin` idiom extended to concurrency:
+// statics over libc (`pthread_create`/`pthread_join`/`pthread_mutex_*`),
+// `blame` on failure, no scheduler of this module's own. What the language
+// does NOT have yet steers the shape here, and each steering is a boundary
+// the module header records rather than a trick this file hides:
+//
+//   * Lambdas that capture are correct on the reference compiler but not
+//     yet lowered by the self-host stage, so the worker body is a named
+//     top-level function and the channel it must talk to is carried in a
+//     module-level slot instead of a capture.
+//   * A stack pointer stored into a global refuses with the escape rule
+//     ("cannot store the address of ... into storage that outlives the
+//     call"), which is exactly why the cross-thread channel is built with
+//     `Channel::shared` -- mutex initialized first, struct on the heap --
+//     rather than on the stack like the networking sample's sockets.
+//
+// Nothing is asserted about timing: `send` answering true and `recv`
+// dequeueing oldest-first is the contract; the us-scale sleep inside
+// `recv`'s wait loop is the module's starvation guard, not a race this
+// sample is exercising. Soundness_BundledStdlib pins the same surface on
+// both Linux and macOS. Windows refuses at link with the undefined
+// `sync_*` symbols it names; lib/std/sync.fin's header is why.
+import { Channel, Thread } from sync::std;
+import { Outcome } from outcome::std;
+
+// The cross-thread slot. A global without initializer is the form the
+// self-host stage accepts for module-level storage, and the escape rule
+// above is why it can only ever name heap storage.
+let g_ch <&Channel<int>>;
+
+fun worker() <noret> {
+    blame g_ch.send(7), "the worker could not send";
+}
+
+fun main() <noret> {
+    let slot <&Channel<int>> = Channel::<int>::shared(8);
+    g_ch = slot;
+    let t <Thread> = Thread::spawn(() <noret> => { worker(); });
+    let v <Outcome<int>> = g_ch.recv();
+    t.join();
+    blame v.unwrap_or(-1) == 7, "the channel lost the value";
+    printf("%d\n", v.unwrap_or(-1));
+}

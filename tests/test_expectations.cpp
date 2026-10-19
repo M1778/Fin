@@ -574,7 +574,43 @@ TEST(Census, EverySampleIsAnnotatedAndClassified) {
     // constructors and the four methods, checked `ok` as a module draft while
     // lib/std/outcome.fin ships the same API. Ratified slice, not accident;
     // the payload-enum alias it becomes later is a separate decision.
-    EXPECT_EQ(t.samples, 61)
+    // 61 -> 62: tests/samples/stdlib/log.fin arrives for issue #62 (stdlib/log):
+    // level/Logger/init/init_json/timestamps/debug/info/warn/error, the
+    // LOG_LEVEL filter, text and JSONL modes -- `ok` while lib/std/log.fin
+    // ships the same surface. The sample keeps stderr byte-deterministic by
+    // dispatching timestamps(false) first (lib/std/log.fin's reasons).
+    // 62 -> 63: tests/samples/stdlib/sync.fin arrives for issue #56
+    // (stdlib/sync): one worker thread and one bounded channel run end to end
+    // with `blame` guarding the sends and a blocking `recv` making the value
+    // deterministic -- `ok` while lib/std/sync.fin ships the same surface.
+    // The no-capture lambda and the module-level slot are the two boundaries
+    // the module header records (stage upvalues, the escape rule), not
+    // accidents this file hides.
+    // 63 -> 64: tests/samples/stdlib/mem.fin arrives for issue #51
+    // (stdlib/mem -- allocators as an interface): the byte arena and the
+    // slot pool run end to end with the meters checked along the way and
+    // the one shared `destroy()` freeing both, `ok` while lib/std/mem.fin
+    // ships the same surface. The issue's `arena.alloc::<int>(1024)`
+    // spelling is refused (`Method 'alloc' not found in type 'Arena'`), so
+    // the sample keeps to the routes all three compilers lower; the typed
+    // free-function routes are pinned reference-side in tests/test_mem.cpp
+    // (Soundness_Mem).
+    // 64 -> 65 on 2026-10-19: counted against the live tree while the
+    // remaining stdlib wave lanes still have their samples in flight;
+    // stdlib/cli.fin is theirs and its annotations belong to its agent.
+    // 65 -> 66 on 2026-10-19: tests/samples/stdlib/serde.fin arrives for
+    // issue #57 (the Encode/Decode contract). The contract's names resolve
+    // through the import a tool would write, the issue's own round trip
+    // (`encode_int(42)` -> "42" -> `Outcome` 42) runs both ways under
+    // `blame`, and the refused document line pins the rule that a decode
+    // answers `Err` naming the kind instead of blaming caller data.
+    // 66 -> 67 on 2026-10-19: tests/samples/stdlib/json.fin arrives for the
+    // same issue (the engine). Scalars, the `[int]` array pair, and the
+    // `{string, int}`/`{string, string}` prototype maps round-trip under
+    // `blame` with every printed byte shape (sorted key order, escape
+    // spellings, the leading-zero refusal wording) run under the
+    // byte-for-byte agreement harness on all three compilers.
+    EXPECT_EQ(t.samples, 67)
         << "the corpus is 51 samples. Sample code changes only by a ratified "
            "language decision (ADR 0008), so a different count is either such a "
            "decision — update this — or a file globbed in by accident";
@@ -627,7 +663,13 @@ TEST(Census, ThePassingSampleCountNeverFalls) {
     // floor without it being raised, and this file's `outcome.fin` sample
     // (issue #52, `//@ normative` `//@ ok`) is one of the seven. Re-measured
     // from the working tree with the module built and its run pins green.
-    constexpr int kFloor = 50;
+    // 50 -> 51 on 2026-10-19: issue #56's `sync.fin` sample (run on all three
+    // compilers, blocking `recv` for byte-determinism).
+    // 51 -> 53 on 2026-10-19: issue #57's `serde.fin` (the Encode/Decode
+    // contract) and `json.fin` (the JSON engine) samples reach `ok` on all
+    // three compilers; the floor keeps pace with these two only, per the
+    // raise-on-purpose mechanism above.
+    constexpr int kFloor = 53;
 
     const auto t = census();
     EXPECT_GE(t.ok, kFloor)

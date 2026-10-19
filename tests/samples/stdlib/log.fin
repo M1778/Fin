@@ -1,0 +1,57 @@
+//@ normative
+//@ ok
+// The log module: one shape for tool output — the four levels, a LOG_LEVEL
+// filter that blames on a bad value, text and JSONL modes, both by default to
+// stderr and never stdout (issue #62).
+//
+// WHY NOTHING HERE CARRIES A TIMESTAMP. `timestamps(false)` is this file's
+// first call, and it is deliberate rather than timid: the module emits an
+// rfc3339 wall-clock prefix by default (`time` #59 has landed, so the prefix
+// is part of the shape), and a wall-clock line is nondeterministic between
+// two compilers run one after another — the run-agreement suites compare a
+// normative-ok sample's stderr byte for byte across the C++ reference, both
+// stage compilers and every optimisation level. A prefix that races the
+// second boundary would fail those comparisons at random. The module keeps
+// the prefix as its default and this sample pins the deterministic half;
+// Soundness_Log in tests/test_stdlib.cpp pins the timestamped half.
+//
+// WHAT EACH LINE PROVES. The filter is rank-based: under `init(Level::Error())`
+// only the `error` call writes, and the three suppressed calls write nothing —
+// the `blame` on the count would catch a filter that inverted or a level that
+// leaked. The JSONL record is the finc-contract shape, kind first, message
+// next, and its escaping ("quote, \backslash, newline/tab, other controls") is
+// what keeps the JSONL grid one record per line.
+
+import { Level, init, init_json, timestamps, debug, info, warn, error } from log::std;
+
+fun main() <noret> {
+    timestamps(false);
+    blame Level::Debug().rank == 0;
+    blame Level::Info().rank == 1;
+    blame Level::Warn().rank == 2;
+    blame Level::Error().rank == 3;
+
+    blame true, "level order is the filter's whole contract";
+
+    // Error level: the three quieter levels write nothing.
+    init(Level::Error());
+    debug("suppressed");
+    info("suppressed");
+    warn("suppressed");
+    error("only this one emits");
+
+    // Warn level: warn and error cross the threshold.
+    init(Level::Warn());
+    warn("warn crosses");
+    error("error crosses");
+
+    // JSONL mode, same level. Text and JSON record shapes are both pinned by
+    // the ctest suite that runs this file; this line is the round-trip
+    // witness that both modes come from one `init`.
+    init_json(Level::Warn(), true);
+    info("suppressed in json too");
+    warn("escaped: \"quote\", \\backslash\\, tab	end");
+    error("{\"nested\":\"json\"}");
+
+    blame true;
+}

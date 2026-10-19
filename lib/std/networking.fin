@@ -44,6 +44,25 @@
 // Measured end to end, not merely type-checked: a test dials `127.0.0.1`,
 // sends, and reads the echo back (Soundness_Stdlib, Networking_*); the
 // loopback needs no network and no peer outside the test process.
+//
+// THE TCP NAMES OVER THE PLUMBING (2026-10-19, issue #58): the issue asked
+// for the names a newcomer already knows -- `TcpStream`, `TcpListener`,
+// explicit-count `read`/`write` like `File`'s, `close` -- alongside `Socket`
+// without retitling the underlying calls, so both layers are here. They are
+// thin by intent: every wrapper forwards to the plumbing above it, so the
+// one ABI-relevant judgment in this file stays exactly one.
+//
+//   * `resolve_localhost` is a named refusal, not a feature: `getaddrinfo`
+//     fills a struct whose lifetime the language cannot yet take, and a
+//     resolver behind a string-returning extern is a lie about who frees it.
+//     A hostname through `dial`/`TcpStream::connect` refuses with "cannot
+//     parse the address as a dotted quad" -- that message is the refusal.
+//   * No `Outcome` here. The issue allowed it for read/write retry paths
+//     only with an owner's note, and no note is in hand; byte counts stay
+//     byte counts, and failures stay `blame`, per the standing ruling.
+//   * No TLS, and the `http_get` stretch is honest about the 4 KB cap: a
+//     larger response stops at 4096 bytes, and the caller sees what was
+//     received, which `read_all`-style callers await a growing-buffer API.
 namespace std {
 
 #[export]
@@ -85,6 +104,26 @@ namespace std {
 #[export]
 #[llvm_name="inet_addr"]
 @define c_inet_addr(cp: string) <int>;
+
+// The pieces `http_get` composes with are not externs of this module's own:
+// a second `#[llvm_name="strcpy"]` in the crate is a link question the
+// stdlib settled once by owning each alias in the module that uses it
+// (`strings.fin`'s header), so the request is built and the answer bytes are
+// stringified through strings::std's `concat`/`from_chars`, and only the
+// length of a `read` answer is measured here, by the terminator
+// `recv_bytes` wrote.
+import { concat, from_chars, len } from strings::std;
+
+// The length of a `read` answer. `recv_bytes` writes the terminator at the
+// count it received, so the scan stops there; that terminator is the length
+// signal the array itself does not carry.
+priv fun blen(b: [char]) <int> {
+    let n <int> = 0;
+    while (b[n] != cast<char>(0)) {
+        n = n + 1;
+    }
+    return n;
+}
 
 #[export]
 // `sockaddr_in` is its sixteen bytes in an `[int, 4]`. Word 0 is the C struct's
@@ -215,6 +254,110 @@ pub struct Socket {
         }
         return c_close(self.fd) == 0;
     }
+}
+
+// The connection a caller lives with, named the way the issue and every
+// tutorial name it. Thin by intent: every method forwards to `Socket`'s
+// plumbing so the wire ABI stays judged in exactly one place, and the
+// ruling stands (`blame` on failure, blocking, dotted-quad only).
+#[export]
+pub struct TcpStream {
+    s <Socket>,
+
+      // Dials the dotted-quad `host` and blocks until connected. A hostname
+      // is not resolved: there is no resolver whose lifetime the language
+      // can hold, and the refusal is the same message `Socket::dial` names.
+      static fun connect(host: string, port: int) <TcpStream> {
+        return TcpStream{s: Socket::dial(host, port)};
+      }
+
+    // Sends `count` bytes, answering how many landed -- the explicit-count,
+    // explicit-answer style `File::write` has; a full send on a blocking
+    // socket answers `count`, a short one answers less, so the caller
+    // compares instead of guessing.
+    fun write(self: &TcpStream, text: string, count: int) <int> {
+        blame count >= 0, "a write count cannot be negative";
+        return c_send(self.s.fd, text, count, 0);
+    }
+
+    // Reads up to `cap` bytes into a fresh buffer and answers what arrived;
+    // the peer's half-close answers an empty array, as `recv_bytes` reads.
+    // Caller-owned: `delete` the array, like `File::read`'s.
+    fun read(self: &TcpStream, cap: int) <[char]> {
+        return self.s.recv_bytes(cap);
+    }
+
+    // Closes. Answers whether the descriptor went; the negative-fd
+    // convention `Socket` established stays.
+    fun close(self: &TcpStream) <bool> {
+        return self.s.shutdown();
+    }
+}
+
+// The listening side, as thin as the stream side. An accepted listener begets
+// a `TcpStream`; the wrapper holds the listening descriptor the same way.
+#[export]
+pub struct TcpListener {
+    s <Socket>,
+
+      // Binds the positive `port` (0 asks the kernel to choose) with a
+      // positive backlog. `local_port` reports the kernel's choice.
+      static fun bind(port: int, backlog: int) <TcpListener> {
+        return TcpListener{s: Socket::serve(port, backlog)};
+      }
+
+    // Takes one connection and hands it back as the stream callers
+    // read and write. The listener stays open for the next one.
+    fun accept(self: &TcpListener) <TcpStream> {
+        return TcpStream{s: self.s.accept_conn()};
+    }
+
+    // The port this listener is bound to, as `Socket::local_port` reports.
+    fun local_port(self: &TcpListener) <int> {
+        return self.s.local_port();
+    }
+
+    // Closes the listener; connections already accepted are unaffected.
+    fun close(self: &TcpListener) <bool> {
+        return self.s.shutdown();
+    }
+}
+
+// The stretch demo: one blocking HTTP/1.0 GET over this surface, bytes
+// capped at 4096 because the module has no growing-buffer API yet to offer
+// an uncapped answer. `host` is a dotted quad (the refusal above is why);
+// there is no TLS. The returned `string` is caller-owned heap; the scratch
+// arrays inside are abandoned to process exit, the same trade
+// `Socket::dial`'s `sockaddr` storage makes.
+#[export]
+pub fun http_get(host: string, port: int, path: string) <string> {
+    let srv <TcpStream> = TcpStream::connect(host, port);
+    let req <string> = concat(concat(concat(concat("GET ", path), " HTTP/1.0\r\nHost: "), host), "\r\n\r\n");
+    let nreq <int> = len(req);
+    let wrote <int> = srv.write(req, nreq);
+    blame wrote == nreq, "cannot send the request whole";
+    let resp <[char]> = new [char, 4097]{};
+    let total <int> = 0;
+    let stop <bool> = false;
+    while (total < 4096 && !stop) {
+        // The count below is at least 1 while the loop runs, so `read`'s
+        // positive-capacity rule holds on every call.
+        let got <[char]> = srv.read(4096 - total);
+        let rlen <int> = blen(got);
+        let i <int> = 0;
+        while (i < rlen) {
+            resp[total + i] = got[i];
+            i = i + 1;
+        }
+        total = total + rlen;
+        if (rlen == 0) {
+            // The peer's half-close, unchanged from `recv_bytes`' answer.
+            stop = true;
+        }
+    }
+    srv.close();
+    resp[total] = cast<char>(0);
+    return from_chars(resp, 0, total);
 }
 
 }

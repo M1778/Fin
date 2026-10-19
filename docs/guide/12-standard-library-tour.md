@@ -27,7 +27,8 @@ executable. The examples below mark those boundaries.
 | [operators](../../lib/std/operators.fin) | `Add`, `Equal`, `Index`, `IndexAssign`, other operator interfaces | Some declared operators have no expression grammar or use erased results |
 | [error](../../lib/std/error.fin) | `Error`, message/code accessors | Error values do not enable catchable exceptions |
 | [stdptr](../../lib/std/stdptr.fin) | `rptr<T>`, `wptr<T>`, `OwnershipError` | Incomplete execution/safety paths; no borrow checker |
-| [networking](../../lib/std/networking.fin) | Placeholder module | No networking implementation |
+| [networking](../../lib/std/networking.fin) | `Socket` (dial/serve/accept_conn/send_text/recv_bytes/local_port/shutdown), `TcpStream` (connect/write/read/close), `TcpListener` (bind/accept/local_port/close), `http_get` | connect/listen/accept/read/write/close run on loopback (the bundled sample ends to end plus pins in `Soundness_SyncNet`, echo and refusal and an against-test-peer `http_get`); explicit byte counts on `write`/`read`, failures `blame` and name the call; dotted-quad addresses only -- a hostname refuses as "cannot parse the address as a dotted quad", no TLS, `http_get` caps at 4096 bytes |
+| [sync](../../lib/std/sync.fin) | `Thread::spawn`/`join` over pthreads, `Mutex<T>` (create/lock/unlock), `Channel<T>` (create/shared/send/recv) | The bundled sample runs a worker thread and a blocking channel end to end on all three compilers (pins in `Soundness_SyncNet` keep a mutex counter at a deterministic `2000` and channel FIFO/refusal); `recv` answers `Outcome<T>` whose `Err` arm is closed in v0; captures work on the reference compiler only, Windows links refuse with the named `sync_*` symbols, self-deadlock is undetected in v0 |
 | [time](../../lib/std/time.fin) | `now`, `sleep_sec`/`sleep_ms`, `diff_sec`, `Instant`, `Duration`, `format_rfc3339`/`parse_rfc3339` | `Instant` is a monotonic ns clock (Linux id 1, macOS id 6); RFC3339 is UTC `YYYY-MM-DDTHH:MM:SSZ` with caller-owned storage freed by `free_rfc3339`; Windows has no `clock_gettime` |
 | [ascii](../../lib/std/ascii.fin) | `is_alpha`, `is_digit`, classification predicates, `to_upper`/`to_lower`, `digit_value`/`hex_value` | Pure predicates build and run (`is_alpha('a')`, `is_digit('3')` probed live); no allocation, no cleanup |
 | [bits](../../lib/std/bits.fin) | `bit_and`/`bit_or`/`bit_xor`/`bit_not`, get/set/clear/toggle, `popcount`, `bit_length`, leading/trailing zeros, `is_power_of_two`, rotations | Arithmetic lowering builds and runs (`bit_and(6, 3) == 2`, `popcount(7) == 3` probed live); the grammar has no `&`/`|`/`^` operators, so use these helpers |
@@ -39,7 +40,9 @@ executable. The examples below mark those boundaries.
 | [deque](../../lib/std/deque.fin) | `Deque<T>`, `Queue<T>`, `Stack<T>`, push/pop at both ends, `get`, `len`, `is_empty` | `push_back`/`push_front`/`pop_back`/`pop_front`/`get` build and run (int deque probed live); no buffer destructor, process exit reclaims demo storage |
 | [path](../../lib/std/path.fin) | `join`, `basename`, `dirname`, `extname`, `stem`, `normalize`, `is_absolute`/`is_relative`, `free_path` | `join`/`basename`/`stem`/`normalize` build and run (`normalize("/a/./b/../c") == "/a/c"` probed live); results are caller-owned, release with `free_path` |
 | [env](../../lib/std/env.fin) | `getenv`/`setenv` externals, `get_env`, `has_env`, `set_env`, `unset_env` | `set_env(name, value)`, `get_env`, and `has_env` build and run (two-argument `set_env` probed live); consumed by `finc/driver` |
+| [log](../../lib/std/log.fin) | `Level` (`Debug`/`Info`/`Warn`/`Error` statics with `.rank`), `Logger`, `init`/`init_json`, `timestamps`, `debug`/`info`/`warn`/`error` | All four levels filter and both modes build and run (`LOG_LEVEL=debug` no-init emit and `init(Level::Error())` silence probed live); `LOG_LEVEL` outside `debug|info|warn|error` blames naming the value; everything goes to stderr and never stdout (pins in `Soundness_Log`); a plain `enum Level` refuses in codegen, so the members are statics (recorded in the module header) |
 | [process](../../lib/std/process.fin) | `run_command`, `exec_command`, `ProcessResult`, `is_success`, `free_process_result` | `run_command("true") == 0` and `exec_command("echo hi")` build and run; release results with `free_process_result`; consumed by `finc/driver` |
+| [mem](../../lib/std/mem.fin) | `Allocator`, `Arena`, `Pool<T>`, `LibcAlloc`, `NullAlloc`, typed routes `arena_block`/`mem_release`, raw routes `mem_malloc_bytes`/`mem_grow_bytes`/`mem_free_bytes`, `null_alloc` | Byte arena, slot pool, libc wrapper, and typed routes build and run (`arena_block::<int>(&a, 1024)` + `mem_release::<int>`, `arena_bytes` bump, pool recycle probed live); the issue's `arena.alloc::<int>` member spelling is refused (`Method 'alloc' not found in type 'Arena'`) and typed routes plus interface-value dispatch refuse at stage codegen, so all-compiler programs keep to the concrete structs; every handout names its owner (arena slab dies with `destroy()`, fresh blocks are caller-owned, release with `mem_release`); no alignment, no byte-to-typed recast |
 | [testing](../../lib/std/testing.fin) | `assert_true`/`assert_false`, `assert_eq/ne_*`, `assert_null`/`assert_not_null` | Assertions build and run (`assert_eq_int(1 + 1, 2, ...)` probed live); failures blame, they do not raise catchable errors |
 | [token](../../lib/std/token.fin) | `tok_*()`, `kw_*()`, `is_keyword`, `token_name`, `Token` | Kind helpers and `Token` values build and run (`tok_ident() == 2`, `token_name` probed live); use the `tok_*()`/`kw_*()` functions because the `TOKEN_*`/`KW_*` consts resolve but are refused in codegen (`the name 'TOKEN_EOF' is not lowered yet`); consumed by `finc/driver` and `finc/parser` |
 | [scanner](../../lib/std/scanner.fin) | `Scanner`, `new_scanner`, `free_scanner`, `peek`/`peek_next`/`advance` | `new_scanner` with `peek` builds and runs (`peek("let x = 1;") == 'l'` probed live); release with `free_scanner`; consumed by `finc/driver` |
@@ -53,6 +56,9 @@ executable. The examples below mark those boundaries.
 | [ir](../../lib/std/ir.fin) | `ir_*()` opcodes, `ir_opcode_name`, `IrInstruction`, `IrBlock`, `IrFunction`, `make_ir_*`, `new_ir_function`, `free_ir_function` | Opcode helpers with `make_ir_const_int`/`make_ir_binop` build and run; no `finc/` consumer yet |
 | [argparse](../../lib/std/argparse.fin) | `FlagDef`, `OptionDef`, `ArgParser`, `new/free_arg_parser`, `add_flag`/`add_option`, `parse`, `get_flag`/`get_option`, positionals | `new_arg_parser` with `add_flag`, `parse`, and `get_flag` builds and runs; flag spelling is literal (`verbose`, not `--verbose`) and unmatched dash-args fail `parse`; release with `free_arg_parser` |
 | [fs](../../lib/std/fs.fin) | `file_exists`, `remove_file`, `file_size`, `read_to_string`, `write_string`, `append_string`, `free_file_content` | `write_string` with `read_to_string` and `remove_file` builds and runs (round-trip probed live); `read_to_string` is nullable, denullify with `?`; release with `free_file_content`; consumed by `finc/driver` and `finc/checker`; deep proof owned by #61 |
+| [cli](../../lib/std/cli.fin) | `Arg`, `Command` (`create`/`arg`/`sub`), `Match` (`get`/`is_set`/`positional`), `free_match`, `parse_args()`, `get_env_or`, `exit_with` | The bundled sample parses, defaults, and dispatches a subcommand end to end; help and version print to stdout and `exit(0)` inside `parse_args`; unknown options and missing values answer `Err` naming the token; `parse_args()` takes no argv (it reads `/proc/self/cmdline`), Linux-only, 4 KiB cap; subcommand option scoping is v0-off (the root's option table parses all args); the issue's flat `[Command]` field refuses in codegen, so subs live in `[&Command]` (recorded in the module header) |
+| [serde](../../lib/std/serde.fin) | `Encode`, `Decode` interfaces | The contract resolves through the import a tool writes and `Outcome<Self>` answers inside the interface body; runtime dispatch flows through json::std's free `decode_T` spelling because interface-method dispatch does not lower yet (`Derive` is #53's); the bundled sample pins the issue's own round trip and the refusal-is-`Err` rule |
+| [json](../../lib/std/json.fin) | `json_encode/decode_int/str/bool/float`, `json_encode/decode_int_array`, `json_encode/decode_intmap/strmap`, `json_escape`, `json_join2/3/4` | All scalar round-trips, the `[int]` pair, and the two prototype maps build and run (sorted key order pinned byte-exact in `Soundness_Json` and the bundled sample); refusals answer `Err` naming the kind; every returned string is fresh, release with `free_str`; v0 is int32 ints, ASCII-only `\u` escapes, no UTF-8 encoding, and the int-array decode caps at 64 elements (all recorded in the module header) |
 
 Self-host relevance: `finc/driver` consumes `token`, `scanner`, `ast`, `printer`,
 `buffer`, `fs`, `process`, and `env`; `finc/parser` consumes `token`, `parse`,
@@ -223,6 +229,91 @@ FFI operation is often the smallest executable path until those imports lower.
 `unwrap_or`, `expect`, `select`, `is_ok`, and `is_err`. The methods exist, but
 payload enum code generation is still missing. Use an explicit status and concrete
 data when recoverable errors must run today.
+
+## Threads and channels
+
+`sync::std` is the one place the library puts concurrency: `Thread::spawn(body)`
+starts a real OS thread over `pthread_create` (the body is a `fn() => noret`
+passed as the start routine; state crosses by capture on the reference
+compiler, or through shared storage a caller arranges), and `join` closes the
+timing hole. A missed spawn blames rather than returning a broken handle.
+
+The bundled sample `tests/samples/stdlib/sync.fin` runs a worker thread and a
+bounded channel end to end: the worker sends through a module-level channel
+slot, the main thread blocks on `recv` until the value arrives, `join` closes
+the hole, and stdout is exactly `7` on every order of events -- and on all
+three compilers, which the corpus harnesses re-check on every sample change.
+
+Cross-thread state needs care the language does not take for you: a stack
+pointer stored into a global refuses with the escape rule, so shared structs
+are built on the heap (`Channel::shared` initializes the mutex, then stores
+the struct); a `Mutex<T>` guards its value behind an explicit `lock`/`unlock`
+pair; and `Channel<T>` is bounded and blocking (`send` answers `false` when
+full, `recv` waits). Boundaries worth knowing before designing around it:
+lambdas that capture are reference-compiler-only until the self-host stage
+gains upvalues; a thread that locks its own mutex waits forever -- no
+try-lock, no detection in v0; lock metadata is never destroyed; and there is
+no thread-safe `delete`.
+
+## Networking
+
+`networking::std` is TCP over IPv4, blocking, through the C library's socket
+calls. Dial with `TcpStream::connect(host, port)` -- `host` is a dotted-quad
+string, `port` a positive int -- listen with `TcpListener::bind(port,
+backlog)`, accept with `accept`, and move bytes with `write`/`read`, both
+explicit byte counts like `File`'s. Failures `blame` and name the call:
+connection refused, cannot bind, cannot parse the address. `http_get` is the
+newcomer's demo of the whole surface: blocking HTTP/1.0 over raw sockets, no
+TLS, capped at 4096 bytes.
+
+The bundled sample `tests/samples/stdlib/networking.fin` builds an ephemeral
+listener on loopback, dials it, sends four bytes, and echoes them back along
+with the kernel-chosen port; `Soundness_SyncNet` runs the same shape plus a
+connect-refusal and a full `http_get` against an in-test peer.
+
+```fin fragment
+import { TcpStream } from networking::std;
+```
+
+## Serialization and JSON
+
+`serde::std` holds the contract (issue #57): `Encode`/`Decode` are interfaces,
+the decode side answers `Outcome` and refuses bad documents with an `Err`
+naming the kind -- never a `blame`, because the caller's data is user data.
+`json::std` is the engine answering the contract today, through the
+free-function spelling the issue itself prescribes (`decode_T` per concrete
+type), because an `Outcome<Self>`-returning interface method does not dispatch
+yet; `Derive` is issue #53's work and serde.fin's header records the gap.
+
+The scalars, the `[int]` array pair, and the two prototype maps
+(`{string, int}`, `{string, string}`) round-trip on all three compilers. Map
+keys encode in sorted order so the same map answers the same bytes every run,
+and every returned string is fresh memory the caller frees with `free_str`:
+
+```fin
+import { json_encode_int, json_decode_int } from json::std;
+import { free_str } from strings::std;
+
+fun main() <noret> {
+    let text <string> = json_encode_int(42);
+    printf("%s\n", text);
+    let back <auto> = json_decode_int(text);
+    printf("%d\n", back.unwrap_or(-1));
+    free_str(text);
+}
+```
+
+```output
+42
+42
+```
+
+Decode limits worth knowing before designing around them: integers are int32
+with JSON grammar (no leading zeros, no `+`); `\u` escapes read ASCII only
+(`\u00e9` refuses, no UTF-8 encoding in v0); and the `[int]` decode caps at 64
+elements while the encoder takes any count. The bundled sample
+`tests/samples/stdlib/json.fin` pins every printed byte shape under the
+run-agreement harness; `tests/samples/stdlib/serde.fin` pins the contract.
 
 ## Smart pointers
 

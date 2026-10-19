@@ -1,0 +1,256 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Sync: threads, mutexes, and bounded channels over the C library's pthreads.
+//
+// There was no thread, no mutex, and no channel in the corpus, so nothing
+// server-shaped could compile. Issue #56 ruled the shape before this file
+// landed: bind pthreads through `@define` externs, thin and honest -- no
+// runtime thread of this module's own, no scheduler, no green threads. The
+// judgment it answers is the one `networking.fin` records: `stdio.fin`'s
+// `File` and `system`-style statics over libc already prove the "simplest
+// thing that works" idiom, and pthreads is libc-shaped on every platform a
+// C driver links.
+//
+// The four questions, answered:
+//
+//   * Platform. Linux and macOS run this module; both keep pthreads one
+//     library call away (glibc 2.34+ carries `pthread_create` in libc
+//     proper, macOS in libSystem), so the externs here link with NO link
+//     flag the driver does not already use. Windows is namedly
+//     unimplemented, never silently: the `sync_*` externs below do not
+//     resolve there, so a Windows link refuses with the undefined symbols
+//     it names, and this header is why. A runtime platform gate exists in
+//     no language construct yet, which is why the refusal lives where the
+//     linker is.
+//   * Launch. `Thread::spawn(body: fn() => noret)` hands `body` straight
+//     to `pthread_create` (as the start routine, with a null argument);
+//     `join` is `pthread_join` with no result taken. A spawn failure
+//     blames, as every library call here does. State crosses into the body
+//     only how the caller carries it: captures of plain values work on the
+//     reference compiler, and a channel shared with the worker is carried
+//     through `Channel::shared` into a module-level slot -- the sample
+//     tests/samples/stdlib/sync.fin shows both the working path and the
+//     boundary note below.
+//   * Failure. The same three answers every libc-backed module in this
+//     library already gives: `blame` with a message that names the call.
+//     No `Outcome` on the launch path: a refused spawn is not a value the
+//     caller can mean anything by.
+//   * Channel. Bounded, blocking, and owned by no scheduler: `send` answers
+//     `false` when the buffer is full (the caller may retry, drop, or
+//     blame), `recv` waits until a value arrives -- the wait holds the
+//     lock only between probes, so a producer is never starved by a
+//     waiter. `recv` answers `Outcome<T>` because issue #52 supplied the
+//     only `Outcome` that lowers today; in v0 the loop has no close state,
+//     so what `recv` carries home is always `Ok`. The `Err` arm is
+//     reserved for a close operation and is not reachable by any call in
+//     this file.
+//
+// GAPS THIS MODULE STATES ABOUT ITSELF (each is a boundary, not a todo):
+//
+//   * Capturing lambdas are correct on the reference compiler (a captured
+//     value is snapshotted at construction) and are NOT yet lowered by the
+//     self-host stage: the stage's lambda body reads captured names as
+//     uninitialized storage, and a call to a captured function value
+//     inside a lambda misses codegen on the stage. The sample therefore
+//     carries worker state in a global slot instead of a capture; a
+//     capture-heavy body is reference-compiler-only until the stage gains
+//     real upvalues.
+//   * `Mutex<T>` has no poisoning semantics in v0. A thread that locks a
+//     mutex it already holds does not abort, is not detected, and does not
+//     blame: `pthread_mutex_lock` never returns for it, and there is no
+//     try-lock here to observe the difference. The issue's "deadlock =
+//     abort" contract is therefore unimplemented in v0, named here rather
+//     than faked with a hang dressed as an abort.
+//   * Threads share the heap, and `delete` across them is the caller's
+//     problem: this module holds no ownership record. Corners arrive when
+//     `mem` grows an arena that answers them (issue #51); until then a
+//     user who frees a buffer another thread may still read is writing a
+//     use-after-free by hand.
+//   * One `pthread_mutex_t` per `Mutex`/`Channel` is allocated up front and
+//     never destroyed in v0: the lock metadata leaks until process exit,
+//     and the caller frees only their own arrays and the struct storage
+//     itself. (`shared` returns both the struct and its arrays on the
+//     heap; a caller who wants them out lives by `delete`.)
+//   * `recv` on a channel nobody sends into waits forever. There is no
+//     timeout, no close, and no way for a second waiter and a producer to
+//     disagree about wakeup order because there is no arbitration beyond
+//     the one mutex.
+//
+// The ABI notes the wire needs: `pthread_t` is a pointer-sized handle on
+// every platform these externs resolve on, so it is an `&void` as both the
+// out-slot `pthread_create` writes and the value `pthread_join` takes.
+// `pthread_mutex_t` is a machine word at 40 bytes on Linux and 64 on
+// macOS, so it is stored as a `[long]` of 8 slots (64 bytes) -- the size
+// both platforms fit -- and the extern takes its address. `alarm`, no:
+// `usleep` was dropped in favor of the probes' interval, since `pthread`
+// itself needs no signal machinery.
+// `Outcome` is the result type `Channel::recv` answers; the struct this file
+// constructs lives in outcome::std (issue #52), and the import is what makes
+// the `Outcome{ok: ...}` literal in `recv` resolve.
+import { Outcome } from outcome::std;
+
+namespace std {
+
+#[export]
+#[llvm_name="pthread_create"]
+@define sync_thread_create(out: &void, attr: &void, body: fn() => noret, arg: &void) <int>;
+
+#[export]
+#[llvm_name="pthread_join"]
+@define sync_thread_join(t: &void, ret: &void) <int>;
+
+#[export]
+#[llvm_name="pthread_mutex_init"]
+@define sync_mutex_init(m: &void, attr: &void) <int>;
+
+#[export]
+#[llvm_name="pthread_mutex_lock"]
+@define sync_mutex_lock(m: &void) <int>;
+
+#[export]
+#[llvm_name="pthread_mutex_unlock"]
+@define sync_mutex_unlock(m: &void) <int>;
+
+#[export]
+#[llvm_name="usleep"]
+@define sync_usleep(usecs: uint) <int>;
+
+// One OS thread, identified by the handle `pthread_create` wrote into the
+// slot at spawn. The struct is a value; copies of it name the same thread,
+// which is fine until two of them `join` -- pthread gives that pair an
+// undefined termination, so a `Thread` is handed to exactly one joiner,
+// the way a moved-from `File` is expected to stay closed.
+#[export]
+pub struct Thread {
+    h <&void>,
+
+      // Launches `body` on a new OS thread and blames instead of returning a
+      // broken handle if pthread refuses. The body is carried as the
+      // start routine itself with no argument: state it needs arrives
+      // through a capture (reference compiler, snapshot semantics) or
+      // through shared storage of the caller's own arranging.
+      static fun spawn(body: fn() => noret) <Thread> {
+        let h <&void> = null;
+        let rc <int> = sync_thread_create(&h, null, body, null);
+        blame rc == 0, "cannot spawn a thread";
+        return Thread{h: h};
+      }
+
+    // Blocks until the thread's body has returned. No result is taken: the
+    // language has no out-parameter, so a body that produces a value sends
+    // it through shared storage (a channel, a mutex-guarded variable) and
+    // `join` only closes the timing hole after it.
+    fun join(self: &Thread) <noret> {
+        sync_thread_join(self.h, null);
+    }
+}
+
+// A mutex and the value it guards. The lock is a real `pthread_mutex_t`
+// (non-recursive); the value is a plain field, so `lock` hands out its
+// address and the guard survives only as long as the unlocked caller
+// releases -- the compiler records no obligation.
+//
+// v0 has no poisoning semantics: a panic under one lock's protection is
+// `blame`, which unwinds nothing, and the mutex outlives the aborted
+// process only because nothing outlives an aborted process.
+#[export]
+pub struct Mutex<T> {
+    m <[long]>,
+      v <T>,
+
+      // Builds a mutex initialized in the unlocked state around `initial`.
+      static fun create(initial: T) <Mutex<T>> {
+        let m <[long]> = init_lock();
+        return Mutex{m: m, v: initial};
+      }
+
+    // Takes the lock and answers the guarded value's address. Between
+    // `lock` and the matching `unlock` the holder owns the value alone.
+    fun lock(self: &Mutex<T>) <&T> {
+        sync_mutex_lock(&self.m[0]);
+        return &self.v;
+    }
+
+    fun unlock(self: &Mutex<T>) <noret> {
+        sync_mutex_unlock(&self.m[0]);
+    }
+}
+
+// A bounded channel: a locked ring of results. `send` refuses (false)
+// when the buffer is at capacity; `recv` waits for a value. Both take the
+// same mutex for a very short span, and the recv loop drops it around its
+// sleep so a sleeping waiter cannot hold the producer out.
+#[export]
+pub struct Channel<T> {
+    a <[T]>,
+      cap <int>,
+      c <int>,
+      m <[long]>,
+
+      // Builds a channel of capacity `cap` whose storage the returned
+      // value holds. For a channel two threads use, it is the wrong form:
+      // a struct copy across the spawn would fork the counters, so the
+      // cross-thread path is `shared` below.
+      static fun create(cap: int) <Channel<T>> {
+        blame cap > 0, "a channel capacity is positive";
+        return Channel{a: new [T, cap]{}, cap: cap, c: 0, m: init_lock()};
+      }
+
+    // `create` on the heap: the mutex initializes before the struct is
+    // stored, and the pointer outlives any stack frame, which is what lets
+    // a module-level slot (a global) name it from both threads. Storage is
+    // caller-owned: `delete` the struct and its arrays when done.
+    static fun shared(cap: int) <&Channel<T>> {
+        blame cap > 0, "a channel capacity is positive";
+        let m <[long]> = init_lock();
+        return new Channel{a: new [T, cap]{}, cap: cap, c: 0, m: m};
+    }
+
+    // Enqueues `v`, answering whether it landed. A full buffer refuses as
+    // `false` -- the caller's choice is to retry, drop, or blame; the
+    // module does not block the sender, so a producer whose consumer keeps
+    // up makes no promises here.
+    fun send(self: &Channel<T>, v: T) <bool> {
+        sync_mutex_lock(&self.m[0]);
+        let sent <bool> = self.c < self.cap;
+        if (sent) {
+            self.a[self.c] = v;
+            self.c = self.c + 1;
+        }
+        sync_mutex_unlock(&self.m[0]);
+        return sent;
+    }
+
+    // Waits (dropping the lock around each probe) until a value is queued,
+    // then dequeues it oldest-first and answers it as `Ok`. There is no
+    // close in v0, so the `Err` arm of this `Outcome` is not produced by
+    // any path in this file.
+    fun recv(self: &Channel<T>) <Outcome<T>> {
+        sync_mutex_lock(&self.m[0]);
+        while (self.c == 0) {
+            sync_mutex_unlock(&self.m[0]);
+            sync_usleep(50);
+            sync_mutex_lock(&self.m[0]);
+        }
+        let first <T> = self.a[0];
+        let i <int> = 1;
+        while (i < self.c) {
+            self.a[i - 1] = self.a[i];
+            i = i + 1;
+        }
+        self.c = self.c - 1;
+        sync_mutex_unlock(&self.m[0]);
+        return Outcome{ok: true, value: first, message: ""};
+    }
+}
+
+// The one allocation the two structs above share: a mutex as a `[long]` of
+// eight slots, the width both Linux (40 bytes) and macOS (64) fit, with
+// `pthread_mutex_init` default-attributes. `null` attributes is the default
+// initializer and this file says so by passing it.
+fun init_lock() <[long]> {
+    let m <[long]> = new [long, 8]{};
+    sync_mutex_init(&m[0], null);
+    return m;
+}
+
+}

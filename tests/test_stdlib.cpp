@@ -1060,7 +1060,8 @@ TEST(Soundness_BundledStdlib, EveryModuleChecksCleanThroughAnImport) {
     // to be clean by the route a program actually uses.
     for (const char* module : {"error", "collection", "hashmap", "types", "typing",
                                "enums", "operators", "stdptr", "stdio", "strings",
-                               "math", "networking", "outcome"}) {
+                               "math", "networking", "outcome", "log",
+                               "cli", "serde", "json"}) {
         const std::string err =
             bundledErr(std::string("import ") + module + ";\nfun main() <noret> {}\n");
         EXPECT_EQ(errorCount(err), 0u)
@@ -1301,6 +1302,433 @@ TEST(Soundness_Outcome, AConstructorArgumentIsChecked) {
         << "the generic constructor call must keep being checked:\n"
         << err;
 }
+
+// ---------------------------------------------------------------------------
+// Log, the one shape for tool output (issue #62).
+//
+// `Level`/`Logger` are the issue's names held on the spellings that lower today
+// (lib/std/log.fin's header records why the enum form refused), and every
+// non-surface fact the module states is pinned as a run: the filter's four
+// ranks, the `LOG_LEVEL` override, the blame with the value for an unparseable
+// level, the text shape on stderr and never on stdout, the JSONL record with
+// the finc contract's kind-first key style, and the escaping that keeps the
+// grid one record per line.
+//
+// The runner here captures the two streams separately because the module's
+// stream discipline (stderr, never stdout) IS the shape, and `buildAndRun`
+// above folds both into one file. `env` follows `runFinc`'s env shape so the
+// two entry points agree on how a child's shell looks.
+//
+// Timestamped lines vary with the clock, so the pins that assert a line's
+// contents dispatch `timestamps(false)` first and the default prefix is
+// asserted by contains rather than by equality.
+
+namespace {
+
+struct RunSplit {
+    std::string out;
+    std::string err;
+    bool failed = false;   // didn't compile, or the run died
+};
+
+// Build `code` against the bundle with no library flags, run it with `env`
+// additions, and return the two streams separately. `failed` keeps the
+// "compile failed:"-style diagnostic convention of `buildAndRun` above, with
+// the reason in `err`.
+RunSplit buildAndRunSplit(const std::string& code,
+                          const std::vector<std::pair<std::string, std::string>>& env) {
+    RunSplit r;
+    Src src(code);
+    const fs::path exe = uniqueTempPath("fin_stdlib_exe");
+    const fs::path outPath = uniqueTempPath("fin_stdlib_out");
+    const fs::path errPath = uniqueTempPath("fin_stdlib_err");
+    const FincRun c = runFinc({src.str(), "-o", exe.string()}, {{"FIN_LIBS", ""}});
+    if (c.exitCode != 0 || !fs::exists(exe)) {
+        r.err = "compile failed: " + stripAnsi(c.err);
+        r.failed = true;
+        return r;
+    }
+    const int status = fin::runProcess({exe.string()}, outPath.string(), errPath.string(), env);
+    r.out = readProcessOutput(outPath.string());
+    r.err = readProcessOutput(errPath.string());
+    std::error_code ec;
+    fs::remove(exe, ec);
+    fs::remove(outPath, ec);
+    fs::remove(errPath, ec);
+    if (status != 0) r.failed = true;
+    return r;
+}
+
+} // namespace
+
+TEST(Soundness_Log, TheSurfaceResolves) {
+    // Every name the issue lists, at every shape: the type with its rank field
+    // and four member builders, `Logger` with its fields, both init rooms, the
+    // switch and the four free functions. `Level::Warn()` is the member-spelling
+    // substitute the module header documents; the negative probes below are what
+    // keep the positive one from passing against a catch-all.
+    const std::string err = bundledErr(program(
+        "import { Level, Logger, init, init_json, timestamps, debug, info, warn, error } from log::std;\n",
+        "  let lvl <auto> = Level::Warn();\n"
+        "  let lg <Logger> = Logger{level: Level::Info(), json: false};\n"
+        "  let r <int> = lvl.rank;\n"
+        "  let j <bool> = lg.json;\n"
+        "  init(Level::Error());\n"
+        "  init_json(Level::Warn(), true);\n"
+        "  timestamps(false);\n"
+        "  debug(\"d\"); info(\"i\"); warn(\"w\"); error(\"e\");\n"));
+    EXPECT_EQ(errorCount(err), 0u)
+        << "Log's surface stopped resolving. The emission body lives in the module,\n"
+           "so a failure here is an import, a declaration, or the env plumbing:\n"
+        << err;
+
+    // A static that took an argument would pass the positive probe above.
+    const std::string arity = bundledErr(program(
+        "import { Level } from log::std;\n",
+        "  let bad <auto> = Level::Warn(1);\n"));
+    EXPECT_NE(errorCount(arity), 0u) << arity;
+
+    // And `.rank` is an int, so an `info` that gained a usefulness parameter or
+    // a rank that became a string both show here.
+    const std::string typed = bundledErr(program(
+        "import { Level } from log::std;\n",
+        "  let s <string> = Level::Warn().rank;\n"));
+    EXPECT_NE(typed.find("expected 'string', got 'int'"), std::string::npos) << typed;
+}
+
+#ifdef FIN_TESTS_HAVE_BACKEND
+
+TEST(Soundness_Log, TextModeEmitsToStderrAndNeverToStdout) {
+    // The stream-discipline half of the issue's acceptance ("mirror finc's
+    // stdout-reserved rule"): the lines land on fd 2 with the padded label and
+    // the message, stdout stays empty, and a debug line under the default
+    // (info) filter writes nothing at all.
+    const RunSplit r = buildAndRunSplit(
+        "import { Level, timestamps, init, debug, info, warn, error } from log::std;\n"
+        "fun main() <noret> {\n"
+        "    timestamps(false);\n"
+        "    init(Level::Info());\n"
+        "    debug(\"hidden\");\n"
+        "    info(\"the info line\");\n"
+        "    warn(\"the warn line\");\n"
+        "    error(\"the error line\");\n"
+        "}\n", {});
+    ASSERT_FALSE(r.failed) << r.err;
+    EXPECT_EQ(r.out, "") << "stdout is reserved; log lines go to stderr:\n" << r.out;
+    EXPECT_NE(r.err.find("[INFO ] the info line"), std::string::npos) << r.err;
+    EXPECT_NE(r.err.find("[WARN ] the warn line"), std::string::npos) << r.err;
+    EXPECT_NE(r.err.find("[ERROR] the error line"), std::string::npos) << r.err;
+    EXPECT_EQ(r.err.find("hidden"), std::string::npos)
+        << "debug under the info filter must stay unsaid:\n" << r.err;
+}
+
+TEST(Soundness_Log, TheFilterRanksAndTheEnvOverrideWins) {
+    // The rank order, held as runs: at `init(Level::Error())` only the error
+    // call emits; at `LOG_LEVEL=debug` with no init at all, the debug call
+    // does — which pins both the default-resolve path and the filter — and at
+    // `LOG_LEVEL=info` with `init(Level::Error())`, the info line gets through.
+    // Three regimes, the reason `LOG_LEVEL` exists at all.
+    const RunSplit silent = buildAndRunSplit(
+        "import { Level, timestamps, init, debug, info, warn, error } from log::std;\n"
+        "fun main() <noret> {\n"
+        "    timestamps(false);\n"
+        "    init(Level::Error());\n"
+        "    debug(\"d\"); info(\"i\"); warn(\"w\"); error(\"only error\");\n"
+        "}\n", {});
+    ASSERT_FALSE(silent.failed) << silent.err;
+    EXPECT_EQ(silent.out, "") << silent.out;
+    EXPECT_EQ(silent.err.find("d"), std::string::npos) << silent.err;
+    EXPECT_EQ(silent.err.find("i"), std::string::npos) << silent.err;
+    EXPECT_EQ(silent.err.find("w"), std::string::npos) << silent.err;
+    EXPECT_NE(silent.err.find("only error"), std::string::npos) << silent.err;
+
+    const RunSplit chatty = buildAndRunSplit(
+        "import { timestamps, debug, info } from log::std;\n"
+        "fun main() <noret> {\n"
+        "    timestamps(false);\n"
+        "    debug(\"from the debug level\");\n"
+        "    info(\"from the info level\");\n"
+        "}\n", {{"LOG_LEVEL", "debug"}});
+    ASSERT_FALSE(chatty.failed) << chatty.err;
+    EXPECT_NE(chatty.err.find("from the debug level"), std::string::npos) << chatty.err;
+    EXPECT_NE(chatty.err.find("from the info level"), std::string::npos) << chatty.err;
+
+    const RunSplit overridden = buildAndRunSplit(
+        "import { Level, timestamps, init, info, error } from log::std;\n"
+        "fun main() <noret> {\n"
+        "    timestamps(false);\n"
+        "    init(Level::Error());\n"
+        "    info(\"kept\");\n"
+        "    error(\"kept too\");\n"
+        "}\n", {{"LOG_LEVEL", "info"}});
+    ASSERT_FALSE(overridden.failed) << overridden.err;
+    EXPECT_NE(overridden.err.find("kept"), std::string::npos) << overridden.err;
+}
+
+TEST(Soundness_Log, ABadLogLevelBlamesAndNamesTheValue) {
+    // `debug|info|warn|error`, and a bad value aborts with the value in the
+    // message — the issue's "never silent" rule as a run. The abort happens at
+    // the first emit unless `init` came first, so both spells are pinned.
+    for (const char* body : {
+             "import { info } from log::std;\n"
+             "fun main() <noret> { info(\"x\"); }\n",
+             "import { Level, init } from log::std;\n"
+             "fun main() <noret> { init(Level::Info()); }\n",
+         }) {
+        const RunSplit r = buildAndRunSplit(body, {{"LOG_LEVEL", "verbose"}});
+        EXPECT_TRUE(r.failed)
+            << "every route to a bad LOG_LEVEL must stop the program:\n" << r.err;
+        EXPECT_NE(r.err.find("assertion failed: LOG_LEVEL: expected one of"), std::string::npos)
+            << r.err;
+        EXPECT_NE(r.err.find("got 'verbose'"), std::string::npos)
+            << "the message names the value:\n" << r.err;
+    }
+}
+
+TEST(Soundness_Log, JsonlModeEmitsTheFincContractShape) {
+    // kind first, message next, the escaped message, and the record closed —
+    // with the finc-style prefix intact; the timestamp, when it rides, is an
+    // appended field precisely so this prefix stays the contract's own. The
+    // stdout assertion is the same reserve rule, and the quote/backslash
+    // escaping is what keeps the JSONL grid one record per line.
+    const RunSplit r = buildAndRunSplit(
+        "import { Level, timestamps, init_json, info, warn, error } from log::std;\n"
+        "fun main() <noret> {\n"
+        "    timestamps(false);\n"
+        "    init_json(Level::Warn(), true);\n"
+        "    info(\"suppressed\");\n"
+        "    warn(\"warn body\\nnext line\");\n"
+        "    error(\"quote \\\" and backslash \\\\ here\");\n"
+        "}\n", {});
+    ASSERT_FALSE(r.failed) << r.err;
+    EXPECT_EQ(r.out, "") << r.out;
+    EXPECT_NE(r.err.find("{\"kind\":\"log\",\"level\":\"warn\",\"message\":\"warn body\\nnext "
+                         "line\"}"), std::string::npos)
+        << "the record with a newline inside the message must not split:\n" << r.err;
+    EXPECT_NE(r.err.find("quote \\\" and backslash \\\\ here"), std::string::npos)
+        << "quote and backslash must arrive escaped:\n" << r.err;
+    EXPECT_EQ(r.err.find("suppressed"), std::string::npos)
+        << "the level filter answers in json mode too:\n" << r.err;
+}
+
+TEST(Soundness_Log, TheTimestampPrefixRidesByDefault) {
+    // The `time` (#59) half of the shape: by default an emitted line carries an
+    // rfc3339 prefix (which ends where the level label begins), and
+    // `timestamps(false)` takes it off. Contains, never equality — the clock
+    // moves between runs.
+    const RunSplit withTs = buildAndRunSplit(
+        "import { Level, init, info } from log::std;\n"
+        "fun main() <noret> {\n"
+        "    init(Level::Info());\n"
+        "    info(\"the line\");\n"
+        "}\n", {});
+    ASSERT_FALSE(withTs.failed) << withTs.err;
+    EXPECT_NE(withTs.err.find("Z [INFO ] the line"), std::string::npos)
+        << "an rfc3339 prefix ends at 'Z', then the label:\n" << withTs.err;
+
+    const RunSplit off = buildAndRunSplit(
+        "import { Level, timestamps, init, info } from log::std;\n"
+        "fun main() <noret> {\n"
+        "    timestamps(false);\n"
+        "    init(Level::Info());\n"
+        "    info(\"the line\");\n"
+        "}\n", {});
+    ASSERT_FALSE(off.failed) << off.err;
+    EXPECT_NE(off.err.find("[INFO ] the line"), std::string::npos) << off.err;
+    EXPECT_EQ(off.err.find("2026-"), std::string::npos)
+        << "the switch turns the prefix off; nothing else does:\n" << off.err;
+}
+
+TEST(Soundness_Serde, TheContractResolvesThroughAnImport) {
+    // Issue #57's surface, named at the call: the two interfaces import, and
+    // the whole json::std free-function family checks at typed call sites.
+    // There is deliberately NO call spelled through an interface method --
+    // `Outcome<Self>`-returning interface methods do not dispatch yet, and
+    // serde.fin's header records that gap (derive is #53's). A pin that
+    // pretended otherwise would pass and prove nothing.
+    const std::string err = bundledErr(R"serf(
+import { Encode, Decode } from serde::std;
+import { json_encode_int, json_decode_int, json_encode_str, json_decode_str,
+         json_encode_bool, json_decode_bool, json_encode_float, json_decode_float,
+         json_encode_int_array, json_decode_int_array,
+         json_encode_intmap, json_decode_intmap,
+         json_encode_strmap, json_decode_strmap,
+         json_escape, json_join2, json_join3, json_join4 } from json::std;
+fun main() <noret> {
+    let ti <string> = json_encode_int(42);
+    let ri <auto> = json_decode_int(ti);
+    let tb <string> = json_encode_bool(true);
+    let rb <auto> = json_decode_bool(tb);
+    let tf <string> = json_encode_float(cast<double>(1.5));
+    let rf <auto> = json_decode_float(tf);
+    let tx <string> = json_encode_str("text");
+    let rx <auto> = json_decode_str(tx);
+    let vals <[int]> = [1];
+    let ta <string> = json_encode_int_array(vals, 1);
+    let ra <auto> = json_decode_int_array(ta);
+    let m <{string, int}> = { "k": 1 };
+    let tm <string> = json_encode_intmap(m);
+    let rm <auto> = json_decode_intmap(tm);
+    let sm <{string, string}> = { "k": "v" };
+    let ts2 <string> = json_encode_strmap(sm);
+    let rs2 <auto> = json_decode_strmap(ts2);
+    let esc <string> = json_escape("e");
+    let k2 <string> = json_join2("a", "b");
+    let k3 <string> = json_join3("a", "b", "c");
+    let k4 <string> = json_join4("a", "b", "c", "d");
+}
+)serf");
+    EXPECT_EQ(errorCount(err), 0u)
+        << "the serde contract's names stopped resolving:\n" << err;
+}
+
+TEST(Soundness_Serde, TheRoundTripTheIssueNamesRuns) {
+    // The motivating spell, run: encode 42, decode "42", receive 42 through
+    // the `Outcome`, and a caller's bad document answers `Err` naming the
+    // kind instead of aborting -- the rule that makes the decode side safe
+    // to point at user data. Every string is freed; a double free or a leak
+    // of the module's contract would end the run here instead of after it.
+    EXPECT_EQ(buildBundledAndRun(R"serf(
+import { Encode, Decode } from serde::std;
+import { json_encode_int, json_decode_int } from json::std;
+import { equals, free_str } from strings::std;
+fun main() <noret> {
+    let text <string> = json_encode_int(42);
+    printf("encoded: %s\n", text);
+    let back <auto> = json_decode_int(text);
+    printf("decoded: %d\n", back.unwrap_or(-1));
+    let refused <auto> = json_decode_int("impossible");
+    printf("refused: %d %s\n", refused.is_err(), refused.message);
+    free_str(text);
+}
+)serf"),
+        R"serf(encoded: 42
+decoded: 42
+refused: 1 json_decode_int: expected a JSON integer
+)serf")
+        << "the issue's own round trip changed bytes";
+}
+
+TEST(Soundness_Json, TheScalarsRoundTripByteExact) {
+    // All four scalar encoders, each with its printed byte shape and the
+    // decode that reads it back. The float leg re-encodes the decoded value:
+    // byte-identical output is the %.17g round-trip guarantee made visible
+    // (and it is what the stage-agreement harness holds the sample to).
+    EXPECT_EQ(buildBundledAndRun(R"jsonp(
+import { json_encode_int, json_decode_int, json_encode_str, json_decode_str,
+         json_encode_bool, json_decode_bool, json_encode_float, json_decode_float } from json::std;
+import { equals, free_str } from strings::std;
+fun main() <noret> {
+    let t <string> = json_encode_int(42);
+    let r <auto> = json_decode_int(t);
+    printf("int %s %d\n", t, r.unwrap_or(-1));
+    free_str(t);
+    let n <string> = json_encode_int(-7);
+    let rn <auto> = json_decode_int(n);
+    printf("neg %s %d\n", n, rn.unwrap_or(0));
+    free_str(n);
+    let b <string> = json_encode_bool(true);
+    let rb <auto> = json_decode_bool(b);
+    printf("bool %s %d\n", b, rb.unwrap_or(false));
+    free_str(b);
+    let f <string> = json_encode_float(cast<double>(2.5));
+    let rf <auto> = json_decode_float(f);
+    printf("float %s eq=%s\n", f, json_encode_float(rf.unwrap_or(cast<double>(0.0))));
+    free_str(f);
+    let s <string> = json_encode_str("a\"b\\c\n\t");
+    let rs <auto> = json_decode_str(s);
+    printf("str %s same=%d\n", s, equals(rs.unwrap_or("###"), "a\"b\\c\n\t"));
+    free_str(s);
+}
+)jsonp"),
+        R"jsonp(int 42 42
+neg -7 -7
+bool true 1
+float 2.5 eq=2.5
+str "a\"b\\c\n\t" same=1
+)jsonp")
+        << "the scalar spellings drifted from the module header's grammar";
+}
+
+TEST(Soundness_Json, TheArraysAndPrototypeMapsRoundTripByteExact) {
+    // The structural half: the `[int]` pair, the `{string, int}` map whose
+    // encode sorts keys (`{"a":1,"b":2}` from a map built in the other
+    // order -- the determinism contract), and the `{string, string}` map
+    // whose values escape and unescape. Reading back is by key, by index.
+    EXPECT_EQ(buildBundledAndRun(R"jsonp(
+import { json_encode_int_array, json_decode_int_array, json_encode_intmap, json_decode_intmap,
+         json_encode_strmap, json_decode_strmap } from json::std;
+import { equals, free_str } from strings::std;
+fun main() <noret> {
+    let arr <[int]> = [1, 2, 3];
+    let ta <string> = json_encode_int_array(arr, 3);
+    let ra <auto> = json_decode_int_array(ta);
+    let a2 <auto> = ra.unwrap_or(arr);
+    printf("arr %s len=%d v0=%d v2=%d\n", ta, a2.length, a2[0], a2[2]);
+    free_str(ta);
+    let m <{string, int}> = { "b": 2, "a": 1 };
+    let tm <string> = json_encode_intmap(m);
+    let rm <auto> = json_decode_intmap(tm);
+    let av <int> = 0;
+    let bv <int> = 0;
+    if (rm.is_ok()) {
+        let mp <{string, int}> = rm.value;
+        av = mp["a"];
+        bv = mp["b"];
+    }
+    printf("map %s ok=%d a=%d b=%d\n", tm, rm.is_ok(), av, bv);
+    free_str(tm);
+    let sm <{string, string}> = { "key": "value with \"quote\"" };
+    let ts <string> = json_encode_strmap(sm);
+    let rs <auto> = json_decode_strmap(ts);
+    let got <string> = "";
+    if (rs.is_ok()) {
+        let sp <{string, string}> = rs.value;
+        got = sp["key"];
+    }
+    printf("smap %s eq=%d\n", ts, equals(got, "value with \"quote\""));
+    free_str(ts);
+}
+)jsonp"),
+        R"jsonp(arr [1,2,3] len=3 v0=1 v2=3
+map {"a":1,"b":2} ok=1 a=1 b=2
+smap {"key":"value with \"quote\""} eq=1
+)jsonp")
+        << "the structural spellings or the sorted key order changed";
+}
+
+TEST(Soundness_Json, ABadDocumentRefusesWithTheKindNamed) {
+    // The decode half of "never silent": six malformed documents in, six
+    // `Err` messages out -- leading zeros, a stray trailing byte, an
+    // unterminated string, a non-ASCII \u escape, an array cut short, a
+    // number interrupted by a period -- every one named, none a blame. The
+    // pinned wording is the caller-facing surface; a message rewrite is a
+    // deliberate change to it.
+    EXPECT_EQ(buildBundledAndRun(R"jsonp(
+import { json_decode_int, json_decode_str, json_decode_float, json_decode_int_array } from json::std;
+fun main() <noret> {
+    blame json_decode_int("01").is_err() && json_decode_int("4x").is_err(),
+        "both integer refusals";
+    let e1 <auto> = json_decode_int("01");
+    let e2 <auto> = json_decode_int("4x");
+    let e3 <auto> = json_decode_str("\"no close");
+    let e4 <auto> = json_decode_str("\"\\u0080\"");
+    let e5 <auto> = json_decode_int_array("[1,2,");
+    let e6 <auto> = json_decode_float("1.2.3");
+    printf("%s\n%s\n%s\n%s\n%s\n%s\n", e1.message, e2.message, e3.message, e4.message, e5.message, e6.message);
+}
+)jsonp"),
+        R"jsonp(json_decode_int: a JSON integer has no leading zeros
+json_decode_int: trailing data after the value
+json_decode_str: a string never closed
+json_decode_str: a \u escape outside ASCII (v0 utf is a gap)
+json_decode_int_array: expected an integer near the end
+json_decode_float: trailing data after the value
+)jsonp")
+        << "refusal kinds or wording changed";
+}
+
+#endif  // FIN_TESTS_HAVE_BACKEND
 
 #ifdef FIN_TESTS_HAVE_BACKEND
 

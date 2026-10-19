@@ -1,0 +1,49 @@
+//@ normative
+//@ ok
+// The cli module: the issue's normative program, corrected for the argv-less
+// runner this corpus runs under (issue #60 -- the sample still exercises the
+// same surface).
+//
+// WHY EVERY LINE IS DETERMINISTIC. `parse_args()` reads `/proc/self/cmdline`,
+// and the corpus executes a sample with no user arguments, so the parse
+// answers its registered defaults: `greet` stays "world", `is_set` stays
+// false, the subcommand is empty. That path is exactly the one a library
+// tool's `main()` reaches when nobody typed a flag, and the module holds it
+// in the same `Outcome<Match>` the flagged paths erre through.
+//
+// WHAT EACH BLAME PROVES. The defaults were registered (`greet` answers
+// "world" name not ""), `is_set` distinguishes seen from defaulted, and the
+// empty-subcommand story holds when no sub was registered. The soundness
+// pins in tests/test_stdlib.cpp run the OTHER argv regimes (help/version to
+// stdout with exit 0, subcommand dispatch, the unknown-option Err with its
+// message); this sample pins the no-flags baseline the walk falls back to.
+
+import { Command, Match, Outcome } from cli::std;
+import { equals } from strings::std;
+
+fun main() <noret> {
+    let cmd <Command> = Command::create("finhello", "demo program");
+    cmd.add_arg("greet", '-', true, "world", "who to greet");
+
+    let m <Outcome<Match>> = cmd.parse_args();
+
+    // The parse of a flagless argv is an Ok: recoverable errors are Err, and
+    // there is nothing here to recover from.
+    blame m.is_ok();
+    let mv <Match> = m.value;
+
+    // The never-seen value-arg answers its registered default (content
+    // compares through strings::equals; `==` is pointer equality).
+    blame equals(mv.get("greet"), "world");
+
+    // Nothing was seen: the boolean arg answers is_set false while its value
+    // spells the default-empty convention.
+    blame mv.is_set("greet") == false;
+
+    // No subcommand was registered, so none was dispatched: the parse never
+    // invents one from a positional.
+    blame equals(mv.subcommand(), "");
+    blame mv.pos_count == 0;
+
+    printf("hello %s\n", mv.get("greet"));
+}
