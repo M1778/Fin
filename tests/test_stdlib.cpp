@@ -1659,6 +1659,7 @@ TEST(Soundness_Json, TheArraysAndPrototypeMapsRoundTripByteExact) {
 import { json_encode_int_array, json_decode_int_array, json_encode_intmap, json_decode_intmap,
          json_encode_strmap, json_decode_strmap } from json::std;
 import { equals, free_str } from strings::std;
+import { HashMap } from hashmap::std;
 fun main() <noret> {
     let arr <[int]> = [1, 2, 3];
     let ta <string> = json_encode_int_array(arr, 3);
@@ -1672,7 +1673,7 @@ fun main() <noret> {
     let av <int> = 0;
     let bv <int> = 0;
     if (rm.is_ok()) {
-        let mp <{string, int}> = rm.value;
+        let mp <HashMap<string, int>> = rm.value;
         av = mp["a"];
         bv = mp["b"];
     }
@@ -1683,8 +1684,8 @@ fun main() <noret> {
     let rs <auto> = json_decode_strmap(ts);
     let got <string> = "";
     if (rs.is_ok()) {
-        let sp <{string, string}> = rs.value;
-        got = sp["key"];
+        let sp <HashMap<string, string>> = rs.value;
+        got = sp.get_or("key", "###");
     }
     printf("smap %s eq=%d\n", ts, equals(got, "value with \"quote\""));
     free_str(ts);

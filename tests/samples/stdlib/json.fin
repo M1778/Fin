@@ -1,0 +1,110 @@
+//@ normative
+//@ ok
+// The json engine (issue #57): encode + decode for string/int/bool/float, one
+// `[int]` array pair, and the `{string, int}`/`{string, string}` prototype
+// maps finn manifests carry. lib/std/json.fin is the module; this file is the
+// runnable half of the specification.
+//
+// WHY EACH LINE LOOKS LIKE THIS. Every print below is a pinned byte shape:
+// the corpus runs this sample on the C++ reference and both stage compilers
+// at every optimisation level and compares the streams byte for byte, so the
+// encoded forms -- including the sorted key order of the maps and the exact
+// escape spellings -- are agreement-checked everywhere the sample lands, not
+// just asserted here. The `blame`s carry the round-trip invariants the prints
+// cannot see: a decoded value equal to its encoded input.
+//
+// THE TWO REFUSALS ARE DELIBERATE. `01` is not a JSON integer (no leading
+// zeros) and `1.2.3` is not a number at all; both answer `Err` naming the
+// kind, which is the decode half of the "never silent" rule. The one printed
+// message pins the wording of a kind; the substring checks in tests/test_stdlib.cpp
+// pin the others.
+//
+// OWNERSHIP. Every string an encode answers is fresh memory; this file frees
+// each one through `free_str` (strings.fin's rule, restated in the module
+// header), so a leak or a double free here would end the run before the
+// final line prints.
+
+import { json_encode_int, json_decode_int, json_encode_str, json_decode_str,
+      json_encode_bool, json_decode_bool, json_encode_float, json_decode_float,
+      json_encode_int_array, json_decode_int_array,
+      json_encode_intmap, json_decode_intmap,
+      json_encode_strmap, json_decode_strmap } from json::std;
+    import { equals, free_str } from strings::std;
+    import { HashMap } from hashmap::std;
+
+    fun main() <noret> {
+        // Integers, both directions. The overflow and leading-zero shapes are
+        // JSON grammar, not int grammar, and the decode refuses them.
+        let t4 <string> = json_encode_int(42);
+        printf("%s\n", t4);
+        let r4 <auto> = json_decode_int(t4);
+        blame r4.unwrap_or(-1) == 42, "42 round-trips";
+        free_str(t4);
+
+        let tn <string> = json_encode_int(-7);
+        printf("%s\n", tn);
+        let rn <auto> = json_decode_int(tn);
+        blame rn.unwrap_or(0) == -7, "-7 round-trips";
+        free_str(tn);
+
+        let rbad <auto> = json_decode_int("01");
+        blame rbad.is_err(), "a leading zero is not a JSON integer";
+        printf("refused: %s\n", rbad.message);
+
+        // Strings: quote, backslash, newline and tab are the four escapes the
+        // encode writes and the decode reads back byte for byte.
+        let ts <string> = json_encode_str("a\"b\\c\n\t");
+        printf("%s\n", ts);
+        let rs <auto> = json_decode_str(ts);
+        blame equals(rs.unwrap_or("###"), "a\"b\\c\n\t"), "escapes round-trip";
+        free_str(ts);
+
+        // Booleans spell lowercase and nothing else.
+        let tb <string> = json_encode_bool(true);
+        printf("%s\n", tb);
+        let rb <auto> = json_decode_bool(tb);
+        blame rb.unwrap_or(false), "true round-trips";
+        free_str(tb);
+
+        // Floats: %.17g spells an exactly-representable double in its short
+        // form, so 2.5 round-trips through the text "2.5".
+        let tf <string> = json_encode_float(cast<double>(2.5));
+        printf("%s\n", tf);
+        let rf <auto> = json_decode_float(tf);
+        blame rf.unwrap_or(cast<double>(0.0)) == cast<double>(2.5), "2.5 round-trips";
+        free_str(tf);
+
+        let rfbad <auto> = json_decode_float("1.2.3");
+        blame rfbad.is_err(), "1.2.3 is not a JSON number";
+
+        // The `[int]` pair: exact contents, exact length.
+        let arr <[int]> = [1, 2, 3];
+        let ta <string> = json_encode_int_array(arr, 3);
+        printf("%s\n", ta);
+        let ra <auto> = json_decode_int_array(ta);
+        let a2 <auto> = ra.unwrap_or(arr);
+        blame a2.length == 3, "the array's length is the document's";
+        blame a2[0] == 1 && a2[2] == 3, "the array's elements round-trip";
+        free_str(ta);
+
+        // The `{string, int}` pair. The encode sorts keys, so the printed form
+        // is the same bytes wherever this runs; the decode reads by key.
+        let m <{string, int}> = { "b": 2, "a": 1 };
+        let tm <string> = json_encode_intmap(m);
+        printf("%s\n", tm);
+        let rm <auto> = json_decode_intmap(tm);
+        blame rm.is_ok(), "the sorted map document decodes";
+        let mp <HashMap<string, int>> = rm.value;
+        blame mp["a"] == 1 && mp["b"] == 2, "the map's values round-trip";
+        free_str(tm);
+
+        // The `{string, string}` pair: both sides escape and unescape.
+        let sm <{string, string}> = { "key": "value with \"quote\"" };
+        let ts2 <string> = json_encode_strmap(sm);
+        printf("%s\n", ts2);
+        let rs2 <auto> = json_decode_strmap(ts2);
+        blame rs2.is_ok(), "the quoted map document decodes";
+        let sp <HashMap<string, string>> = rs2.value;
+        blame equals(sp.get_or("key", "###"), "value with \"quote\""), "the map's text round-trips";
+        free_str(ts2);
+    }

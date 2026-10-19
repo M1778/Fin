@@ -1,0 +1,41 @@
+//@ normative
+//@ ok
+// The serde contract (issue #57): `Encode`/`Decode` hold what a serializable
+// type promises, and json::std is the engine answering that contract today --
+// through the free-function spelling the issue itself prescribes, because an
+// `Outcome<Self>`-returning interface method does not dispatch yet (issue #53
+// owns derive and dispatch; lib/std/serde.fin records the same gap).
+//
+// WHAT THIS FILE PINS. The contract's names resolve through the import a tool
+// would write; the round trip the issue motivates this module with runs both
+// ways; a decode that met data it cannot read answers `Err` naming the kind
+// of refusal instead of blaming -- the caller decides what a bad document
+// means. Ownership is the strings.fin rule: every string `json_encode_*`
+// answers is fresh, and this file frees each one through `free_str`.
+//
+// The round trip here is silent about what `Encode` would do for a caller's
+// own struct: that is the documented v0 shape (compose from the json
+// functions; derive comes with #53), not an omission this file hides.
+
+import { Encode, Decode } from serde::std;
+import { json_encode_int, json_decode_int } from json::std;
+import { equals, free_str } from strings::std;
+
+fun main() <noret> {
+    // The issue's motivating spell: encode 42, decode "42", get 42.
+    let text <string> = json_encode_int(42);
+    printf("encoded: %s\n", text);
+    blame equals(text, "42"), "an integer encodes as JSON spells one";
+
+    let back <auto> = json_decode_int(text);
+    blame back.unwrap_or(-1) == 42, "the decoded value is the encoded one";
+    free_str(text);
+
+    // A refusal is data, not an abort: the message names the kind, the
+    // process stays alive, and the caller answers for the document.
+    let refused <auto> = json_decode_int("impossible");
+    blame refused.is_err(), "a non-number is refused, not blamed";
+    blame equals(refused.message,
+      "json_decode_int: expected a JSON integer"),
+      "the refusal names the kind of badness";
+}

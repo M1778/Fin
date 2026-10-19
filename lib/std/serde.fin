@@ -1,0 +1,84 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Serde: the serialization contract -- `Encode`/`Decode` as interfaces, with
+// the JSON engine in json::std as the first implementation.
+//
+// Every `finn` manifest, every LSP message, every config file is
+// serialization (issue #57). Without a stated contract each tool hand-rolls
+// string munging, and the shapes diverge. serde.fin is the contract; json.fin
+// is the engine that answers it today.
+//
+// THE INTERFACES, spelled as the issue writes them:
+//
+//     interface Encode { fun encode(self: &Self) <string>; }
+//     interface Decode { fun decode(text: string) <Outcome<Self>>; }
+//
+// `Outcome` is the recoverable-error spelling of issue #52 (outcome::std):
+// a decode that met a bad token returns `Err(msg)` -- and the message NAMES
+// what it refused -- rather than blaming a caller's data. `Outcome<Self>`
+// inside the interface body RESOLVES: the module type-checks clean standalone
+// and through an import (measured). So the declaration side of both
+// interfaces is real language, not comment.
+//
+// THE DISPATCH GAP, named. The RUNTIME path below the interfaces is the
+// free-function spelling the issue's own wording prescribes: "ifSelf-return
+// generics can't lower yet, use free functions `decode_T(text) <Outcome<T>>`
+// per concrete type and SAY SO". json::std answers with exactly that family
+// (`json_decode_int`, `json_decode_str`, ...). A struct that wants the
+// interface spelling today writes its `encode` method and the json family
+// beside it; wiring the two into `implements <Encode>` and having a call site
+// dispatch on the interface METHOD rather than on a known struct is the
+// `Derive` work of issue #53. Nothing in this file fakes that dispatch --
+// one dispatch that "would work if the type were named" is a trap that
+// cannot be caught at a call site, and the gap is cheaper named than faked.
+//
+// THE CALLERS' DUTIES, spelled once:
+//
+//   * Strings: lib/std/strings.fin's rule, and this interface adds nothing:
+//     an `encode` result is a fresh allocation the caller owns (release it
+//     with `strings::free_str`; the Buffer family answers `free_string`,
+//     same libc `free` underneath), and a `decode_T` returns malloc-owned
+//     text the caller owns -- the copy that unescaped the source, not the
+//     source's pointer. Nothing here caches, aliases, or reuses a buffer.
+//   * Failed decodes return `Err` and allocate nothing on the way there
+//     beyond the staging the message needs. No half-built value escapes a
+//     failed decode: the caller's data either arrives whole or not at all.
+//   * `blame` is never driven by Caller input. A caller passing a bad text
+//     to a `decode` gets an `Outcome`, not an abort; the blame of the finc
+//     diagnostics grid is for the TOOL's own state, not for user data.
+//
+// THE ROUND TRIP THE ISSUE NAMES, as json::std spells it:
+//
+//     import { json_encode_int, json_decode_int } from json::std;
+//     let text <string> = json_encode_int(42);
+//     let back <Outcome<int>> = json_decode_int(text);
+//
+// ... and the same shape for `str`/`bool`/`float`, an `[int]` array, and the
+// `{string, int}`/`{string, string}` prototype maps finn manifests carry.
+// The module docs under json::std say what each answers.
+//
+// GAPS hit while writing this file:
+//
+//   * Interface CONFORMANCE dispatch (`struct X implements <Encode>` plus a
+//     call that reaches `encode` through the interface rather than through
+//     `X`) is not built; the free functions are the runtime path and `Derive`
+//     (#53) names the follow-up. The interfaces stand so the day that pass
+//     lands, existing callers keep spelling the same words.
+//   * A derive of the two interfaces for a user's struct is issue #53's
+//     feature; the "hand-written per type v0" section of issue #57 IS the
+//     state these modules document: the scalars, arrays and maps exist
+//     engine-side; a caller composes a struct's encode from them.
+
+import { Outcome } from outcome::std;
+
+namespace std {
+
+#[export]
+pub interface Encode {
+    pub fun encode(self: &Self) <string>;
+}
+#[export]
+pub interface Decode {
+    pub fun decode(text: string) <Outcome<Self>>;
+}
+
+}

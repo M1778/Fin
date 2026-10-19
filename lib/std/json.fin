@@ -1,0 +1,819 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Json: the JSON engine behind serde.fin's contract (issue #57).
+//
+// Encode + decode for JSON string/int/bool/float, one `[int]` array pair, and
+// the `{string, int}`/`{string, string}` prototype maps finn manifests carry.
+// Every `decode` answers an `Outcome` (outcome::std): a bad document returns
+// `Err(msg)` naming the kind of refusal and never blames -- the blame grid is
+// for the tool's own state, not for a caller's data (serde.fin says why).
+//
+// THE GRAMMAR V0 STANDS ON, stated once:
+//
+//   * Whitespace is exactly space, tab, newline, CR between tokens, per RFC
+//     8259. `decode_T` refuses any REMAINDER after the value (end of input
+//     only); array decodes are satisfied by the delimiter loops below.
+//   * An integer is exactly `-?[1-9][0-9]*`, no leading zeros, no `+`, no
+//     `.0` spell -- a caller who expected `int` from `42.0` gets an Err
+//     naming it (`not a JSON integer`). Integers are int32: the accumulation
+//     is parse_int's, in Outcome form (strings.fin's parse_int blames; this
+//     module may not, because the caller's value is user data).
+//   * A float is the JSON number REST of the grammar: `-? ( int-part ) (
+//     . digits )? ( [eE] [+-]? digits )?`, digits required after `.` and in
+//     the exponent. `take_float` also accepts a bare integer token (the JSON
+//     model says `42` IS a float value) and the return is C's `double` --
+//     which is what Fin writes and types.fin names. Decode goes through
+//     libc `strtod`, TEXT PRE-VETTED by the walker above so a refusal never
+//     reaches C.
+//   * A string is exactly a quoted run: `"` ... `"` with the escapes `"`,
+//     `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t`, `\u00xx` -- four hex digits,
+//     UPPER or lower, `0x00..0x7f` only: `\u00e9` non-ASCII is refused
+//     (`escape outside ASCII`) and so are unpaired surrogates. RAW control
+//     characters (< 0x20) inside a string refuse (`unescaped control
+//     character`), `\\u007f` and RL (>= 0x20) pass through untouched, which
+//     keeps round trip text-identical for what json already emits.
+//   * The encode escapes symmetrically: `"`, backslash, newline/CR/tab,
+//     backspace, formfeed, and any control below 0x20 as a lowercase
+//     `\u00xx` (the log-fin idiom). DEL and >= 0x20 pass through. `0-0x7f !=
+//     two-byte UTF-8 at v0: see GAPS below.
+//   * `true`/`false` exactly, case ILLITERATE not -- lowercase only per JSON.
+//   * `[int]` is the one array pair; `{string, int}` and `{string, string}`
+//     are the twoPrototype pairs. What a Token came out to be when we need
+//     to sort, the encode does: keys are emitted in `strcmp` order so the
+//     same map encodes to the SAME BYTES on every run (stage-agreement
+//     condition, named below). Array cap: 64 elements is the decode cap;
+//     the encoder prints what it is given.
+//
+// THE NUMBERS THROUGHOUT. `json_encode_float` takes `double` -- the type
+// `str2double` gives. Literals in Fin spell `float` and never convert; the
+// caller enters through `cast<double>(0.1)` or a double LOCAL. The printf
+// format is `%.17g` on encode (17 significant digits: exact-representable
+// values print their short form -- `2.5` stays `2.5`忙碌 -- and any double
+// round-trips through 17 digits byte-identical), and `strtod` on decode.
+// faced property: deterministic across every compiler stage -- which the
+// fuzzier `%g` of types.fin is NOT, and is why json exports its own number
+// formatter rather than borrowing number2str_float.
+//
+// KEY ORDER / DETERMINISM. Encode of `{string, int}` collects the map's live
+// pairs and emits keys in strcmp order, so two encodes of the same map
+// answer the same bytes. The DECODE does not sort: `p["a"]` reads by key,
+// so map iteration order is not part of the contract anywhere. That keeps
+// the whole module byte-deterministic in both directions -- the property
+// the stage-agreement runs (Corpus/StageAgreement) compare a sample on.
+//
+// OWNERSHIP: strings.fin's rule, spelled here for the whole module. A
+// `json_decode_*` string lands fresh: escape decoding builds it char by
+// char and scrambles NOTHING from the source. Nothing here caches, aliases
+// or reuses a buffer. A release: `strings::free_str` frees every string
+// this module returns (it resolves to libc `free`, which is what calloc and
+// Buffer allocations descend from; buffer_fin records the same sentence for
+// its own strings). A failed decode allocates only what the error message
+// needs and never returns a half-built value: the caller's data either
+// arrives whole or not at all.
+//
+// THE DECISION ABOUT EXTERNS: this module declares its own
+// (`json_snp`/`json_calloc`/`json_strtod`) under the split-name rule, with a
+// twist it is honest about: two externs with the same `#[llvm_name]` DO NOT
+// BOTH LOWER when their SIGNATURES disagree (measured this slice: this
+// module's first snprintf spelled `(buffer: &char, ...)` and types.fin's
+// `(buffer: string, ...)` refused to coexist in one program; the shapes here
+// MIRROR types.fin byte for byte, so co-importing types::std and json::std
+// into one program still meets one signature per libc symbol).
+//
+// GAPS hit while writing this file:
+//
+//   * The array decode cap is 64 ELEMENTS: `[...]` longer refuses with the
+//     kind named (`array exceeds the 64-element decode cap`). The encoder
+//     handles any `count` a caller hands it; a longer decode is a cut, not
+//     a limit on the model. The cap is the v0 simplification: exact-length
+//     zero-alloc and count-first sizing are what follow.
+//   * NO UTF-8: strings are byte runs. Non-ASCII literals INSIDE a JSON
+//     string (multibyte UTF-8 bytes) encode fine (bytes > 0x20 pass
+//     through); DECODE of the same passes them back byte for byte. What
+//     refuses is an ESCAPE path asking for a code point above 0x7f -- the
+//     `\u00e9`-style spelling -- because v0 has no UTF-8 encoder to splice
+//     the bytes of a non-ASCII code point and a decoder that invented one
+//     would disagree with the escape writer's byte-for-byte symmetry.
+//   * THE MAP DECODES ANSWER `Outcome<HashMap<string, T>>`, not an
+//     `Outcome` carrying the prototype spelled verbatim: a turbofish whose
+//     generic argument is a brace group (`Err::<{string, int}>`) reads as a
+//     TWO-parameter call on the self-host stage compiler (`generic count
+//     mismatch`), and a type alias into the same position infers differently
+//     from the written token there (`Ok::<IntMap>(m)` answers the value's
+//     structural prototype), so the payload travels under the named generic
+//     both compilers resolve identically. The reference compiler accepted
+//     every spelling; the decode side could not ship one spelling for both
+//     compilers until the payload moved to `HashMap`. Whatever it holds, a
+//     caller reads it by key (`m["k"]`), which is the only map operation the
+//     contract promises. (Measured on the same source; not a #53 item.)
+//   * One `[int]` pair is the array coverage; `{string, int}` and
+//     `{string, string}` are the pair coverage. `[string]`/`[bool]`/
+//     `[float]` arrays and `{string, bool}`/`{string, float}` maps are the
+//     same scanner shapes one level out -- adding them is mechanical and
+//     is exactly what type-derivation (#53) would need to generate for a
+//     user's own types to get "hand-written per type" without handwriting.
+//   * A caller-built struct has no decode story yet beyond composing these
+//     free functions: that is Derive (#53's) work, spelled in serde.fin
+//     with the same wording. `json_join2/3/4` are the encode-side helpers a
+//     hand-written struct encoder uses today.
+import { Outcome, Ok, Err } from outcome::std;
+import { Buffer, new_buffer, free_buffer } from buffer::std;
+import { to_chars, from_chars, len, compare, free_str } from strings::std;
+import { HashMap } from hashmap::std;
+
+namespace std {
+
+// Module-private C names; the split-name rule (serde.fin's decision para).
+// The three shapes here MIRROR types.fin's declarations of the same libc
+// symbols so a program importing both modules meets one signature each.
+#[llvm_name="snprintf"]
+@define json_snp(buffer: string, limit: ulong, fmt: string, ...) <int>;
+
+#[llvm_name="calloc"]
+@define json_calloc(count: ulong, size: ulong) <string>;
+
+#[llvm_name="strtod"]
+@define json_strtod(s: string, rest: &void) <double>;
+
+// The Buffer-built catenations. `+` on strings is not a spelled operation
+// here (strings.fin owns content compares, frontend owns joiners); three
+// widths cover the call sites.
+pub fun json_join2(a: string, b: string) <string> {
+    let buf <Buffer> = new_buffer(64);
+    buf.write_string(a);
+    buf.write_string(b);
+    let out <string> = buf.to_string();
+    free_buffer(buf);
+    return out;
+}
+
+pub fun json_join3(a: string, b: string, c: string) <string> {
+    let buf <Buffer> = new_buffer(96);
+    buf.write_string(a);
+    buf.write_string(b);
+    buf.write_string(c);
+    let out <string> = buf.to_string();
+    free_buffer(buf);
+    return out;
+}
+
+pub fun json_join4(a: string, b: string, c: string, d: string) <string> {
+    let buf <Buffer> = new_buffer(128);
+    buf.write_string(a);
+    buf.write_string(b);
+    buf.write_string(c);
+    buf.write_string(d);
+    let out <string> = buf.to_string();
+    free_buffer(buf);
+    return out;
+}
+
+#[export]
+// The two nibble spellers for `\u00xx`, lowercase (log.fin's convention).
+priv fun json_hex_lo(n: int) <char> {
+    if (n < 10) { return cast<char>(48 + n); }
+    return cast<char>(87 + n);
+}
+
+priv fun json_hex_digit(c: char) <int> {
+    let o <int> = cast<int>(c);
+    if (o >= 48 && o <= 57) { return o - 48; }
+    if (o >= 65 && o <= 70) { return o - 55; }
+    if (o >= 97 && o <= 102) { return o - 87; }
+    return -1;
+}
+
+priv fun json_digit(c: char) <int> {
+    let o <int> = cast<int>(c);
+    if (o >= 48 && o <= 57) { return o - 48; }
+    return -1;
+}
+
+// JSON whitespace is exactly SP HT LF CR (RFC 8259).
+priv fun json_skip_ws(buf: [char], i: int, end: int) <int> {
+    while (i < end) {
+        let o <int> = cast<int>(buf[i]);
+        if (o != 32 && o != 9 && o != 10 && o != 13) { break; }
+        i = i + 1;
+    }
+    return i;
+}
+
+// The escaper. `s`'s bytes arrive through the to_chars buffer (strings.fin):
+// no mutation of the caller's text. Low bytes below 0x20 escape; DEL (0x7f)
+// and above 0x20 pass -- see the header for the utf v0 grammar.
+#[export]
+pub fun json_escape(s: string) <string> {
+    let staging <[char]> = to_chars(s);
+    let total <int> = staging.length;
+    let buf <Buffer> = new_buffer(total + 8);
+    for (let i <int> = 0; i < total - 1; i++) {
+        let o <int> = cast<int>(staging[i]);
+        if (staging[i] == '"') { buf.write_string("\\\""); continue; }
+        if (staging[i] == '\\') { buf.write_string("\\\\"); continue; }
+        if (o >= 32) {
+            buf.write_char(staging[i]);
+            continue;
+        }
+        if (o == 10) { buf.write_string("\\n"); continue; }
+        if (o == 13) { buf.write_string("\\r"); continue; }
+        if (o == 9) { buf.write_string("\\t"); continue; }
+        if (o == 8) { buf.write_string("\\b"); continue; }
+        if (o == 12) { buf.write_string("\\f"); continue; }
+        buf.write_string("\\u00");
+        buf.write_char(json_hex_lo(o / 16));
+        buf.write_char(json_hex_lo(o - (o / 16) * 16));
+    }
+    delete staging;
+    let out <string> = buf.to_string();
+    free_buffer(buf);
+    return out;
+}
+
+#[export]
+pub fun json_encode_str(s: string) <string> {
+    let escaped <string> = json_escape(s);
+    let buf <Buffer> = new_buffer(len(s) + 2);
+    buf.write_char('"');
+    buf.write_string(escaped);
+    buf.write_char('"');
+    free_str(escaped);
+    let out <string> = buf.to_string();
+    free_buffer(buf);
+    return out;
+}
+
+#[export]
+pub fun json_encode_int(v: int) <string> {
+    let buf <Buffer> = new_buffer(16);
+    buf.write_int(v);
+    let out <string> = buf.to_string();
+    free_buffer(buf);
+    return out;
+}
+
+#[export]
+pub fun json_encode_bool(v: bool) <string> {
+    // A fresh copy, never the pooled literal: the module's release rule
+    // hands every returned string to free_str, and freeing a literal is an
+    // invalid-pointer abort.
+    let buf <Buffer> = new_buffer(8);
+    buf.write_string(v : "true" ? "false");
+    let out <string> = buf.to_string();
+    free_buffer(buf);
+    return out;
+}
+
+#[export]
+pub fun json_encode_float(v: double) <string> {
+    let buf <string> = json_calloc(cast<ulong>(48), cast<ulong>(1));
+    json_snp(buf, cast<ulong>(48), "%.17g", v);
+    return buf;
+}
+
+// The scanner. One struct, the cursor pattern Buffer and HashMap use: the
+// fields are the staging buffer, a position, and one slot per value type,
+// the methods all answer "did this type take" and leave pos past their
+// token on success. `err` carries what failed.
+priv struct json_scan {
+    pub buf <[char]>,
+      pub end <int> = 0,
+      pub pos <int> = 0,
+      pub err <string> = "",
+      sval <string> = "",
+      ival <int> = 0,
+      dval <double> = cast<double>(0.0),
+      bval <bool> = false,
+
+      pub fun fail(self: &Self, why: string) <bool> {
+        self.err = why;
+        return false;
+      }
+
+    pub fun ws(self: &Self) <int> {
+        let i <int> = json_skip_ws(self.buf, self.pos, self.end);
+        return i;
+    }
+
+    pub fun at_end(self: &Self) <bool> {
+        self.pos = json_skip_ws(self.buf, self.pos, self.end);
+        return self.pos >= self.end;
+    }
+
+    // Requires `c` at the (whitespace-skipped) cursor. No truthy fallback:
+    // the failure is named for the char wanted.
+    pub fun take_char(self: &Self, c: char) <bool> {
+        let i <int> = self.ws();
+        if (i >= self.end) { return self.fail("unexpected end of document"); }
+        if (self.buf[i] != c) {
+            return self.fail("expected a different character");
+        }
+        self.pos = i + 1;
+        return true;
+    }
+
+    pub fun peek_char(self: &Self, c: char) <bool> {
+        let i <int> = self.ws();
+        if (i >= self.end) { return false; }
+        return self.buf[i] == c;
+    }
+
+    pub fun take_str(self: &Self) <bool> {
+        let i <int> = self.ws();
+        if (i >= self.end) { return self.fail("expected a JSON string near the end"); }
+        if (self.buf[i] != '"') { return self.fail("expected a JSON string"); }
+        i = i + 1;
+        let out <Buffer> = new_buffer(self.end - i + 4);
+        while (i < self.end) {
+            let c <char> = self.buf[i];
+            if (c == '"') {
+                self.pos = i + 1;
+                self.sval = out.to_string();
+                free_buffer(out);
+                return true;
+            }
+            let o <int> = cast<int>(c);
+            if (o < 32) {
+                free_buffer(out);
+                return self.fail("unescaped control character in a string");
+            }
+            if (c != '\\') {
+                out.write_char(c);
+                i = i + 1;
+                continue;
+            }
+            // Escape: the byte after the backslash decides.
+            i = i + 1;
+            if (i >= self.end) {
+                free_buffer(out);
+                return self.fail("an escape at the end of input");
+            }
+            let e <char> = self.buf[i];
+            if (e == '"') { out.write_char('"'); i = i + 1; continue; }
+            if (e == '\\') { out.write_char('\\'); i = i + 1; continue; }
+            if (e == '/') { out.write_char('/'); i = i + 1; continue; }
+            if (e == 'n') { out.write_char(cast<char>(10)); i = i + 1; continue; }
+            if (e == 't') { out.write_char(cast<char>(9)); i = i + 1; continue; }
+            if (e == 'r') { out.write_char(cast<char>(13)); i = i + 1; continue; }
+            if (e == 'b') { out.write_char(cast<char>(8)); i = i + 1; continue; }
+            if (e == 'f') { out.write_char(cast<char>(12)); i = i + 1; continue; }
+            if (e == 'u') {
+                if (i + 5 > self.end) {
+                    free_buffer(out);
+                    return self.fail("a \\u escape too short");
+                }
+                let val <int> = 0;
+                let h <int> = 0;
+                let bad <bool> = false;
+                let j <int> = 0;
+                while (j < 4) {
+                    h = json_hex_digit(self.buf[i + 1 + j]);
+                    if (h < 0) { bad = true; break; }
+                    val = val * 16 + h;
+                    j = j + 1;
+                }
+                if (bad) {
+                    free_buffer(out);
+                    return self.fail("a bad hex digit in a \\u escape");
+                }
+                if (val > 127) {
+                    free_buffer(out);
+                    return self.fail("a \\u escape outside ASCII (v0 utf is a gap)");
+                }
+                out.write_char(cast<char>(val));
+                i = i + 5;
+                continue;
+            }
+            free_buffer(out);
+            return self.fail("an unknown escape in a JSON string");
+        }
+        free_buffer(out);
+        return self.fail("a string never closed");
+    }
+
+    // The integer token: minus, no leading zero (JSON), int32 bounds.
+    pub fun take_int(self: &Self) <bool> {
+        let i <int> = self.ws();
+        if (i >= self.end) { return self.fail("expected an integer near the end"); }
+        let neg <bool> = false;
+        if (self.buf[i] == '-') {
+            neg = true;
+            i = i + 1;
+            if (i >= self.end) { return self.fail("a '-' at the end of input"); }
+        }
+        let dig <int> = json_digit(self.buf[i]);
+        if (dig < 0) { return self.fail("expected a JSON integer"); }
+        if (dig == 0) {
+            // '0' may stand alone; '01' is not JSON.
+            if (i + 1 < self.end && json_digit(self.buf[i + 1]) >= 0) {
+                return self.fail("a JSON integer has no leading zeros");
+            }
+        }
+        let acc <long> = cast<long>(0);
+        while (i < self.end) {
+            let d <int> = json_digit(self.buf[i]);
+            if (d < 0) { break; }
+            acc = acc * cast<long>(10) + cast<long>(d);
+            if (neg) {
+                if (acc > cast<long>(2147483648)) { return self.fail("integer too negative for an int"); }
+            } else {
+                if (acc > cast<long>(2147483647)) { return self.fail("integer too large for an int"); }
+            }
+            i = i + 1;
+        }
+        self.pos = i;
+        if (neg) {
+            self.ival = cast<int>(-acc);
+        } else {
+            self.ival = cast<int>(acc);
+        }
+        return true;
+    }
+
+    // The number token: whatever JSON allows. `strconv`'s comma/bracket
+    // neighbors check after: the token SPAN here is pure grammar.
+    pub fun take_float(self: &Self) <bool> {
+        let i <int> = self.ws();
+        if (i >= self.end) { return self.fail("expected a number near the end"); }
+        let start <int> = i;
+        if (self.buf[i] == '-') {
+            i = i + 1;
+            if (i >= self.end) { return self.fail("a '-' at the end of input"); }
+        }
+        if (json_digit(self.buf[i]) < 0) { return self.fail("expected a JSON number"); }
+        let leading <int> = json_digit(self.buf[i]);
+        if (leading == 0) {
+            if (i + 1 < self.end && json_digit(self.buf[i + 1]) >= 0) {
+                return self.fail("a JSON number has no leading zeros");
+            }
+            i = i + 1;
+        } else {
+            while (i < self.end && json_digit(self.buf[i]) >= 0) { i = i + 1; }
+        }
+        if (i < self.end && self.buf[i] == '.') {
+            i = i + 1;
+            if (i >= self.end || json_digit(self.buf[i]) < 0) {
+                return self.fail("digits required after the decimal point");
+            }
+            while (i < self.end && json_digit(self.buf[i]) >= 0) { i = i + 1; }
+        }
+        if (i < self.end && (self.buf[i] == 'e' || self.buf[i] == 'E')) {
+            i = i + 1;
+            if (i < self.end && (self.buf[i] == '+' || self.buf[i] == '-')) { i = i + 1; }
+            if (i >= self.end || json_digit(self.buf[i]) < 0) {
+                return self.fail("digits required in the exponent");
+            }
+            while (i < self.end && json_digit(self.buf[i]) >= 0) { i = i + 1; }
+        }
+        let token <string> = from_chars(self.buf, start, i - start);
+        let d <double> = json_strtod(token, null);
+        free_str(token);
+        self.pos = i;
+        self.dval = d;
+        return true;
+    }
+
+    pub fun take_bool(self: &Self) <bool> {
+        let i <int> = self.ws();
+        if (i >= self.end) { return self.fail("expected 'true' or 'false' near the end"); }
+        if (self.buf[i] == 't') {
+            if (i + 4 <= self.end && self.buf[i + 1] == 'r' && self.buf[i + 2] == 'u' && self.buf[i + 3] == 'e') {
+                self.pos = i + 4;
+                self.bval = true;
+                return true;
+            }
+            return self.fail("expected 'true' or 'false'");
+        }
+        if (self.buf[i] == 'f') {
+            if (i + 5 <= self.end && self.buf[i + 1] == 'a' && self.buf[i + 2] == 'l' && self.buf[i + 3] == 's' && self.buf[i + 4] == 'e') {
+                self.pos = i + 5;
+                self.bval = false;
+                return true;
+            }
+            return self.fail("expected 'true' or 'false'");
+        }
+        return self.fail("expected 'true' or 'false'");
+    }
+}
+
+// Every decoder wraps one scanner run: staging buffer in, scanner out,
+// trailing-data check, Err wrapping the scanner's reason. The staging
+// buffer dies here; the decoded string survives the function.
+priv fun json_alive(text: string) <[char]> {
+    let buf <[char]> = to_chars(text);
+    return buf;
+}
+
+#[export]
+pub fun json_decode_int(text: string) <Outcome<int>> {
+    let buf <[char]> = json_alive(text);
+    let st <json_scan> = json_scan{buf: buf, end: len(text), pos: 0};
+    let r <bool> = st.take_int();
+    if (!r) { delete buf; return Err::<int>(json_join2("json_decode_int: ", st.err)); }
+    if (!st.at_end()) { delete buf; return Err::<int>("json_decode_int: trailing data after the value"); }
+    let v <int> = st.ival;
+    delete buf;
+    return Ok::<int>(v);
+}
+
+#[export]
+pub fun json_decode_bool(text: string) <Outcome<bool>> {
+    let buf <[char]> = json_alive(text);
+    let st <json_scan> = json_scan{buf: buf, end: len(text), pos: 0};
+    let r <bool> = st.take_bool();
+    if (!r) { delete buf; return Err::<bool>(json_join2("json_decode_bool: ", st.err)); }
+    if (!st.at_end()) { delete buf; return Err::<bool>("json_decode_bool: trailing data after the value"); }
+    let v <bool> = st.bval;
+    delete buf;
+    return Ok::<bool>(v);
+}
+
+#[export]
+pub fun json_decode_float(text: string) <Outcome<double>> {
+    let buf <[char]> = json_alive(text);
+    let st <json_scan> = json_scan{buf: buf, end: len(text), pos: 0};
+    let r <bool> = st.take_float();
+    if (!r) { delete buf; return Err::<double>(json_join2("json_decode_float: ", st.err)); }
+    if (!st.at_end()) { delete buf; return Err::<double>("json_decode_float: trailing data after the value"); }
+    let v <double> = st.dval;
+    delete buf;
+    return Ok::<double>(v);
+}
+
+// The decoded string is fresh malloc: the source's bytes were scanned, not
+// aliased, so even an identity decode (no escapes) answers a copy.
+#[export]
+pub fun json_decode_str(text: string) <Outcome<string>> {
+    let buf <[char]> = json_alive(text);
+    let st <json_scan> = json_scan{buf: buf, end: len(text), pos: 0};
+    let r <bool> = st.take_str();
+    if (!r) { delete buf; return Err::<string>(json_join2("json_decode_str: ", st.err)); }
+    if (!st.at_end()) { delete buf; return Err::<string>("json_decode_str: trailing data after the value"); }
+    let v <string> = st.sval;
+    delete buf;
+    return Ok::<string>(v);
+}
+
+#[export]
+pub fun json_encode_int_array(vals: [int], count: int) <string> {
+    let buf <Buffer> = new_buffer(count * 8 + 8);
+    buf.write_char('[');
+    for (let i <int> = 0; i < count; i++) {
+        if (i > 0) { buf.write_char(','); }
+        buf.write_int(vals[i]);
+    }
+    buf.write_char(']');
+    let out <string> = buf.to_string();
+    free_buffer(buf);
+    return out;
+}
+
+#[export]
+pub fun json_decode_int_array(text: string) <Outcome<[int]>> {
+    let buf <[char]> = json_alive(text);
+    let st <json_scan> = json_scan{buf: buf, end: len(text), pos: 0};
+    if (!st.take_char('[')) {
+        delete buf;
+        return Err::<[int]>(json_join2("json_decode_int_array: ", st.err));
+    }
+    if (st.peek_char(']')) {
+        st.pos = st.ws() + 1;
+        let empty <[int]> = new [int, 0]{};
+        delete buf;
+        return Ok::<[int]>(empty);
+    }
+    // The comma walk sizes the exact table first.
+    let cap <int> = 1;
+    for (let k <int> = st.pos; k < st.end; k++) {
+        if (buf[k] == ',') { cap = cap + 1; }
+        if (buf[k] == ']') { break; }
+    }
+    if (cap > 64) {
+        delete buf;
+        return Err::<[int]>("json_decode_int_array: a longer array than the 64-element decode cap");
+    }
+    let stage <[int]> = new [int, cap]{};
+    let n <int> = 0;
+    while (true) {
+        let r <bool> = st.take_int();
+        if (!r) {
+            delete stage;
+            delete buf;
+            return Err::<[int]>(json_join2("json_decode_int_array: ", st.err));
+        }
+        stage[n] = st.ival;
+        n = n + 1;
+        if (st.peek_char(',')) {
+            st.pos = st.ws() + 1;
+            continue;
+        }
+        if (st.peek_char(']')) {
+            st.pos = st.ws() + 1;
+            break;
+        }
+        delete stage;
+        delete buf;
+        return Err::<[int]>("json_decode_int_array: expected ',' or ']'");
+    }
+    let out <[int]> = new [int, n]{};
+    for (let c <int> = 0; c < n; c++) {
+        out[c] = stage[c];
+    }
+    delete stage;
+    delete buf;
+    return Ok::<[int]>(out);
+}
+
+// The `{string, int}` engine pair. Encode sorts by strcmp (byte order), so
+// the same map answers the same bytes on every run; decode answers the
+// likewise-named map and does not sort (header); the payload is the
+// named generic the GAPS bullet owns.
+#[export]
+pub fun json_encode_intmap(m: {string, int}) <string> {
+    let q <HashMap<string, int>> = HashMap::from_prototype(m);
+    let cap <int> = q.slot_count();
+    let keys <[string]> = new [string, cap]{};
+    let vals <[int]> = new [int, cap]{};
+    let n <int> = 0;
+    for (let s <int> = 0; s < cap; s++) {
+        if (q.is_live(s)) {
+            keys[n] = q.key_at(s);
+            vals[n] = q.value_at(s);
+            n = n + 1;
+        }
+    }
+    // Insertion sort on the keys; the values ride along. cmp returns the
+    // C three-way answer, so descending order is a plain sign flip.
+    for (let i <int> = 1; i < n; i++) {
+        let k <string> = keys[i];
+        let v <int> = vals[i];
+        let j <int> = i - 1;
+        while (j >= 0 && compare(keys[j], k) > 0) {
+            keys[j + 1] = keys[j];
+            vals[j + 1] = vals[j];
+            j = j - 1;
+        }
+        keys[j + 1] = k;
+        vals[j + 1] = v;
+    }
+    let buf <Buffer> = new_buffer(n * 32 + 8);
+    buf.write_char('{');
+    for (let i <int> = 0; i < n; i++) {
+        if (i > 0) { buf.write_char(','); }
+        buf.write_char('"');
+        let ek <string> = json_escape(keys[i]);
+        buf.write_string(ek);
+        free_str(ek);
+        buf.write_char('"');
+        buf.write_char(':');
+        buf.write_int(vals[i]);
+    }
+    buf.write_char('}');
+    let out <string> = buf.to_string();
+    free_buffer(buf);
+    return out;
+}
+
+#[export]
+pub fun json_decode_intmap(text: string) <Outcome<HashMap<string, int>>> {
+    let buf <[char]> = json_alive(text);
+    let st <json_scan> = json_scan{buf: buf, end: len(text), pos: 0};
+    if (!st.take_char('{')) {
+        delete buf;
+        return Err::<HashMap<string, int>>(json_join2("json_decode_intmap: ", st.err));
+    }
+    if (st.peek_char('}')) {
+        st.pos = st.ws() + 1;
+        let q <HashMap<string, int>> = HashMap::<string, int>();
+        delete buf;
+        return Ok::<HashMap<string, int>>(q);
+    }
+    let p <{string, int}>;
+    while (true) {
+        if (!st.take_str()) {
+            delete buf;
+            return Err::<HashMap<string, int>>(json_join2("json_decode_intmap: ", st.err));
+        }
+        let k <string> = st.sval;
+        if (!st.take_char(':')) {
+            delete buf;
+            return Err::<HashMap<string, int>>(json_join2("json_decode_intmap: ", st.err));
+        }
+        if (!st.take_int()) {
+            delete buf;
+            return Err::<HashMap<string, int>>(json_join2("json_decode_intmap: ", st.err));
+        }
+        p[k] = st.ival;
+        if (st.peek_char(',')) {
+            st.pos = st.ws() + 1;
+            continue;
+        }
+        if (st.peek_char('}')) {
+            st.pos = st.ws() + 1;
+            break;
+        }
+        delete buf;
+        return Err::<HashMap<string, int>>("json_decode_intmap: expected ',' or '}'");
+    }
+    delete buf;
+    let q <HashMap<string, int>> = HashMap::from_prototype(p);
+    return Ok::<HashMap<string, int>>(q);
+}
+
+// `{string, string}` is the manifest shape: both sides quoted text. Encode
+// escapes both sides (json_escape), decode unescapes both (take_str), so a
+// key/value round-trips through either splice.
+#[export]
+pub fun json_encode_strmap(m: {string, string}) <string> {
+    let q <HashMap<string, string>> = HashMap::from_prototype(m);
+    let cap <int> = q.slot_count();
+    let keys <[string]> = new [string, cap]{};
+    let vals <[string]> = new [string, cap]{};
+    let n <int> = 0;
+    for (let s <int> = 0; s < cap; s++) {
+        if (q.is_live(s)) {
+            keys[n] = q.key_at(s);
+            vals[n] = q.value_at(s);
+            n = n + 1;
+        }
+    }
+    for (let i <int> = 1; i < n; i++) {
+        let k <string> = keys[i];
+        let v <string> = vals[i];
+        let j <int> = i - 1;
+        while (j >= 0 && compare(keys[j], k) > 0) {
+            keys[j + 1] = keys[j];
+            vals[j + 1] = vals[j];
+            j = j - 1;
+        }
+        keys[j + 1] = k;
+        vals[j + 1] = v;
+    }
+    let buf <Buffer> = new_buffer(n * 48 + 8);
+    buf.write_char('{');
+    for (let i <int> = 0; i < n; i++) {
+        if (i > 0) { buf.write_char(','); }
+        buf.write_char('"');
+        let ek <string> = json_escape(keys[i]);
+        buf.write_string(ek);
+        free_str(ek);
+        buf.write_char('"');
+        buf.write_char(':');
+        buf.write_char('"');
+        let ev <string> = json_escape(vals[i]);
+        buf.write_string(ev);
+        free_str(ev);
+        buf.write_char('"');
+    }
+    buf.write_char('}');
+    let out <string> = buf.to_string();
+    free_buffer(buf);
+    return out;
+}
+
+#[export]
+pub fun json_decode_strmap(text: string) <Outcome<HashMap<string, string>>> {
+    let buf <[char]> = json_alive(text);
+    let st <json_scan> = json_scan{buf: buf, end: len(text), pos: 0};
+    if (!st.take_char('{')) {
+        delete buf;
+        return Err::<HashMap<string, string>>(json_join2("json_decode_strmap: ", st.err));
+    }
+    if (st.peek_char('}')) {
+        st.pos = st.ws() + 1;
+        let q <HashMap<string, string>> = HashMap::<string, string>();
+        delete buf;
+        return Ok::<HashMap<string, string>>(q);
+    }
+    let p <{string, string}>;
+    while (true) {
+        if (!st.take_str()) {
+            delete buf;
+            return Err::<HashMap<string, string>>(json_join2("json_decode_strmap: ", st.err));
+        }
+        let k <string> = st.sval;
+        if (!st.take_char(':')) {
+            delete buf;
+            return Err::<HashMap<string, string>>(json_join2("json_decode_strmap: ", st.err));
+        }
+        if (!st.take_str()) {
+            delete buf;
+            return Err::<HashMap<string, string>>(json_join2("json_decode_strmap: ", st.err));
+        }
+        p[k] = st.sval;
+        if (st.peek_char(',')) {
+            st.pos = st.ws() + 1;
+            continue;
+        }
+        if (st.peek_char('}')) {
+            st.pos = st.ws() + 1;
+            break;
+        }
+        delete buf;
+        return Err::<HashMap<string, string>>("json_decode_strmap: expected ',' or '}'");
+    }
+    delete buf;
+    let q <HashMap<string, string>> = HashMap::from_prototype(p);
+    return Ok::<HashMap<string, string>>(q);
+}
+
+}
