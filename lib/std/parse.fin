@@ -192,4 +192,62 @@ pub struct TokenStream {
       }
 }
 
+// The combinators issue #54 names for this module. `seq`/`alt`/`many`/`lit`
+// are consumable spellings over the same machinery the recursive-descent
+// members above give -- match-token, position and seek -- so a parser can
+// answer both questions with one vocabulary: cdk.fin's expression grammar
+// drives turbo-ambiguity through `lit` + the alt/many forms, and a caller
+// who wants all-or-nothing consumes `seq`.
+
+// lit: consume the next token iff it carries `kind`, and answer whether
+// that happened (the token is on the stream either way).
+#[export]
+pub fun lit(ts: &TokenStream, kind: int) <bool> {
+    return ts.match_token(kind);
+}
+
+// many: consume every token of `kind` in a row, answering how many.
+#[export]
+pub fun many(ts: &TokenStream, kind: int) <int> {
+    let count <int> = 0;
+    while (ts.check(kind)) {
+        ts.advance();
+        count = count + 1;
+    }
+    return count;
+}
+
+// alt: consume the first of `kinds` that matches, answering its 1-based
+// position in the list, or 0 when none does.
+#[export]
+pub fun alt(ts: &TokenStream, kinds: [int], n: int) <int> {
+    let i <int> = 0;
+    while (i < n) {
+        if (ts.check(kinds[i])) {
+            ts.advance();
+            return i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// seq: consume `kinds` all in order or nothing at all -- a failed probe
+// rewinds through `position`/`seek` so the stream looks as if the
+// question was never asked.
+#[export]
+pub fun seq(ts: &TokenStream, kinds: [int], n: int) <bool> {
+    let at <int> = ts.position();
+    let i <int> = 0;
+    while (i < n) {
+        if (!ts.check(kinds[i])) {
+            ts.seek(at);
+            return false;
+        }
+        ts.advance();
+        i = i + 1;
+    }
+    return true;
+}
+
 }

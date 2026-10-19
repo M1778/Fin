@@ -1,0 +1,49 @@
+//@ normative
+//@ ok
+// The compiler kit end to end: the issue's own demo language, `calc` --
+// integers, `+ - * /`, parentheses -- run through every stage the kit
+// ships (issue #54).
+//
+// WHAT THE EXAMPLE PINS.
+//
+//   * `calc_eval` answers through the IR: `2 + 3 * 4` is 14 because the
+//     lower emitted `mul` before `add` -- the precedence is the parser's
+//     and the walk is the interpreter's, so a swapped opcode table or a
+//     pre-order lower lands wrong here. `(2 + 3) * 4` is 20 for the
+//     parenthesized shape, and surrounding whitespace is the scanner's
+//     to skip, not the grammar's business.
+//   * `calc_compile` answers the emitted text for the same expression,
+//     one line per instruction: destinations in `fresh_temp` order,
+//     `ir_opcode_name` for the mnemonic, `ret` last. The exact text is
+//     part of the pin.
+//   * The refuse arms are `Outcome::Err` with cdk's own wording -- a
+//     dangling operator is stage 1 ("expected an expression"), an
+//     unclosed paren stage 2, junk after the expression stage 3. A
+//     malformed source is routine input for a kit, never a blame.
+//
+// THE ISSUE'S STRETCH IS NOT TAKEN: emitter::std's CEmitter surface
+// stops at prologue and fn_header, so `cdk_emit_text` is cdk's own
+// transcription with `ir_opcode_name` for the mnemonics, and the module
+// header records the boundary. Diagnostics ride Outcome messages for
+// now, not diag::std's jsonl bag -- same follow-up, stated in the
+// module header beside the stages it affects.
+
+import { calc_eval, calc_compile } from cdk::std;
+import { Outcome } from outcome::std;
+import { free_str } from strings::std;
+
+fun main() <noret> {
+    printf("%d\n", calc_eval("2 + 3 * 4"));
+    printf("%d\n", calc_eval("(2 + 3) * 4"));
+    printf("%d\n", calc_eval(" 1 + 1 "));
+
+    let ok <Outcome<string>> = calc_compile("2 + 3 * 4");
+    blame ok.is_ok(), "the good source compiles";
+    printf("%s", ok.value);
+    free_str(ok.value);
+
+    let bad <Outcome<string>> = calc_compile("1 -");
+    blame bad.is_err(), "a dangling operator is an Err, not a blame";
+    printf("%s\n", bad.message);
+    free_str(bad.message);
+}

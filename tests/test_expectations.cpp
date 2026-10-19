@@ -631,7 +631,13 @@ TEST(Census, EverySampleIsAnnotatedAndClassified) {
     // check/assertions vocabulary; the failing-runner and bench-refusal
     // paths abort by design, so they are pinned in Soundness_Testing
     // instead of here.
-    EXPECT_EQ(t.samples, 71)
+    // 71 -> 72 on 2026-10-19: tests/samples/stdlib/cdk.fin arrives for
+    // issue #54 (compiler kit): calc_eval over the issue's two forms plus
+    // surrounding whitespace, calc_compile's exact emitted IR text
+    // (fresh_temp order, ir_opcode_name mnemonics, ret last), and the
+    // refuse arms as Outcome::Err messages; the grammar rides parse.fin's
+    // lit/alt combinators and the lower is all ir.fin instructions.
+    EXPECT_EQ(t.samples, 72)
         << "the corpus is 51 samples. Sample code changes only by a ratified "
            "language decision (ADR 0008), so a different count is either such a "
            "decision — update this — or a file globbed in by accident";

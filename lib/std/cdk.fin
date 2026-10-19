@@ -1,0 +1,427 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The compiler kit, wired end to end for one demo language: issue #54.
+//
+// THE DEMO LANGUAGE IS `calc`: integers, `+ - * /`, parentheses. The pitch
+// the issue wants is measurable here -- a source string goes to tokens, an
+// AST, IR instructions and back out as text or one evaluated value, with
+// every noun coming from a module this library already ships. What each
+// stage is:
+//
+//   scan   `cdk_scan` drives scanner::std's Scanner through its real
+//          `scan_token` -- every kind constant is token::std's -- so the
+//          table the parser reads is the library's own token stream, not a
+//          re-lex.
+//   parse  `cdk_parse` walks a parse::std TokenStream built on the scan
+//          result; the grammar rides parse::std's `lit`/`alt` combinators
+//          over the same machinery every recursive-descent member uses,
+//          every failure names which stage tripped, and `cdk_stage_message`
+//          words it.
+//   lower  `cdk_lower_node` emits real instructions: ir::std's
+//          `make_ir_const_int`/`make_ir_binop`/`make_ir_ret`, destination
+//          names from `IrFunction::fresh_temp`, into `IrBlock::emit`.
+//   emit   `cdk_emit_text` transcribes the IR block with `ir_opcode_name`
+//          for the mnemonic. emitter::std is NOT used: its CEmitter
+//          surface stops at prologue and fn_header, and a block-level
+//          emitter is the stretch call the issue marks -- this module
+//          would move to it when that surface lands.
+//   eval   `cdk_eval_ir` is cdk's own interpreter over that same
+//          IrFunction, so `calc_eval` answers through the IR, never
+//          through the AST. ir::std answers no executor; this function
+//          is it.
+//
+// v0 DIAGNOSTICS, stated plainly: errors travel as Outcome messages with
+// cdk's own wording, not through diag::std's objects and the jsonl bag the
+// issue names. Wiring the diag module's shape so `finc
+// --diagnostics=json` and cdk agree on rendering is the recorded
+// follow-up; the lowering Ask in the issue (diagnostics on every stage)
+// needs the bag first, and this module's stages refuse by name at the
+// one that fails.
+//
+// OWNERSHIP, stated honestly. `calc_compile`'s emitted text is
+// caller-owned (`free_str`); `cdk_lower`'s Outcome wraps a caller-owned
+// IrFunction (`free_ir_function`). Three leaks this module knows of and
+// takes at demo scale: `fresh_temp`'s name strings (ir::std calls them
+// the struct's words and frees nothing inside an instruction),
+// `cdk_scan`'s token texts outside the slice_str kinds (same rule
+// scanner.fin's other callers live with), and the parse messages. A
+// product pipeline frees the three; the module documents where it would.
+//
+// The eval result roofs at int32; the calc numbers the demo language
+// accepts are the ones that survive that walk. Division by zero is not
+// guarded in the interpreter (the C reference would fault); the language
+// the demo accepts is held to the absence.
+
+import { Scanner, new_scanner, free_scanner } from scanner::std;
+import { Token, tok_eof, tok_int_lit, tok_plus, tok_minus, tok_star, tok_slash, tok_lparen, tok_rparen } from token::std;
+import { TokenStream, lit, alt } from parse::std;
+import { AstNode, make_literal_int, make_binary, free_ast } from ast::std;
+import { IrFunction, IrInstruction, IrBlock, ir_add, ir_sub, ir_mul, ir_div, ir_const_int, make_ir_const_int, make_ir_binop, make_ir_ret, new_ir_function, free_ir_function, ir_opcode_name } from ir::std;
+import { Outcome, Ok, Err } from outcome::std;
+import { Buffer, new_buffer, free_buffer } from buffer::std;
+import { equals, to_chars, len, clone, free_str } from strings::std;
+
+namespace std {
+
+// A scan result: the issue's `scan(text) -> [Token]` with the count the
+// array cannot carry. `free_cdk_tokens` releases the storage.
+#[export]
+pub struct CdkTokens {
+    pub tokens <[Token]>,
+      pub count <int> = 0,
+}
+
+#[export]
+pub fun cdk_scan(text: string) <CdkTokens> {
+    let s <Scanner> = new_scanner(text);
+    let cap <int> = 16;
+    let toks <[Token]> = new [Token, cap]{};
+    let count <int> = 0;
+    let look <Token> = s.scan_token();
+    while (look.kind != tok_eof()) {
+        if (count + 1 >= cap) {
+            let fresh <[Token]> = new [Token, cap * 2]{};
+            let j <int> = 0;
+            while (j < count) {
+                fresh[j] = toks[j];
+                j = j + 1;
+            }
+            delete toks;
+            toks = fresh;
+            cap = cap * 2;
+        }
+        toks[count] = look;
+        count = count + 1;
+        look = s.scan_token();
+    }
+    free_scanner(s);
+    return CdkTokens{tokens: toks, count: count};
+}
+
+// Deletes the token array and frees the texts scanner.fin hands through
+// `slice_str`: the int/float/string/char literal kinds and the kind-1
+// unknown tail. Punctuation and operator tokens wear static spelling, and
+// scanner.fin's backtick arm returns a static text under the ident kind,
+// so those kinds are skipped -- this is the v0 free rule the header
+// records.
+#[export]
+pub fun free_cdk_tokens(t: CdkTokens) <noret> {
+    let i <int> = 0;
+    while (i < t.count) {
+        let k <int> = t.tokens[i].kind;
+        if (k == tok_int_lit() || k == 4 || k == 5 || k == 6 || k == 1) {
+            free_str(t.tokens[i].text);
+        }
+        i = i + 1;
+    }
+    delete t.tokens;
+}
+
+// A parse result: the AST plus which stage failed, 0 meaning none did.
+// `node` is null on any failure.
+#[export]
+pub struct CdkParse {
+    pub node <&AstNode> = null,
+      pub stage <int> = 0,
+}
+
+pub fun cdk_stage_message(stage: int) <string> {
+    if (stage == 1) { return "calc: expected an expression"; }
+    if (stage == 2) { return "calc: expected ')'"; }
+    if (stage == 3) { return "calc: unexpected input after the expression"; }
+    return "calc: malformed input";
+}
+
+// An integer literal's value from its scanned text: `to_chars` gives the
+// only bytes the language can subscript, and the walk is just digits.
+priv fun cdk_digits(text: string) <int> {
+    let chars <[char]> = to_chars(text);
+    let v <int> = 0;
+    let i <int> = 0;
+    while (i < len(text)) {
+        v = v * 10 + cast<int>(chars[i]) - cast<int>('0');
+        i = i + 1;
+    }
+    delete chars;
+    return v;
+}
+
+// The grammar, as methods on one struct: the recursion is circular
+// (atom's paren case re-enters expr) and the checker resolves method
+// calls through the receiver, which is how finc/parser.fin's own
+// recursive-descent members reach each other. `out` carries the node
+// built so far and, on failure, the stage that refused.
+#[export]
+pub struct CdkGrammar {
+
+    // atom: a number, a parenthesized expression, or nothing -- a
+    // refusal, never a fake constant.
+    pub fun atom(self: &Self, ts: &TokenStream, out: &CdkParse) <noret> {
+        if (ts.check(tok_int_lit())) {
+            let t <Token> = ts.advance();
+            out.node = make_literal_int(cdk_digits(t.text), t.line, t.col);
+            return;
+        }
+        if (lit(ts, tok_lparen())) {
+            self.expr(ts, out);
+            if (out.node == null) { return; }
+            if (!lit(ts, tok_rparen())) {
+                free_ast(out.node);
+                out.node = null;
+                out.stage = 2;
+            }
+            return;
+        }
+        out.node = null;
+        if (out.stage == 0) { out.stage = 1; }
+    }
+
+    // mul: `*` and `/` bind.
+    pub fun mul(self: &Self, ts: &TokenStream, out: &CdkParse) <noret> {
+        self.atom(ts, out);
+        if (out.node == null) { return; }
+        let lhs <&AstNode> = out.node;
+        let m_types <[int]> = new [int, 2]{};
+        m_types[0] = tok_star();
+        m_types[1] = tok_slash();
+        let going <bool> = true;
+        while (going) {
+            let which <int> = alt(ts, m_types, 2);
+            if (which == 0) { going = false; }
+            else {
+                self.atom(ts, out);
+                if (out.node == null) {
+                    free_ast(lhs);
+                    return;
+                }
+                let rhs <&AstNode> = out.node;
+                if (which == 1) {
+                    lhs = make_binary("*", lhs, rhs, 1, 1);
+                } else {
+                    lhs = make_binary("/", lhs, rhs, 1, 1);
+                }
+            }
+        }
+        out.node = lhs;
+    }
+
+    // expr: `+` and `-`, left-associative.
+    pub fun expr(self: &Self, ts: &TokenStream, out: &CdkParse) <noret> {
+        self.mul(ts, out);
+        if (out.node == null) { return; }
+        let lhs <&AstNode> = out.node;
+        let pm <[int]> = new [int, 2]{};
+        pm[0] = tok_plus();
+        pm[1] = tok_minus();
+        let going <bool> = true;
+        while (going) {
+            let which <int> = alt(ts, pm, 2);
+            if (which == 0) { going = false; }
+            else {
+                self.mul(ts, out);
+                if (out.node == null) {
+                    free_ast(lhs);
+                    return;
+                }
+                let rhs <&AstNode> = out.node;
+                if (which == 1) {
+                    lhs = make_binary("+", lhs, rhs, 1, 1);
+                } else {
+                    lhs = make_binary("-", lhs, rhs, 1, 1);
+                }
+            }
+        }
+        out.node = lhs;
+    }
+}
+
+#[export]
+pub fun cdk_parse(toks: CdkTokens) <CdkParse> {
+    let ts <TokenStream> = TokenStream{};
+    ts.init(toks.tokens, toks.count);
+    let g <CdkGrammar> = CdkGrammar{};
+    let out <CdkParse> = CdkParse{node: null, stage: 0};
+    g.expr(&ts, &out);
+    if (out.node == null) {
+        if (out.stage == 0) { out.stage = 1; }
+        return out;
+    }
+    if (!ts.is_at_end()) {
+        free_ast(out.node);
+        out.node = null;
+        out.stage = 3;
+        return out;
+    }
+    return out;
+}
+
+// Lowering one node by dispatching on its kind: the AST the calc parser
+// builds is literals and binaries only. Literals wear kind 26 and
+// binaries kind 20, and the op name in `.name` picks the opcode. The
+// answer is the temp name holding the value.
+pub fun cdk_lower_node(root: &AstNode, irfn: &IrFunction) <string> {
+    if (root.kind == 26) {
+        let base <string> = irfn.fresh_temp();
+        let blk <IrBlock> = irfn.blocks[0];
+        blk.emit(make_ir_const_int(base, root.int_val));
+        irfn.blocks[0] = blk;
+        return base;
+    }
+    let left <string> = cdk_lower_node(root.left, irfn);
+    let right <string> = cdk_lower_node(root.right, irfn);
+    let dest <string> = irfn.fresh_temp();
+    let op <int> = ir_add();
+    if (equals(root.name, "+")) { op = ir_add(); }
+    else if (equals(root.name, "-")) { op = ir_sub(); }
+    else if (equals(root.name, "*")) { op = ir_mul(); }
+    else if (equals(root.name, "/")) { op = ir_div(); }
+    let blk <IrBlock> = irfn.blocks[0];
+    blk.emit(make_ir_binop(op, dest, left, right));
+    irfn.blocks[0] = blk;
+    return dest;
+}
+
+// The full lower: text to IR, or the Err naming the refusing parse
+// stage. The IrFunction handed back is caller-owned (free_ir_function).
+#[export]
+pub fun cdk_lower(text: string) <Outcome<IrFunction>> {
+    let toks <CdkTokens> = cdk_scan(text);
+    let p <CdkParse> = cdk_parse(toks);
+    if (p.node == null) {
+        let msg <string> = cdk_stage_message(p.stage);
+        free_cdk_tokens(toks);
+        return Err::<IrFunction>(msg);
+    }
+    let irfn <IrFunction> = new_ir_function("calc", "int");
+    irfn.add_block("body");
+    let val_name <string> = cdk_lower_node(p.node, &irfn);
+    let blk <IrBlock> = irfn.blocks[0];
+    blk.emit(make_ir_ret(val_name));
+    irfn.blocks[0] = blk;
+    free_cdk_tokens(toks);
+    return Ok::<IrFunction>(irfn);
+}
+
+// The emitted text: one line per instruction, `dest = name args`, with
+// ir_opcode_name for the mnemonic. The text leaves the Buffer: the
+// caller owns it and frees it with free_str.
+//
+// SPELLING CONSTRAINED BY THE STAGE: this takes the IrFunction by value
+// because a read of an array field through a struct POINTER parameter
+// (`f.blocks[0]` where `f: &IrFunction`) segfaults both stage compilers
+// while the reference lowers it -- the scalar `f.next_temp` read and the
+// `f.blocks[0] = blk` store through the pointer both lower fine, which
+// is how cdk_lower_node stays a pointer. The by-value copy shares the
+// array header word, so nothing is duplicated.
+#[export]
+pub fun cdk_emit_text(irfn: IrFunction) <string> {
+    let b <Buffer> = new_buffer(256);
+    let blk <IrBlock> = irfn.blocks[0];
+    let j <int> = 0;
+    while (j < blk.count) {
+        let inst <IrInstruction> = blk.instructions[j];
+        if (inst.opcode == ir_const_int()) {
+            b.write_string(inst.dest);
+            b.write_string(" = ");
+            b.write_string(ir_opcode_name(inst.opcode));
+            b.write_string(" ");
+            b.write_int(inst.int_val);
+        } else if (inst.opcode == 32) {
+            b.write_string("ret ");
+            b.write_string(inst.src1);
+        } else {
+            b.write_string(inst.dest);
+            b.write_string(" = ");
+            b.write_string(ir_opcode_name(inst.opcode));
+            b.write_string(" ");
+            b.write_string(inst.src1);
+            b.write_string(" ");
+            b.write_string(inst.src2);
+        }
+        b.write_line("");
+        j = j + 1;
+    }
+    let out <string> = b.to_string();
+    free_buffer(b);
+    return out;
+}
+
+// The temp number a "%tN" name carries: the interpreter's slot index.
+priv fun cdk_tnum(name: string) <int> {
+    let n <int> = len(name);
+    let chars <[char]> = to_chars(name);
+    let v <int> = 0;
+    let i <int> = 2;
+    while (i < n) {
+        v = v * 10 + cast<int>(chars[i]) - cast<int>('0');
+        i = i + 1;
+    }
+    delete chars;
+    return v;
+}
+
+// The interpreter: each instruction reads its sources from the slot
+// table and writes its dest, exactly like the register walk the emitted
+// text names. The answers come from the IR, never from the AST. It
+// takes the function by value for the same stage-side Array field reads
+// via pointer parameters that cdk_emit_text documents; the copy shares
+// the blocks header.
+#[export]
+pub fun cdk_eval_ir(irfn: IrFunction) <int> {
+    let slots <[int]> = new [int, irfn.next_temp + 1]{};
+    let blk <IrBlock> = irfn.blocks[0];
+    let j <int> = 0;
+    while (j < blk.count) {
+        let inst <IrInstruction> = blk.instructions[j];
+        if (inst.opcode == ir_const_int()) {
+            slots[cdk_tnum(inst.dest)] = inst.int_val;
+        } else if (inst.opcode == 32) {
+            let answer <int> = slots[cdk_tnum(inst.src1)];
+            delete slots;
+            return answer;
+        } else {
+            let a <int> = slots[cdk_tnum(inst.src1)];
+            let bv <int> = slots[cdk_tnum(inst.src2)];
+            let v <int> = 0;
+            if (inst.opcode == ir_add()) { v = a + bv; }
+            else if (inst.opcode == ir_sub()) { v = a - bv; }
+            else if (inst.opcode == ir_mul()) { v = a * bv; }
+            else if (inst.opcode == ir_div()) { v = a / bv; }
+            slots[cdk_tnum(inst.dest)] = v;
+        }
+        j = j + 1;
+    }
+    delete slots;
+    blame false, "calc: the IR ended without a return";
+    return 0;
+}
+
+// The compile stage the issue names: source to emitted text, or an Err
+// naming the refusing parse stage. The Err message is a clone, so the
+// caller's free_str has something it owns.
+#[export]
+pub fun calc_compile(text: string) <Outcome<string>> {
+    let lo <Outcome<IrFunction>> = cdk_lower(text);
+    if (lo.is_err()) {
+        let copied <string> = clone(lo.message);
+        return Err::<string>(copied);
+    }
+    let emitted <string> = cdk_emit_text(lo.value);
+    free_ir_function(lo.value);
+    return Ok::<string>(emitted);
+}
+
+// The run shape the issue names: source, evaluated. A malformed input
+// blames with the parse wording, because an int has no Err to hand
+// back.
+#[export]
+pub fun calc_eval(text: string) <int> {
+    let lo <Outcome<IrFunction>> = cdk_lower(text);
+    if (lo.is_err()) {
+        blame false, lo.message;
+    }
+    let v <int> = cdk_eval_ir(lo.value);
+    free_ir_function(lo.value);
+    return v;
+}
+
+}

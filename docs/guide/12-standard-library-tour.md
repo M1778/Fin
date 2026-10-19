@@ -46,7 +46,8 @@ executable. The examples below mark those boundaries.
 | [testing](../../lib/std/testing.fin) | `assert_true`/`assert_false`, `assert_eq/ne_*`, `assert_null`/`assert_not_null`, `check`, `for_all`, `shrink`, `bench` | Assertions build and run (`assert_eq_int(1 + 1, 2, ...)` probed live); failures blame, they do not raise catchable errors; `for_all(seed, n, gen, prop)` runs `gen(seed + i)` for i in 0..n-1, silent while it holds, and blames naming the first failing input plus the minimally failing one, which `shrink` also answers on its own (the smallest failing input in the halving chain -- 100 against a property failing from 8 up names 12, pinned in `Soundness_Testing` and the bundled sample); `bench` refuses honestly ("ns/op needs sub-second timing (issue #59); sec resolution lies about the magnitude") until #59 lands, because a whole-second timing would print a magnitude it does not know; `*_test.fin` programs run under `tools/fintest` (`fintest --file <path>` ctest lanes, seed dir `fintest/`), and the libFuzzer parser harness recipe lives in `fuzz/parse_fuzz.cpp`'s header, Clang-only, #84's |
 | [token](../../lib/std/token.fin) | `tok_*()`, `kw_*()`, `is_keyword`, `token_name`, `Token` | Kind helpers and `Token` values build and run (`tok_ident() == 2`, `token_name` probed live); use the `tok_*()`/`kw_*()` functions because the `TOKEN_*`/`KW_*` consts resolve but are refused in codegen (`the name 'TOKEN_EOF' is not lowered yet`); consumed by `finc/driver` and `finc/parser` |
 | [scanner](../../lib/std/scanner.fin) | `Scanner`, `new_scanner`, `free_scanner`, `peek`/`peek_next`/`advance` | `new_scanner` with `peek` builds and runs (`peek("let x = 1;") == 'l'` probed live); release with `free_scanner`; consumed by `finc/driver` |
-| [parse](../../lib/std/parse.fin) | `prec_*()`, `binary_precedence`, `unary_precedence`, `is_right_associative` | Precedence helpers build and run; consumed by `finc/parser` |
+| [parse](../../lib/std/parse.fin) | `prec_*()`, `binary_precedence`, `unary_precedence`, `is_right_associative`, `TokenStream` (`check`/`match_token`/`expect`/`position`/`seek`), the `lit`/`alt`/`many`/`seq` combinators | Precedence helpers build and run; the combinators are consumable spellings over the same stream machinery (`lit` = match, `many` = repeated `alt`, `seq` = all-or-rewind), consumed by `cdk.fin`'s grammar and `finc/parser` |
+| [cdk](../../lib/std/cdk.fin) | `cdk_scan`/`cdk_parse`/`cdk_lower`/`cdk_emit_text`/`cdk_eval_ir`, `calc_compile` (`Outcome<string>`), `calc_eval`, `CdkTokens`/`CdkParse`/`CdkGrammar`, `free_cdk_tokens` | The write-a-language-in-200-lines demo: scanner::std's `scan_token` (never re-lexed) -> parse::std's TokenStream + combinators -> ast::std makers -> ir::std instructions (`fresh_temp` dests, `IrBlock::emit`) -> `calc_eval("2 + 3 * 4") == 14` through the interpreter; `calc_compile` answers the emitted text (pin byte-exact in the sample: `%t0 = const_int 2` ... `ret %t4`); refuse arms are `Outcome::Err` naming the parse stage -- never a blame; v0 boundaries recorded in the module header: emit is cdk's own transcription (emitter::std's CEmitter stops at prologue/fn_header), errors are cdk wordings not yet diag::std's jsonl bag, temp-name strings are process-end leaks at demo scale; readers take the IrFunction by value because the stage crash-reads an array field through a struct pointer parameter (scalar reads and stores through the pointer lower fine) |
 | [ast](../../lib/std/ast.fin) | `ast_*()`, `node_kind_name`, `AstNode`, `make_*` makers, `free_ast` | Kind helpers, `make_literal_int`, and `free_ast` build and run; consumed by `finc/driver`, `finc/parser`, `finc/checker`, and `finc/codegen` |
 | [printer](../../lib/std/printer.fin) | `op_symbol`, `AstPrinter`, `new_ast_printer`, `free_ast_printer`, `format_expr`, `format_stmt` | `format_expr` over a made literal builds and runs (`41` round-trips probed live); `format_stmt` is consumed by `finc/driver` |
 | [scope](../../lib/std/scope.fin) | `sym_*()`, `symbol_kind_name`, `Symbol`, `Scope`, `new_scope`, `free_scope`, `insert_symbol`, `lookup`, `has`, `depth` | `new_scope` with `insert_symbol`, `has`, and `depth` builds and runs; release with `free_scope`; consumed by `finc/checker` |
@@ -329,3 +330,49 @@ Treat these APIs as incomplete library work, not automatic memory safety.
 The language's ordinary destructor support does not imply that this library's
 ownership protocol is complete. For a small application, use explicit allocation,
 a clear owner, and one cleanup path.
+
+## Write a language in a few hundred lines
+
+`cdk::std` (issue #54) is the pitch made real: one import, source string
+to object text or one evaluated value, with every noun reused from the
+modules this library already ships -- scanner::std's `scan_token` for the
+front end, token::std's kind constants, parse::std's `TokenStream` plus
+the `lit`/`alt`/`many`/`seq` combinators, ast::std's node makers, and
+ir::std's instruction makers. The demo language is `calc`: integers,
+`+ - * /`, parentheses. `calc_eval` answers through an IR interpreter, so
+precedence comes from the parse and the value from the instructions:
+
+```fin
+import { calc_eval, calc_compile } from cdk::std;
+import { Outcome } from outcome::std;
+import { free_str } from strings::std;
+
+fun main() <noret> {
+    printf("%d\n", calc_eval("(2 + 3) * 4"));
+    let ok <Outcome<string>> = calc_compile("2 + 3 * 4");
+    printf("%s", ok.value);
+    free_str(ok.value);
+}
+```
+
+```output
+20
+%t0 = const_int 2
+%t1 = const_int 3
+%t2 = const_int 4
+%t3 = mul %t1 %t2
+%t4 = add %t0 %t3
+ret %t4
+```
+
+Refuse shapes are `Outcome::Err` naming the parse stage -- `calc:
+expected an expression` for a dangling operator, `calc: expected ')'`
+for an unclosed paren, `calc: unexpected input after the expression`
+for junk on the tail -- because malformed source is a kit's routine
+input, never a blame. The v0 boundaries are in the module header: emit
+is cdk's own transcription (emitter::std's CEmitter stops at
+prologue/fn_header, the stretch the issue marks), errors are cdk
+wordings rather than diag::std's jsonl bag, and `fresh_temp`'s name
+strings are demo-scale process-end leaks. The bundled sample
+`tests/samples/stdlib/cdk.fin` pins the eval facts, the exact emitted
+text, and the Err wordings on all three compilers.
