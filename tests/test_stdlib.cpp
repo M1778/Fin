@@ -1881,6 +1881,58 @@ TEST(Soundness_Outcome, ThePropagationPatternRelaysAnErrInExecutableForm) {
               "");
 }
 
+TEST(Soundness_Testing, APropertyFindsTheInjectedBugAndNamesTheMinimalInput) {
+    // The acceptance test issue #55 asks for: `for_all` over a property with a
+    // planted bug aborts the run, and the blame message carries BOTH the first
+    // failing input and the shrinker's answer. gen is the identity and the
+    // holds-property is `x < 8`, violated from input 100 on -- 100 is the
+    // first `gen(100 + i)` the runner sees. The halving chain documented in
+    // lib/std/testing.fin's header walks 100 -> 50 -> 25 -> 12 and stops when
+    // 6 holds, so the message must name 12, not 8 (a halving shrinker is not a
+    // decrement search) and not 0.
+    const std::string out = buildBundledAndRun(
+        "import { for_all } from testing::std;\n"
+        "fun main() <noret> {\n"
+        "    for_all(100, 10, (x: int) <int> => x, (x: int) <bool> => x < 8);\n"
+        "    printf(\"unreachable\\n\");\n"
+        "}\n");
+    EXPECT_NE(out.find("program exited non-zero"), std::string::npos)
+        << "a failing property aborts the run, that is what a runner does:\n" << out;
+    EXPECT_NE(out.find("for_all: property failed at input 100, minimally at 12 (halving shrink)"),
+              std::string::npos)
+        << "both the first failing input and the minimal one are the message:\n" << out;
+    EXPECT_EQ(out.find("unreachable"), std::string::npos)
+        << "whatever follows an aborted property must not run:\n" << out;
+}
+
+TEST(Soundness_Testing, BenchRefusesUntilTheSubSecondClockLands) {
+    // `bench` is the honest stub issue #55 told the assignee to ship: ns/op
+    // needs the sub-second clock issue #59 owns, and whole-second wall timing
+    // would print a magnitude it does not know. So it refuses loudly instead,
+    // through the module's own blame vocabulary, and never calls the body --
+    // a refusal must not launder one measured iteration into a claimed rate.
+    const std::string out = buildBundledAndRun(
+        "import { bench } from testing::std;\n"
+        "fun tick() <noret> {\n"
+        "    printf(\"tick\\n\");\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    bench(\"noop\", 10, tick);\n"
+        "    printf(\"unreachable\\n\");\n"
+        "}\n");
+    EXPECT_NE(out.find("program exited non-zero"), std::string::npos)
+        << "bench refuses, it does not guess:\n" << out;
+    EXPECT_NE(
+        out.find("bench refuses: ns/op needs sub-second timing (issue #59); sec resolution "
+                 "lies about the magnitude"),
+        std::string::npos)
+        << "the refusal names the owner of the gap:\n" << out;
+    EXPECT_EQ(out.find("tick"), std::string::npos)
+        << "a refused bench never runs the body:\n" << out;
+    EXPECT_EQ(out.find("unreachable"), std::string::npos)
+        << "whatever follows a refused bench must not run:\n" << out;
+}
+
 #endif  // FIN_TESTS_HAVE_BACKEND
 
 TEST(Soundness_BundledStdlib, TheIOResultAndFileSurfacesResolve) {

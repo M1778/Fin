@@ -2168,8 +2168,18 @@ fn_type:
         $$ = std::move(fnty);
         $$->setLoc(@$);
     }
-    /* Handle empty params fn() => int */
+    /* Handle empty params fn() => int. Both arrows end a return type
+       (the ARROW/RARROW token precedence note at the top says why this
+       spelling pair exists), and docs/guide/05-functions.md documents
+       `fn(ArgumentTypes) -> ReturnType` as the written form with `=>`
+       accepted -- in every arity, so the zero-argument form carries both
+       variants the way the non-empty form does. */
     | KW_FN_TYPE LPAREN RPAREN ARROW type {
+        std::vector<std::unique_ptr<fin::TypeNode>> empty;
+        $$ = std::make_unique<fin::FunctionTypeNode>(std::move(empty), std::move($5));
+        $$->setLoc(@$);
+    }
+    | KW_FN_TYPE LPAREN RPAREN RARROW type {
         std::vector<std::unique_ptr<fin::TypeNode>> empty;
         $$ = std::make_unique<fin::FunctionTypeNode>(std::move(empty), std::move($5));
         $$->setLoc(@$);

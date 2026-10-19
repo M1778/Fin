@@ -3,6 +3,25 @@
 //
 // Matches Python's `unittest` / `pytest` assertion helpers, using Fin's native
 // `blame` statement for failure reporting.
+//
+// THE PROPERTY RUNNER (issue #55). `for_all(seed, n, gen, prop)` runs the
+// property over `n` deterministic inputs, `gen(seed + i)` for i in 0..n-1,
+// and stays silent while it holds -- a passing property prints nothing, the
+// way a runner should. The first failing input is shrunk and blamed: the
+// blame message carries both the input and the minimally failing value, so
+// a run's stderr names the bug it found.
+//
+// THE SHRINK ALGORITHM `shrink(prop, bad)` answers. The smallest failing
+// input in the halving chain that starts at `bad`: walk bad -> bad/2 ->
+// bad/4, following each half that still fails, and stop at the first half
+// the property holds on. The answer is the last failing candidate (or 0
+// when the chain reaches it); it is the minimal *halving-reachable*
+// failure, not the global minimum -- 100 against a property failing at
+// x >= 8 walks 100 -> 50 -> 25 -> 12 and stops, naming 12, and this file
+// documents exactly that instead of promising more. Halving only: no
+// decrement pass, nothing in the corpus needs one yet.
+
+import { Buffer, new_buffer, free_buffer, free_string } from buffer::std;
 
 namespace std {
 
@@ -85,6 +104,74 @@ pub fun assert_null(ptr: &void, msg: string) <noret> {
 #[export]
 pub fun assert_not_null(ptr: &void, msg: string) <noret> {
     blame ptr != null, msg;
+}
+
+// The canonical single assertion: the name the guide writes when a test
+// has one thing to say. Same polarity as `blame` -- the argument is the
+// condition that must hold.
+#[export]
+pub fun check(cond: bool, msg: string) <noret> {
+    blame cond, msg;
+}
+
+// The halving shrinker `for_all` reports through. Documented in this
+// file's header: the smallest failing input in the halving chain that
+// starts at `bad`, where a failing input is one the property does not
+// hold on. The walk assumes a nonnegative start; a negative `bad` has
+// no halving chain (negative halves round toward zero) and answers
+// unchanged.
+#[export]
+pub fun shrink(prop: fn(int) -> bool, bad: int) <int> {
+    let candidate <int> = bad;
+    let walking <bool> = candidate > 1;
+    while (walking) {
+        let half <int> = candidate / 2;
+        if (!prop(half)) {
+            candidate = half;
+            walking = candidate > 1;
+        } else {
+            walking = false;
+        }
+    }
+    return candidate;
+}
+
+// The property runner. Inputs are `gen(seed + i)` for i in 0..n-1 -- a
+// negative `n` runs nothing -- and a passing property is silent. The
+// first failing input blames with the field solver's message:
+//
+//   for_all: property failed at input F, minimally at M (halving shrink)
+//
+// where M is `shrink(prop, F)`, so a run's stderr names both the first
+// failing input and the minimally failing one.
+#[export]
+pub fun for_all(seed: int, n: int, gen: fn(int) -> int, prop: fn(int) -> bool) <noret> {
+    let i <int> = 0;
+    while (i < n) {
+        let input <int> = gen(seed + i);
+        if (!prop(input)) {
+            let minimal <int> = shrink(prop, input);
+            let b <Buffer> = new_buffer(96);
+            b.write_string("for_all: property failed at input ");
+            b.write_int(input);
+            b.write_string(", minimally at ");
+            b.write_int(minimal);
+            b.write_string(" (halving shrink)");
+            let msg <string> = b.to_string();
+            free_buffer(b);
+            blame false, msg;
+        }
+        i = i + 1;
+    }
+}
+
+// The benchmark stub. Honest refusal: whole-second wall timing cannot
+// answer ns/op without lying about the magnitude, and #59 owns the
+// sub-second clock this needs. It refuses loudly instead of printing a
+// number the caller would repeat.
+#[export]
+pub fun bench(name: string, iters: int, body: fn() -> noret) <noret> {
+    blame false, "bench refuses: ns/op needs sub-second timing (issue #59); sec resolution lies about the magnitude";
 }
 
 }

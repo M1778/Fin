@@ -624,7 +624,14 @@ TEST(Census, EverySampleIsAnnotatedAndClassified) {
     // interner's same-text-same-id rule with a concat-computed copy landing
     // on the stored id, under `blame` and the byte-for-byte agreement
     // harness on all three compilers.
-    EXPECT_EQ(t.samples, 70)
+    // 70 -> 71 on 2026-10-19: tests/samples/stdlib/testing.fin arrives for
+    // issue #55 (testing++): the property runner silent on a passing
+    // property (empty stdout is part of the pin), the halving shrinker
+    // named from a planted bug's chain (100 -> 50 -> 25 -> 12), and the
+    // check/assertions vocabulary; the failing-runner and bench-refusal
+    // paths abort by design, so they are pinned in Soundness_Testing
+    // instead of here.
+    EXPECT_EQ(t.samples, 71)
         << "the corpus is 51 samples. Sample code changes only by a ratified "
            "language decision (ADR 0008), so a different count is either such a "
            "decision — update this — or a file globbed in by accident";
