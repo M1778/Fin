@@ -617,7 +617,14 @@ TEST(Census, EverySampleIsAnnotatedAndClassified) {
     // chain, under `blame` and the byte-for-byte agreement harness on all
     // three compilers. The tmpdir means no line prints a path (mkdtemp is
     // random) and no call touches a fixed one.
-    EXPECT_EQ(t.samples, 68)
+    // 68 -> 70 on 2026-10-19: tests/samples/stdlib/btreemap.fin and
+    // tests/samples/stdlib/intern.fin arrive for issue #63 (collections II):
+    // the sorted-walk contract (out-of-order strings and ints read back
+    // under the caller's comparator), replace/remove/find facts, and the
+    // interner's same-text-same-id rule with a concat-computed copy landing
+    // on the stored id, under `blame` and the byte-for-byte agreement
+    // harness on all three compilers.
+    EXPECT_EQ(t.samples, 70)
         << "the corpus is 51 samples. Sample code changes only by a ratified "
            "language decision (ADR 0008), so a different count is either such a "
            "decision — update this — or a file globbed in by accident";

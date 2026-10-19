@@ -27,6 +27,11 @@
 // broken, and the address paired with a content equality would be the same
 // breakage in the other direction.
 //
+// ITERATION ORDER IS UNSPECIFIED: the walk order of `keys`/`values` is the
+// bucket layout, which may change with any rehash, and nothing here promises
+// more. A caller who needs a deterministic walk uses btreemap::std, whose
+// whole contract is that index order is sorted order in every compiler.
+//
 // A caller who needs a different hash supplies one. `hasher <fn(any) -> int>` is a
 // field, `HashMap::with_hasher(f)` is the static that sets it, and `hash_key` consults
 // it when it is not null. That is the extension point instead of a `Hashable`

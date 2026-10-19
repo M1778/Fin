@@ -1,0 +1,70 @@
+//@ normative
+//@ ok
+// The Interner (issue #63). lib/std/intern.fin is the module; this file is
+// the runnable half of the specification.
+//
+// THE ONE RULE A SCANNER NEEDS IS PINNED HERE: same text, same id -- and
+// the answer must not depend on a pointer word or a hash, because the
+// compiler interns names that were computed, not just spelled. The third
+// leg interns a `concat`-computed copy of an already-interned text: it
+// lands on the stored id by content comparison alone, which is the
+// property the linear sweep owns and the property the first dedup blame
+// cannot distinguish from pointer luck.
+//
+// WHAT THE PRINTS PIN. Ids are the array index in interned order, so a
+// fresh interner answers 0, 1, 2 in the order the texts arrive, and the
+// size is the number of distinct texts. `blame`s carry the stability rule
+// (the first id stays stable after later appends) and the round trip
+// (resolve answers the stored text).
+//
+// OWNERSHIP. `intern` stores its own copy, so the computed string here is
+// freed. `resolve` answers the interner's string, not a copy: nothing in
+// this file calls `free_str` on a resolve result; `free_interner` releases
+// them all.
+
+import { Interner } from intern::std;
+import { equals, concat, free_str } from strings::std;
+
+fun main() <noret> {
+    let ti <Interner> = Interner::new_interner();
+
+    // Same text, same id; different text, different id. The ids are the
+    // interned order, printed and pinned.
+    let id_a <int> = ti.intern("a");
+    let id_a_again <int> = ti.intern("a");
+    blame id_a_again == id_a, "interning the same text twice is one id";
+    let id_b <int> = ti.intern("b");
+    let id_c <int> = ti.intern("c");
+    blame id_b != id_a && id_c != id_b && id_c != id_a, "distinct texts get distinct ids";
+    printf("ids=%d %d %d\n", id_a, id_b, id_c);
+    printf("size=%d\n", ti.size());
+    blame ti.size() == 3, "three distinct texts, three ids";
+
+    // The first id stays stable while later texts append.
+    let id_a_after <int> = ti.intern("a");
+    blame id_a_after == id_a, "the first id stays stable after later appends";
+
+    // Resolve round-trips: the interner's stored instance, by id.
+    printf("first=%s\n", ti.resolve(id_a));
+    blame equals(ti.resolve(id_b), "b"), "resolve answers the interned text";
+    blame equals(ti.resolve(id_a), ti.resolve(id_a)), "the same id answers the same text";
+
+    // A computed copy of a stored text lands on the stored id: equality is
+    // content, not a pointer word. The copy is the caller's; it frees.
+    let copy <string> = concat("a", "");
+    let id_copy <int> = ti.intern(copy);
+    blame id_copy == id_a, "a computed copy interns to the stored id";
+    free_str(copy);
+
+    // Growing past the first allocation keeps every earlier id.
+    let id_d <int> = ti.intern("directory");
+    let id_e <int> = ti.intern("enumerator");
+    let id_f <int> = ti.intern("field");
+    let id_g <int> = ti.intern("goto");
+    blame id_d == 3 && id_e == 4 && id_f == 5 && id_g == 6, "ids are appended in order past the growth";
+    blame equals(ti.resolve(id_d), "directory"), "an id from before the growth still resolves";
+    printf("size=%d\n", ti.size());
+    blame ti.size() == 7, "seven distinct texts interned";
+
+    ti.free_interner();
+}

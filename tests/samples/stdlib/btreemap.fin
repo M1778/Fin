@@ -1,0 +1,87 @@
+//@ normative
+//@ ok
+// The BTreeMap ordered map (issue #63). lib/std/btreemap.fin is the module;
+// this file is the runnable half of the specification.
+//
+// THE ONE PROPERTY CODEGEN NEEDS IS PINNED HERE. Pairs go in out of order
+// and read back in comparator order, by index, on every compiler at every
+// opt level -- a map whose walk must never depend on hashing. The `blame`s
+// carry the found/absent, replace, and remove facts the prints cannot see;
+// nothing here dereferences a hash bucket, because there are none.
+//
+// THE COMPARATOR IS THE CALLER'S. The two legs exercise both key kinds this
+// surface supports today: `string` keys ordered by strings::std's `compare`
+// (content order, so a byte-deterministic answer across runs of the same
+// program), and `int` keys ordered by `<`. The two-sided equal test is the
+// module's only equality, so these comparators are the whole story.
+//
+// REPLACEMENT, NOT DUPLICATE: inserting a key that sorts equal to a stored
+// one overwrites that slot's value and answers false, while a new key
+// answers true. Both are blame-pinned; re-reading the replaced slot finds
+// the new value.
+//
+// OWNERSHIP. The map stores the key words as they arrived: the literals
+// here live forever and are never freed, and `free_btree_map` releases the
+// two arrays but not the stored words, the way the module header states.
+
+import { BTreeMap } from btreemap::std;
+import { compare } from strings::std;
+
+fun main() <noret> {
+    // String keys, inserted out of order, read back sorted.
+    let map <BTreeMap<string, int>> = BTreeMap::<string, int>::new_btree_map((a: string, b: string) <bool> => compare(a, b) < 0);
+    let added_date <bool> = map.insert("date", 4);
+    let added_fig <bool> = map.insert("fig", 2);
+    let added_apple <bool> = map.insert("apple", 1);
+    blame added_date && added_fig && added_apple, "each first-time key answers true";
+    printf("len=%d\n", map.len());
+
+    // The walk reads back sorted: comparators order, arrays store.
+    let i <int> = 0;
+    while (i < map.len()) {
+        printf("%s=%d\n", map.key_at(i), map.value_at(i));
+        i = i + 1;
+    }
+
+    // Find answers the sorted index, or -1 for an absent key.
+    printf("found_fig=%d\n", map.find("fig"));
+    printf("absent=%d\n", map.find("nope"));
+    blame map.find("apple") == 0, "the first key sorts to index zero";
+    blame map.find("fig") == 2, "the last key sorts to the last index";
+    blame map.find("nope") == 0 - 1, "an absent key answers -1";
+
+    // Replacement overwrites the slot and answers false; the value read
+    // back is the replaced one.
+    let replaced <bool> = map.insert("date", 400);
+    blame !replaced, "an equal key replaces and answers false";
+    printf("val=%d\n", map.value_at(map.find("date")));
+    blame map.value_at(map.find("date")) == 400, "the replacement is the value the slot holds";
+    blame map.len() == 3, "a replacement does not grow the map";
+
+    // Removal unshifts the tail; an absent key answers false twice over.
+    blame map.remove("fig"), "removing a present key answers true";
+    blame !map.remove("fig"), "removing an absent key answers false";
+    printf("len=%d\n", map.len());
+    blame map.find("fig") == 0 - 1, "the removed key no longer finds";
+    let j <int> = 0;
+    while (j < map.len()) {
+        printf("%s=%d\n", map.key_at(j), map.value_at(j));
+        j = j + 1;
+    }
+    map.free_btree_map();
+
+    // The int leg orders with `<`; insertion order 3, 1, 2 walks 1, 2, 3.
+    let imap <BTreeMap<int, int>> = BTreeMap::<int, int>::new_btree_map((a: int, b: int) <bool> => a < b);
+    let added3 <bool> = imap.insert(3, 33);
+    let added1 <bool> = imap.insert(1, 11);
+    let added2 <bool> = imap.insert(2, 22);
+    blame added3 && added1 && added2, "each first-time int key answers true";
+    printf("int_len=%d\n", imap.len());
+    let k <int> = 0;
+    while (k < imap.len()) {
+        printf("%d: %d\n", imap.key_at(k), imap.value_at(k));
+        k = k + 1;
+    }
+    blame imap.find(4) == 0 - 1, "an int key never inserted does not find";
+    imap.free_btree_map();
+}

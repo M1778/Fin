@@ -1,0 +1,167 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// BTreeMap: the ordered map (issue #63). The compiler needs a map whose
+// iteration order does not depend on hashing -- codegen output would iterate
+// names, and a hash order can differ between runs of the same program, so
+// codegen must never depend on it (the determinism rule HashMap's header
+// states; this module is the ordered answer).
+//
+// HOW IT IS BUILT. This is not a balanced tree: v0 keeps two parallel arrays
+// sorted under the caller's comparator, one search in, one shift out. An
+// insert is O(n) worst case and this file says so honestly; the sample pins
+// a sorted-on-read walk, which is the property codegen needs. Real
+// B-tree balancing is a stretch, not a promise.
+//
+// KEY ORDERING IS THE CALLER'S, not a bound. `less <fn(K, K) -> bool>` is
+// the same function-field shape HashMap's header argues for: an interface
+// bound is not dispatched on today (KnownDefect_GenericBounds), so a
+// `Comparable` bound would accept anything and dispatch nothing. `new
+// BTreeMap(f)` takes the comparator; "equal" is the two-sided idiom
+// `!f(a, b) && !f(b, a)`, and nothing here compares K any other way, so a
+// caller who mails in a weak comparator owns the order they get.
+//
+// OWNERSHIP: the map stores the key and value words as they arrived. A
+// string key is a pointer: it stays valid only while the caller's string
+// lives, and `free_btree_map` frees the arrays, never the stored words.
+//
+// ITERATION: `len`, `key_at(i)`, `value_at(i)` walk index 0..len -- index
+// order IS sorted order under the comparator, in every compiler, at every
+// opt level. That determinism is the contract, and it is why nothing here
+// is a hash.
+//
+// ONE SPELLING CONSTRAINT: write the instantiation on the receiver
+// (`let m <BTreeMap<string, int>>`), not `<auto>`. An `<auto>`-typed
+// receiver reaches a generic struct's methods on the reference compiler
+// but is refused on both stage compilers (the method-name lookup finds no
+// `auto_value_at` to call). The stage checker owns that gap; until it
+// learns to look through `<auto>`, the explicit annotation is the portable
+// spelling. The sample pins this exact shape.
+
+namespace std {
+
+#[export]
+pub struct BTreeMap<K, V> {
+    priv:
+      keys <[K]>,
+      values <[V]>,
+      filled <int> = 0,
+      cap <int> = 0,
+
+      // The caller's ordering. See the header on why a field and not a bound.
+      less <fn(K, K) -> bool>,
+
+    pub:
+      // Born holding the comparator and empty arrays -- `[K]` is not a
+      // null-pointer type, so the first allocation happens here and
+      // `ensure_room` doubles after that.
+      pub static fun new_btree_map(by: fn(K, K) -> bool) <Self> {
+        return BTreeMap{keys: new [K, 8]{}, values: new [V, 8]{}, filled: 0, cap: 8, less: by};
+      }
+
+      // How many pairs the map holds.
+      pub fun len(self: &Self) <int> {
+        return self.filled;
+      }
+
+      // The first position whose key does not sort before `key`: the spot
+      // where the pair sits if it equals, and where it must be inserted if
+      // it does not exist.
+      priv fun position(self: &Self, key: K) <int> {
+        let f <fn(K, K) -> bool> = self.less;
+        let pos <int> = 0;
+        while (pos < self.filled && f(self.keys[pos], key)) {
+            pos = pos + 1;
+        }
+        return pos;
+      }
+
+      // The index the sorted pair sits at, or -1 when the key is absent.
+      pub fun find(self: &Self, key: K) <int> {
+        let f <fn(K, K) -> bool> = self.less;
+        let pos <int> = self.position(key);
+        if (pos < self.filled && !f(key, self.keys[pos])) { return pos; }
+        return 0 - 1;
+      }
+
+      // The key at sorted position `i`. Index order is sorted order -- the
+      // determinism contract of this module.
+      pub fun key_at(self: &Self, i: int) <K> {
+        blame i >= 0 && i < self.filled, "key_at outside the map's filled range";
+        return self.keys[i];
+      }
+
+      // The value at sorted position `i`.
+      pub fun value_at(self: &Self, i: int) <V> {
+        blame i >= 0 && i < self.filled, "value_at outside the map's filled range";
+        return self.values[i];
+      }
+
+      // Double the arrays and copy the pairs over. The stored words move
+      // untouched; only the buffers change.
+      priv fun ensure_room(self: &Self) <noret> {
+        if (self.filled < self.cap) { return; }
+        let fresh_cap <int> = self.cap * 2;
+        if (fresh_cap < 8) { fresh_cap = 8; }
+        let fresh_keys <[K]> = new [K, fresh_cap]{};
+        let fresh_values <[V]> = new [V, fresh_cap]{};
+        let i <int> = 0;
+        while (i < self.filled) {
+            fresh_keys[i] = self.keys[i];
+            fresh_values[i] = self.values[i];
+            i = i + 1;
+        }
+        delete self.keys;
+        delete self.values;
+        self.keys = fresh_keys;
+        self.values = fresh_values;
+        self.cap = fresh_cap;
+      }
+
+      // Adds the pair, or replaces the value of a key that compares equal:
+      // true when the key is new, false when it replaced. O(n) worst case
+      // (the header says why that is honest for v0).
+      pub fun insert(self: &Self, key: K, value: V) <bool> {
+        let pos <int> = self.position(key);
+        let f <fn(K, K) -> bool> = self.less;
+        if (pos < self.filled && !f(key, self.keys[pos])) {
+            self.values[pos] = value;
+            return false;
+        }
+        self.ensure_room();
+        let i <int> = self.filled;
+        while (i > pos) {
+            self.keys[i] = self.keys[i - 1];
+            self.values[i] = self.values[i - 1];
+            i = i - 1;
+        }
+        self.keys[pos] = key;
+        self.values[pos] = value;
+        self.filled = self.filled + 1;
+        return true;
+      }
+
+      // Removes the pair whose key compares equal. True when something was
+      // removed, false when the key was not there.
+      pub fun remove(self: &Self, key: K) <bool> {
+        let f <fn(K, K) -> bool> = self.less;
+        let pos <int> = self.position(key);
+        if (pos >= self.filled || f(key, self.keys[pos])) { return false; }
+        let i <int> = pos;
+        while (i + 1 < self.filled) {
+            self.keys[i] = self.keys[i + 1];
+            self.values[i] = self.values[i + 1];
+            i = i + 1;
+        }
+        self.filled = self.filled - 1;
+        return true;
+      }
+
+      // Frees the two arrays. Stored key/value words are the caller's and
+      // are not touched (see the ownership note in the header).
+      pub fun free_btree_map(self: &Self) <noret> {
+        delete self.keys;
+        delete self.values;
+      }
+}
+
+}
+

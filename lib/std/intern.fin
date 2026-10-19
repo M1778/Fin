@@ -1,0 +1,103 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Interner: interning strings to stable ids (issue #63). Every scanner, the
+// token stream, and the compiler's name tables want "same text, same id",
+// and they want it in a way that does not depend on a hash algorithm's
+// history or on an iteration order no rule fixes.
+//
+// HOW IT IS BUILT. v0 holds a `[string]` of the interned texts and answers
+// `intern` with one linear `compare(text, stored)` sweep. That is O(n) per
+// intern and this file says so honestly; what it buys is that the id is
+// exactly the array index, the answer is deterministic in every compiler at
+// every opt level, and equality is the strings module's own content
+// comparison, not a pointer word or a hash. A bucketed upgrade is a
+// stretch, not a promise (HashMap's key-equality caveat for computed
+// strings is recorded there; the linear sweep avoids it).
+//
+// IDS ARE STABLE: the array only ever appends and `resolve` reads by
+// index, so the id of a text is fixed for the interner's lifetime.
+//
+// OWNERSHIP: `intern` stores its own copy (`clone`), so a caller may free
+// the string it interned. `resolve` answers the interner's stored string --
+// NOT a copy; it stays valid while the interner does and is released only
+// by `free_interner`, never by the caller's `free_str`.
+
+import { compare, clone, free_str } from strings::std;
+
+namespace std {
+
+#[export]
+pub struct Interner {
+    priv:
+      // The interned texts, in id order. `filled` is both the count and the
+      // id the next intern answers.
+      texts <[string]>,
+      filled <int> = 0,
+      cap <int> = 0,
+
+    pub:
+      // An empty interner with its first array -- `[string]` is not a
+      // null-pointer type, so the first allocation happens here and
+      // `ensure_room` doubles after that.
+      pub static fun new_interner() <Self> {
+        return Interner{texts: new [string, 8]{}, filled: 0, cap: 8};
+      }
+
+      // How many distinct texts the interner holds.
+      pub fun size(self: &Self) <int> {
+        return self.filled;
+      }
+
+      // Room for one more text: double and copy the pointers over (the
+      // cloned strings live outside the array and never move).
+      priv fun ensure_room(self: &Self) <noret> {
+        if (self.filled < self.cap) { return; }
+        let fresh_cap <int> = self.cap * 2;
+        if (fresh_cap < 8) { fresh_cap = 8; }
+        let fresh <[string]> = new [string, fresh_cap]{};
+        let i <int> = 0;
+        while (i < self.filled) {
+            fresh[i] = self.texts[i];
+            i = i + 1;
+        }
+        delete self.texts;
+        self.texts = fresh;
+        self.cap = fresh_cap;
+      }
+
+      // The id of `text`: an existing id when an equal text is stored, or a
+      // fresh one appended.
+      pub fun intern(self: &Self, text: string) <int> {
+        let i <int> = 0;
+        while (i < self.filled) {
+            if (compare(self.texts[i], text) == 0) { return i; }
+            i = i + 1;
+        }
+        self.ensure_room();
+        self.texts[self.filled] = clone(text);
+        let fresh <int> = self.filled;
+        self.filled = self.filled + 1;
+        return fresh;
+      }
+
+      // The text an id answers. Not a copy: the string belongs to the
+      // interner, stays valid while the interner does, and is freed only by
+      // `free_interner`.
+      pub fun resolve(self: &Self, id: int) <string> {
+        blame id >= 0 && id < self.filled, "resolve outside the interner's range";
+        return self.texts[id];
+      }
+
+      // Frees each stored copy and the array. Resolved strings are dead
+      // after this; the caller owns nothing beyond the interner value.
+      pub fun free_interner(self: &Self) <noret> {
+        let i <int> = 0;
+        while (i < self.filled) {
+            free_str(self.texts[i]);
+            i = i + 1;
+        }
+        delete self.texts;
+      }
+}
+
+}
+
