@@ -15,7 +15,7 @@ import {
 
 import {
     LLVMModule, LLVMBuilder, LLVMValue, LLVMType, LLVMBasicBlock,
-      LLVMTarget, LLVMTargetMachine, LLVMTargetSlot, LLVMErrSlot,
+      LLVMDatalayout, LLVMTarget, LLVMTargetMachine, LLVMTargetSlot, LLVMErrSlot,
       LLVMTypeArgs, LLVMValueArgs, LLVMIndices, LLVMBlockArgs,
       LLVMContext,
       llvm_module_create, llvm_dispose_module, llvm_dump_module, llvm_write_bitcode_to_file,
@@ -29,7 +29,8 @@ import {
       llvm_build_fadd, llvm_build_fsub, llvm_build_fmul, llvm_build_fdiv, llvm_build_frem,
       llvm_build_fneg, llvm_build_fcmp,
       llvm_build_si_to_fp, llvm_build_fp_to_si, llvm_build_fp_ext, llvm_build_fp_trunc,
-      llvm_size_of,
+      llvm_size_of, llvm_get_module_data_layout, llvm_abi_size_of, llvm_abi_alignment_of_type,
+      apply_host_data_layout,
       llvm_function_type, llvm_add_function, llvm_get_named_function, llvm_append_basic_block,
       llvm_get_param, llvm_create_builder, llvm_dispose_builder, llvm_position_builder,
       llvm_get_insert_block, llvm_get_basic_block_terminator,
@@ -10013,6 +10014,235 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             refuse_and_poison(ctx);
             return null;
         }
+        // The reflected intrinsics (issue #53 Scope A; ADR 0057): the C++
+        // backend folds each answer from the facts it lowers with (its
+        // tryReflectedIntrinsic); the stage folds from its own tables --
+        // find_struct/find_enum for the field list, LLVM's DataLayout for
+        // the measures, map_type for the scalar forge. A generic parameter
+        // names no layout with one erased body and refuses by name, exactly
+        // like an unknown spelling; the gap closes with the Phase B
+        // monomorphization route. Refusal wording mirrors the C++ texts.
+        if (cg_str_eq(n.name, "type_name") || cg_str_eq(n.name, "type_size") ||
+          cg_str_eq(n.name, "field_count") || cg_str_eq(n.name, "field_offset") ||
+          cg_str_eq(n.name, "@type_name") || cg_str_eq(n.name, "@type_size") ||
+          cg_str_eq(n.name, "@field_count") || cg_str_eq(n.name, "@field_offset")) {
+            // Refuse by name and land on unreachable -- the shape the
+            // sizeof fold keeps.
+            fun r_fail(c: &FnContext, msg: string) <int> {
+                cg_dprintf(2, "finc codegen refusal: %s\n", msg);
+                refuse_and_poison(c);
+                llvm_build_unreachable(c.builder);
+                return 0;
+            }
+            // The scalar words map_type answers with a width (pointer only
+            // for string): the gate that keeps an unknown spelling from
+            // measuring as `ptr`.
+            fun r_scalar_word(sp: string) <bool> {
+                return cg_str_eq(sp, "int") || cg_str_eq(sp, "uint") || cg_str_eq(sp, "i32") ||
+                  cg_str_eq(sp, "u32") || cg_str_eq(sp, "int{32}") || cg_str_eq(sp, "uint{32}") ||
+                  cg_str_eq(sp, "char") || cg_str_eq(sp, "u8") || cg_str_eq(sp, "i8") ||
+                  cg_str_eq(sp, "int{8}") || cg_str_eq(sp, "uint{8}") ||
+                  cg_str_eq(sp, "short") || cg_str_eq(sp, "ushort") || cg_str_eq(sp, "i16") ||
+                  cg_str_eq(sp, "u16") || cg_str_eq(sp, "int{16}") || cg_str_eq(sp, "uint{16}") ||
+                  cg_str_eq(sp, "long") || cg_str_eq(sp, "ulong") || cg_str_eq(sp, "i64") ||
+                  cg_str_eq(sp, "u64") || cg_str_eq(sp, "size_t") || cg_str_eq(sp, "usize") ||
+                  cg_str_eq(sp, "isize") || cg_str_eq(sp, "int64") || cg_str_eq(sp, "uint64") ||
+                  cg_str_eq(sp, "int{64}") || cg_str_eq(sp, "uint{64}") ||
+                  cg_str_eq(sp, "float") || cg_str_eq(sp, "f32") || cg_str_eq(sp, "double") ||
+                  cg_str_eq(sp, "f64") || cg_str_eq(sp, "bool") || cg_str_eq(sp, "string");
+            }
+            // The inline struct type the measures answer through: fields in
+            // declaration order at map_type widths, mirroring
+            // sizeof_of_spelling's forge without its small-field cap (the
+            // type-args bridge sets the 64). Null names a struct the bridge
+            // cannot carry.
+            fun r_inline_type(c: &FnContext, sp: string) <&LLVMType> {
+                let st2 <&StructInfo> = find_struct(c, sp);
+                if (st2 != null) {
+                    if (st2.field_count > 64) { return null; }
+                    let r_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
+                    let fi <int> = 0;
+                    while (fi < st2.field_count) {
+                        let r_f <&StructFieldInfo> = st2.fields[fi];
+                        let r_ft <&LLVMType> = c.i32_ty;
+                        if (r_f != null) { r_ft = map_type(c, r_f.type_annotation); }
+                        cg_targs_set(r_args, fi, r_ft);
+                        fi = fi + 1;
+                    }
+                    let r_ty <&LLVMType> = llvm_struct_type(r_args, st2.field_count, 0);
+                    delete r_args;
+                    return r_ty;
+                }
+                let en2 <&EnumInfo> = find_enum(c, sp);
+                if (en2 != null) { return en2.llvm_type; }
+                return map_type(c, sp);
+            }
+            let ref_bare <string> = n.name;
+            if (cg_str_eq(substr(ref_bare, 0, 1), "@")) {
+                ref_bare = substr(ref_bare, 1, cast<int>(cg_strlen(ref_bare)) - 1);
+            }
+            let r_want <int> = 1;
+            if (cg_str_eq(ref_bare, "field_offset")) { r_want = 2; }
+            let r_argc <int> = 0;
+            let r_w <&AstNode> = n.left;
+            while (r_w != null) {
+                r_argc = r_argc + 1;
+                r_w = r_w.right;
+            }
+            if (r_argc != r_want || n.left == null) {
+                let ab <Buffer> = new_buffer(64);
+                ab.write_string("'@");
+                ab.write_string(ref_bare);
+                ab.write_string("' expects ");
+                ab.write_int(r_want);
+                if (r_want == 1) { ab.write_string(" argument, got "); } else { ab.write_string(" arguments, got "); }
+                ab.write_int(r_argc);
+                r_fail(ctx, ab.to_string());
+                free_buffer(ab);
+                return null;
+            }
+            let r_a0 <&AstNode> = n.left.left;
+            if (r_a0 == null) { r_a0 = n.left; }
+            if (r_a0.kind != ast_ident() || r_a0.name == null) {
+                r_fail(ctx, "argument 1 must be a type name");
+                return null;
+            }
+            let r_sp <string> = r_a0.name;
+            let r_st <&StructInfo> = find_struct(ctx, r_sp);
+            let r_en <&EnumInfo> = find_enum(ctx, r_sp);
+            let r_if <&InterfaceInfo> = find_interface(ctx, r_sp);
+            if (r_if != null) {
+                let ib <Buffer> = new_buffer(128);
+                ib.write_string("'@");
+                ib.write_string(ref_bare);
+                ib.write_string("' on interface '");
+                ib.write_string(r_sp);
+                ib.write_string("': an interface reference is a fat value whose layout the member ops will answer");
+                r_fail(ctx, ib.to_string());
+                free_buffer(ib);
+                return null;
+            }
+            if (r_en != null && r_en.has_payload) {
+                let pb <Buffer> = new_buffer(128);
+                pb.write_string("'@");
+                pb.write_string(ref_bare);
+                pb.write_string("' on a payloaded enum: it carries members, not fields; the member ops come with enum_from");
+                r_fail(ctx, pb.to_string());
+                free_buffer(pb);
+                return null;
+            }
+            if (r_st == null && r_en == null && !r_scalar_word(r_sp) &&
+              !cg_str_eq(r_sp, "void") && !cg_str_eq(r_sp, "noret")) {
+                let nb <Buffer> = new_buffer(64);
+                nb.write_string("'@");
+                nb.write_string(ref_bare);
+                nb.write_string("': no type named '");
+                nb.write_string(r_sp);
+                nb.write_string("'");
+                r_fail(ctx, nb.to_string());
+                free_buffer(nb);
+                return null;
+              }
+            if (cg_str_eq(ref_bare, "type_name")) {
+                let r_ans <string> = r_sp;
+                if (r_st != null) { r_ans = r_st.name; }
+                if (r_en != null) { r_ans = r_en.name; }
+                return llvm_build_global_string_ptr(ctx.builder, r_ans, ".str");
+            }
+            if (cg_str_eq(ref_bare, "type_size")) {
+                if (r_st == null && r_en == null && !r_scalar_word(r_sp)) {
+                    // `void`/`noret`: there is no allocation to measure.
+                    let vb <Buffer> = new_buffer(64);
+                    vb.write_string("'@type_size' names no size for '");
+                    vb.write_string(r_sp);
+                    vb.write_string("'");
+                    r_fail(ctx, vb.to_string());
+                    free_buffer(vb);
+                    return null;
+                }
+                let r_ty_s <&LLVMType> = r_inline_type(ctx, r_sp);
+                if (r_ty_s == null) {
+                    r_fail(ctx, "'@type_size': the type-args bridge carries 64 fields");
+                    return null;
+                }
+                let r_sz <&LLVMValue> = llvm_size_of(r_ty_s);
+                return coerce_val(ctx, r_sz, ctx.i32_ty);
+            }
+            if (cg_str_eq(ref_bare, "field_count")) {
+                let r_cnt <int> = 0;
+                if (r_st != null) { r_cnt = r_st.field_count; }
+                return llvm_const_int(ctx.i32_ty, r_cnt, 0);
+            }
+            // field_offset: the field name is the literal, the one thing a
+            // compile-time fold can read; the offset rides LLVM's own
+            // DataLayout (llvm.fin), truncated to int like the C++ answer.
+            let r_w1 <&AstNode> = n.left.right;
+            let r_a1 <&AstNode> = null;
+            if (r_w1 != null) {
+                r_a1 = r_w1.left;
+                if (r_a1 == null) { r_a1 = r_w1; }
+            }
+            if (r_a1 == null || r_a1.kind != ast_literal_string() || r_a1.str_val == null) {
+                r_fail(ctx, "argument 2 to '@field_offset' expects a string literal");
+                return null;
+            }
+            let r_fld <string> = unescape_string_literal(r_a1.str_val);
+            if (r_st == null) {
+                let fb <Buffer> = new_buffer(64);
+                fb.write_string("'@field_offset': '");
+                fb.write_string(r_sp);
+                fb.write_string("' has no fields");
+                r_fail(ctx, fb.to_string());
+                free_buffer(fb);
+                return null;
+            }
+            let r_at <int> = -1;
+            let r_fi <int> = 0;
+            while (r_fi < r_st.field_count) {
+                let r_f2 <&StructFieldInfo> = r_st.fields[r_fi];
+                if (r_f2 != null && r_f2.name != null && cg_str_eq(r_f2.name, r_fld)) {
+                    r_at = r_fi;
+                    break;
+                }
+                r_fi = r_fi + 1;
+            }
+            if (r_at < 0) {
+                let vf <Buffer> = new_buffer(96);
+                vf.write_string("'@field_offset': type '");
+                vf.write_string(r_sp);
+                vf.write_string("' has no field '");
+                vf.write_string(r_fld);
+                vf.write_string("'");
+                r_fail(ctx, vf.to_string());
+                free_buffer(vf);
+                return null;
+            }
+            let r_dl <&LLVMDatalayout> = llvm_get_module_data_layout(ctx.module);
+            // libLLVM's own element-offset symbol widens elements at
+            // cumulative widths with no alignment gaps (`{int, long}` reads
+            // 4 where the C++ `getStructLayout().getElementOffset` says 8),
+            // so the fold walks the field list with LLVM's ABI size and
+            // alignment instead: align to each element's ABI alignment,
+            // take the answer at the target, keep moving past the width.
+            let r_off <int> = 0;
+            let r_j <int> = 0;
+            while (r_j <= r_at) {
+                let r_fj <&StructFieldInfo> = r_st.fields[r_j];
+                let r_tj <&LLVMType> = ctx.i32_ty;
+                if (r_fj != null) { r_tj = map_type(ctx, r_fj.type_annotation); }
+                let r_aj <int> = llvm_abi_alignment_of_type(r_dl, r_tj);
+                if (r_aj > 1) {
+                    let r_mod <int> = r_off - (r_off / r_aj) * r_aj;
+                    if (r_mod != 0) { r_off = r_off + r_aj - r_mod; }
+                }
+                if (r_j == r_at) {
+                    return llvm_const_int(ctx.i32_ty, r_off, 0);
+                }
+                r_off = r_off + llvm_abi_size_of(r_dl, r_tj);
+                r_j = r_j + 1;
+            }
+            return llvm_const_int(ctx.i32_ty, 0, 0);
+          }
         // Whether the node is a `compiler`-rooted member path (the
         // desugared receiver of `compiler.types.implements(...)`), which
         // is not a query argument: skip it like the checker does.
@@ -14116,6 +14346,13 @@ pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int, 
     hoist_nested_functions(root);
 
     let module <&LLVMModule> = llvm_module_create("fin_module");
+    // The layout queries at lowering time (the reflected sizes and offsets,
+    // ADR 0057) read the module's DataLayout: an unset module layout is
+    // LLVM's generic default where `i64` aligns at ABI 4, while the object
+    // emission folds constants with the machine's host layout. The C++
+    // backend installs the machine's layout the same way
+    // (CodeGen_LLVM.cpp: setDataLayout(machine->createDataLayout())).
+    apply_host_data_layout(module);
     let builder <&LLVMBuilder> = llvm_create_builder();
 
     // Canonical ambient `printf` declares before any user declaration

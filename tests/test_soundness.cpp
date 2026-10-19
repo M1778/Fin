@@ -16237,3 +16237,128 @@ TEST(Soundness_AssignInCondition, PlainAssignmentStatementIsSilent) {
     EXPECT_EQ(messagesOnly(stripAnsi(r.err)).find("warning"), std::string::npos)
         << "an assignment statement warns about nothing:\n" << r.err;
 }
+
+// ---------------------------------------------------------------------------
+// The reflected intrinsics: `@type_name`, `@type_size`, `@field_count` and
+// `@field_offset` answer what the compiler already holds, at compile time.
+//
+// The resolving component ops (`name_of`, `size_of`, `field_count`, `offset_of`)
+// answer a *signature* only. These four `@`-builtins are the evaluation layer
+// issue #53's Scope A productizes: the argument is the TYPE'S NAME -- the same
+// contextual reading `@implements` gets -- and the answer is a constant the
+// backend folds from the same facts it emits with, then lowers through the
+// nearest existing literal path. A string result is an ordinary string literal,
+// a size result an ordinary integer constant.
+//
+// The plan is docs/reflect-derive-plan.md (Route A); each fact is covered here
+// before the code writes it. Split today: value-argument spellings only --
+// `%type` values and type parameters are a later slice (Phase A2), as is
+// `@fields_of`.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const char* const kReflectPoint =
+    "@define printf(fmt: string, ...) <noret>;\n"
+    "struct Point { pub x <int>, pub y <long> }\n";
+
+}  // namespace
+
+TEST(Soundness_Reflect, ATypeParameterBindsThroughTheWrapper) {
+    // The wrapper shape reflect.fin's `type_of` becomes: a generic function
+    // whose parameter is the intrinsic's argument. `T` is not a type name any
+    // table holds; what it is comes from the call's own turbofish, through the
+    // same substitution an instantiation already carries.
+#ifdef FIN_TESTS_HAVE_BACKEND
+    const CompiledRun run = compileAndRun(std::string(kReflectPoint) +
+        "fun tp_size<T>() <int> { return @type_size(T); }\n"
+        "fun tp_name<T>() <string> { return @type_name(T); }\n"
+        "fun main() <int> {\n"
+        "    printf(\"%d %s\\n\", tp_size::<Point>(), tp_name::<Point>());\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_EQ(run.compileExit, 0) << stripAnsi(run.compileErr);
+    EXPECT_EQ(run.out, "16 Point\n") << run.out;
+#endif
+}
+
+TEST(Soundness_Reflect, TheFactsAnswerAsConstants) {
+    // x86-64 LP64: `int` at 0, `long` at 8, so the struct's size is 16, it has
+    // two fields, and `y` is at 8. Any of these changing means the layout model
+    // changed -- which is exactly what this test should catch.
+#ifdef FIN_TESTS_HAVE_BACKEND
+    const CompiledRun run = compileAndRun(std::string(kReflectPoint) +
+        "fun main() <int> {\n"
+        "    printf(\"%s\\n\", @type_name(Point));\n"
+        "    printf(\"%d %d %d\\n\", @type_size(Point), @field_count(Point),\n"
+        "                            @field_offset(Point, \"y\"));\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_EQ(run.compileExit, 0) << run.compileErr;
+    EXPECT_EQ(run.out, "Point\n16 2 8\n") << run.out;
+#endif
+}
+
+TEST(Soundness_Reflect, AValueIsNotATypeName) {
+    // The argument is a type's name, and `p` is a value. Same convention as
+    // @implements' "must be a struct": refused with a message naming the shape.
+    const FincRun r = compile(std::string(kReflectPoint) +
+        "fun main() <noret> { let p <Point>; const s <int> = @type_size(p); }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(errorCount(err), 1u) << err;
+    EXPECT_NE(err.find("expects a type name"), std::string::npos) << err;
+}
+
+TEST(Soundness_Reflect, AnUnknownNameIsStillUndefined) {
+    const FincRun r = compile(std::string(kReflectPoint) +
+        "fun main() <noret> { const s <int> = @type_size(NoSuch); }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("Undefined variable 'NoSuch'"), std::string::npos) << err;
+}
+
+TEST(Soundness_Reflect, AnUnknownFieldIsRefusedByName) {
+    // The compiler holds the field list; refusing here is evaluation, not a
+    // lowered mistake about a name the type never declared. The refusal is the
+    // backend's, because the identity lives there (the analyzer intentionally
+    // coloured the argument `$type` and let it go), so the drive needs codegen.
+#ifdef FIN_TESTS_HAVE_BACKEND
+    const CompiledRun run = compileAndRun(std::string(kReflectPoint) +
+        "fun main() <noret> { const o <int> = @field_offset(Point, \"zzz\"); }\n");
+    EXPECT_NE(run.compileExit, 0);
+    const std::string err = stripAnsi(run.compileErr);
+    EXPECT_EQ(errorCount(err), 1u) << err;
+    EXPECT_NE(err.find("has no field 'zzz'"), std::string::npos) << err;
+    EXPECT_EQ(err.find("has no field 'x'"), std::string::npos)
+        << "the refusal must name the asked field, not the type's first field";
+#endif
+}
+
+TEST(Soundness_Reflect, TheSecondArgumentMustBeAStringLiterally) {
+    // A run-time string cannot name a field at compile time: the argument one
+    // evaluates the fold from must be the literal itself.
+#ifdef FIN_TESTS_HAVE_BACKEND
+    const CompiledRun run = compileAndRun(std::string(kReflectPoint) +
+        "fun main() <noret> { let n <string> = \"x\"; const o <int> = @field_offset(Point, n); }\n");
+    EXPECT_NE(run.compileExit, 0);
+    const std::string err = stripAnsi(run.compileErr);
+    EXPECT_EQ(errorCount(err), 1u) << err;
+    EXPECT_NE(err.find("expects a string literal"), std::string::npos) << err;
+#endif
+}
+
+TEST(Soundness_Reflect, ArityIsChecked) {
+    const FincRun r1 = compile(std::string(kReflectPoint) +
+        "fun main() <noret> { const s <int> = @type_size(); }\n");
+    EXPECT_NE(stripAnsi(r1.err).find("'@type_size' expects 1 argument"), std::string::npos)
+        << stripAnsi(r1.err);
+
+    const FincRun r2 = compile(std::string(kReflectPoint) +
+        "fun main() <noret> { const c <int> = @field_count(Point, Point); }\n");
+    EXPECT_NE(stripAnsi(r2.err).find("'@field_count' expects 1 argument"), std::string::npos)
+        << stripAnsi(r2.err);
+
+    const FincRun r3 = compile(std::string(kReflectPoint) +
+        "fun main() <noret> { const o <int> = @field_offset(Point); }\n");
+    EXPECT_NE(stripAnsi(r3.err).find("'@field_offset' expects 2 arguments"), std::string::npos)
+        << stripAnsi(r3.err);
+}

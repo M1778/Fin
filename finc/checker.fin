@@ -7270,6 +7270,104 @@ pub struct Checker {
                 }
                 return "bool";
             }
+            // The reflected intrinsics (issue #53 Scope A, ADR 0057): the
+            // analyzer checks the spelling and types the answer; identity,
+            // the field list and the fold belong to the backend with the
+            // facts it lowers with (codegen.fin mirrors the C++
+            // tryReflectedIntrinsic). The argument is a type's name where a
+            // type belongs. Under the C++ `$type` hint a value-scope name
+            // wins and refuses; here the scope kinds say the same thing.
+            let ref_bare <string> = expr.name;
+            if (chk_str_starts_with(ref_bare, "@")) {
+                ref_bare = substr(ref_bare, 1, cast<int>(chk_strlen(ref_bare)) - 1);
+            }
+            if (chk_str_eq(ref_bare, "type_name") || chk_str_eq(ref_bare, "type_size") ||
+              chk_str_eq(ref_bare, "field_count") || chk_str_eq(ref_bare, "field_offset")) {
+                let ref_is_offset <bool> = chk_str_eq(ref_bare, "field_offset");
+                let ref_want <int> = 1;
+                if (ref_is_offset) { ref_want = 2; }
+                let ref_argc <int> = self.count_call_args(expr.left, false);
+                if (ref_argc != ref_want) {
+                    let rb <Buffer> = new_buffer(64);
+                    rb.write_string("'@");
+                    rb.write_string(ref_bare);
+                    rb.write_string("' expects ");
+                    rb.write_int(ref_want);
+                    if (ref_want == 1) { rb.write_string(" argument, got "); } else { rb.write_string(" arguments, got "); }
+                    rb.write_int(ref_argc);
+                    self.report_error(rb.to_string(), expr.line, expr.col);
+                    free_buffer(rb);
+                    return "error";
+                }
+                let rw0 <&AstNode> = expr.left;
+                let ra0 <&AstNode> = rw0.left;
+                if (ra0 == null) { ra0 = rw0; }
+                let r_is_type <bool> = false;
+                if (ra0 != null && ra0.kind == ast_ident() && ra0.name != null) {
+                    let rnm <string> = ra0.name;
+                    let rsc <bool> = self.current_scope.has(rnm);
+                    let rgs <bool> = self.global_scope.has(rnm);
+                    if (rsc || rgs) {
+                        let rkind_ok <bool> = false;
+                        if (rsc) {
+                            let rsym <Symbol> = self.current_scope.lookup(rnm);
+                            rkind_ok = rsym.kind == sym_struct() || rsym.kind == sym_enum() ||
+                              rsym.kind == sym_interface() || rsym.kind == sym_type_alias();
+                        } else {
+                            let rsym2 <Symbol> = self.global_scope.lookup(rnm);
+                            rkind_ok = rsym2.kind == sym_struct() || rsym2.kind == sym_enum() ||
+                              rsym2.kind == sym_interface() || rsym2.kind == sym_type_alias();
+                        }
+                        if (rkind_ok) {
+                            r_is_type = true;
+                        } else {
+                            // A name in the value scope is a value: the same
+                            // reading "a variable or a value won the
+                            // lookup" gives in the C++ hint.
+                            let vb <Buffer> = new_buffer(64);
+                            vb.write_string("Argument 1 to '@");
+                            vb.write_string(ref_bare);
+                            vb.write_string("' expects a type name");
+                            self.report_error(vb.to_string(), ra0.line, ra0.col);
+                            free_buffer(vb);
+                            return "error";
+                        }
+                    }
+                    if (!r_is_type && self.chk_word_is_gen_param(rnm)) { r_is_type = true; }
+                    if (!r_is_type && self.chk_is_known_type_name(rnm)) { r_is_type = true; }
+                }
+                if (!r_is_type && ra0 != null) {
+                    let rt0 <string> = self.check_expression(ra0);
+                    // An unknown word was already reported; a literal or a
+                    // value expression named no type spelling.
+                    if (!chk_str_eq(rt0, "error")) {
+                        let vb2 <Buffer> = new_buffer(64);
+                        vb2.write_string("Argument 1 to '@");
+                        vb2.write_string(ref_bare);
+                        vb2.write_string("' expects a type name");
+                        self.report_error(vb2.to_string(), ra0.line, ra0.col);
+                        free_buffer(vb2);
+                    }
+                    return "error";
+                }
+                if (ref_is_offset) {
+                    let rw1 <&AstNode> = rw0.right;
+                    let ra1 <&AstNode> = null;
+                    if (rw1 != null) {
+                        ra1 = rw1.left;
+                        if (ra1 == null) { ra1 = rw1; }
+                    }
+                    if (ra1 != null) {
+                        let a1t <string> = self.check_expression(ra1);
+                        if (!chk_str_eq(a1t, "string") && !chk_str_eq(a1t, "error")) {
+                            self.report_error("Argument 2 to '@field_offset' must be a string", ra1.line, ra1.col);
+                            return "error";
+                        }
+                    }
+                }
+                if (chk_str_eq(ref_bare, "type_name")) { return "string"; }
+                return "int";
+              }
             // `@move(x)` marks x moved (C++ MovedAnalysis): exactly one
             // argument, a named variable. The call's type is the operand's
             // (moving changes ownership, not type); lowering is the

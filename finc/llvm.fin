@@ -11,6 +11,7 @@ pub struct LLVMBuilder {}
 pub struct LLVMValue {}
 pub struct LLVMType {}
 pub struct LLVMBasicBlock {}
+pub struct LLVMDatalayout {}
 pub struct LLVMTarget {}
 pub struct LLVMTargetMachine {}
 pub struct LLVMContext {}
@@ -322,6 +323,67 @@ pub struct LLVMBlockArgs {
 
 #[llvm_name="LLVMSizeOf"]
 @define llvm_size_of(ty: &LLVMType) <&LLVMValue>;
+
+// The reflected intrinsics' measures (issue #53 Scope A): the module's
+// DataLayout answers struct sizes and field offsets, which LLVMSizeOf alone
+// cannot. The offset query rides LLVM's ABI size and alignment per type and
+// walks the struct's fields the layout does, rather than LLVMOffsetOfElement:
+// libLLVM's answer there runs the elements at cumulative widths with no
+// alignment gaps (a C++ `getStructLayout().getElementOffset` of `{int, long}`
+// is 8; the C symbol answers 4), so these two primitives reproduce the C++
+// semantics exactly. The layout type is opaque -- the stage reads nothing
+// from it but measurement.
+#[llvm_name="LLVMGetModuleDataLayout"]
+@define llvm_get_module_data_layout(m: &LLVMModule) <&LLVMDatalayout>;
+
+#[llvm_name="LLVMABISizeOfType"]
+@define llvm_abi_size_of(dl: &LLVMDatalayout, ty: &LLVMType) <int>;
+
+#[llvm_name="LLVMABIAlignmentOfType"]
+@define llvm_abi_alignment_of_type(dl: &LLVMDatalayout, ty: &LLVMType) <int>;
+
+#[llvm_name="LLVMSetModuleDataLayout"]
+@define llvm_set_module_data_layout(m: &LLVMModule, dl: &LLVMDatalayout) <noret>;
+
+#[llvm_name="LLVMDisposeTargetData"]
+@define llvm_dispose_target_data(dl: &LLVMDatalayout) <noret>;
+
+#[llvm_name="LLVMCreateTargetDataLayout"]
+@define llvm_create_target_data_layout(tm: &LLVMTargetMachine) <&LLVMDatalayout>;
+
+// The module's DataLayout as the C++ backend installs it
+// (CodeGen_LLVM.cpp: module.setDataLayout(machine->createDataLayout())):
+// the host target machine's layout, so any layout query at lowering time
+// reads the same facts the object emission later lowers with. An unset
+// module layout is LLVM's generic default, where `i64` carries ABI
+// alignment 4 -- not this host, where the C++ answers 8.
+#[export]
+pub fun apply_host_data_layout(m: &LLVMModule) <bool> {
+    let triple <string> = llvm_get_default_triple();
+    let tgt_slot <&LLVMTargetSlot> = new LLVMTargetSlot{};
+    let err_slot <&LLVMErrSlot> = new LLVMErrSlot{};
+    let rc <int> = llvm_get_target_from_triple(triple, tgt_slot, err_slot);
+    if (rc != 0) {
+        delete tgt_slot;
+        delete err_slot;
+        return false;
+    }
+    let target <&LLVMTarget> = tgt_slot.ptr;
+    let tm <&LLVMTargetMachine> = llvm_create_target_machine(target, triple, "generic", "", 0, 0, 0);
+    if (tm == null) {
+        delete tgt_slot;
+        delete err_slot;
+        return false;
+    }
+    let dl <&LLVMDatalayout> = llvm_create_target_data_layout(tm);
+    llvm_set_module_data_layout(m, dl);
+    // Module::setDataLayout stores its own copy, so the DL handle can end.
+    llvm_dispose_target_data(dl);
+    llvm_dispose_target_machine(tm);
+    delete tgt_slot;
+    delete err_slot;
+    return true;
+}
 
 #[llvm_name="LLVMBuildRet"]
 @define llvm_build_ret(builder: &LLVMBuilder, val: &LLVMValue) <&LLVMValue>;

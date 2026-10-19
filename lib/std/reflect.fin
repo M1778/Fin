@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Reflection that runs (issue #53 Scope A): the module home of the four
+// reflected intrinsics -- `@type_name`, `@type_size`, `@field_count`,
+// `@field_offset` -- the compiler evaluates directly. Nothing is declared
+// here yet on purpose: each intrinsic is an `@`-spelling the C++ backend and
+// the self-host stage fold from their own tables into a constant at the call
+// site, so an import would add a name to resolve to nothing. A name compiles
+// to an ordinary string literal and a measure to an ordinary integer
+// constant; there is no runtime walk and no metadata blob.
+//
+// HOW A FACT IS ASKED FOR. The argument is a type's NAME, written where a
+// type belongs (`@type_size(Point)`), the same contextual reading
+// `@implements` gets for its struct argument. `@field_offset` takes the
+// field LITERAL: only the backend fold can read a name at compile time, so
+// a run-time string cannot name a field and no wrapper can step in front
+// of these four.
+//
+// WHAT IT ANSWERS. A struct's name comes from its declaration and a scalar's
+// from the spelling written (`@type_name(long)` is `long`). Sizes and offsets
+// are the layout model's (`long` is 8, `Point{int, long}` has `y` at 8 and
+// is 16 wide). Counts and measures answer `int` -- a count and a byte
+// measure are not layout widths (`size_of` in the layout component returns
+// `uint`; that is the component API's rounding, and this surface deliberately
+// did not copy it). An alias answers what it aliases (C++ answer; the stage
+// names no type for one yet -- the parity pin comes with the stage sweep).
+//
+// Boundaries, stated here so a caller is not surprised by a backend refusal:
+//   * A payloaded enum carries MEMBERS, not fields, so all four refuse on
+//     one; the member ops come with `enum_from!` (issue #53 Scope B). A
+//     payloadless enum is its tagged-union tag on this model -- an `int` --
+//     and answers size 4 with field count 0, which is what the
+//     representation is.
+//   * An interface reference is a fat value `{data, vtable}`, and its
+//     reflected facts wait for those two words to have an owning answer.
+//   * A type parameter names no layout inside one erased body (`fun
+//     tp_size<T>() { return @type_size(T); }` folds `Point` at the call's
+//     turbofish on the C++ side and refuses by name on the stage side,
+//     which keeps one body); the wrapper route lands with the Phase B
+//     monomorphization work in both compilers.
+//   * `fields_of` exists as a concept in the issue and is NOT shipped: the
+//     field list materializes only when a runtime `FieldInfo` has an owner
+//     for its string (Phase B). `@field_offset` and `@field_count` are what
+//     composes a walk today.
+
+namespace std {
+
+}

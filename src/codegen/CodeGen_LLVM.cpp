@@ -3361,6 +3361,142 @@ private:
         return true;
     }
 
+    // The reflected intrinsics (issue #53 Scope A; docs/reflect-derive-plan.md):
+    // `@type_name(T)`, `@type_size(T)`, `@field_count(T)`, `@field_offset(T, f)`.
+    // The analyzer typed the call; the ANSWER is folded here from the same facts
+    // this file lowers with -- `structs_`/`enums_` for the field list, `module_`'s
+    // DataLayout for the sizes and offsets -- and every result lowers through the
+    // nearest existing literal path: a name is an `internedString`, a number an
+    // integer constant. True when handled (lowered or refused); false when the
+    // name is some other call's.
+    //
+    // The subject is the argument's SPELLING resolved through the same tables a
+    // type annotation would resolve: structs, then enums, then the scalar table.
+    // Specifics the corpus has not asked for are refusals that name the construct,
+    // not silent alternatives: an interface (a fat value with no declared layout
+    // of its own), a payloaded enum (it carries members, not fields; member ops
+    // come with enum_from), and an unknown name ("names no type"). Alias names
+    // answer what they alias -- `type Alias = int` reports "int" -- which is the
+    // representation, which is the plan's rule for every answer here.
+    bool tryReflectedIntrinsic(FunctionCall& node, const std::string& name) {
+        if (name != "type_name" && name != "type_size" &&
+            name != "field_count" && name != "field_offset") return false;
+        const size_t want = (name == "field_offset") ? 2 : 1;
+        if (node.args.size() != want) {
+            unsupported(node, fmt::format("'@{}' expects {} argument{}, got {}",
+                                          name, want, want == 1 ? "" : "s",
+                                          node.args.size()));
+            return true;
+        }
+        auto* ident = dynamic_cast<Identifier*>(node.args[0].get());
+        if (!ident) {
+            unsupported(*node.args[0], "argument 1 must be a type name");
+            return true;
+        }
+        // The subject: one of the three tables the type annotations resolve.
+        std::optional<CgType> subject;
+        if (const auto& e = types_.enumByName(ident->name)) subject = *e;
+        if (!subject && interfaces_.count(ident->name)) {
+            unsupported(node, fmt::format("'@{}' on interface '{}': an interface "
+                                          "reference is a fat value whose layout "
+                                          "the member ops will answer",
+                                          name, ident->name));
+            return true;
+        }
+        if (!subject) subject = types_.structByName(ident->name);
+        if (!subject) subject = types_.byName(ident->name);
+        if (!subject) {
+            // Not a name any table holds: a generic function's type parameter.
+            // What it is comes with the instantiation, through the inactive-until-
+            // bound substitution a template body is mapped with -- the same read
+            // '@implements' makes for its struct argument.
+            if (const Substitution* active = types_.bindings()) {
+                for (const auto& binding : *active) {
+                    if (binding.first == ident->name) {
+                        subject = binding.second.type;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!subject) {
+            unsupported(node, fmt::format("'@{}': no type named '{}'", name, ident->name));
+            return true;
+        }
+        if (subject->isInterface) {
+            unsupported(node, fmt::format("'@{}' on interface '{}': an interface "
+                                          "reference is a fat value whose layout "
+                                          "the member ops will answer",
+                                          name, ident->name));
+            return true;
+        }
+        if (subject->enumInfo && subject->enumInfo->hasPayload) {
+            unsupported(node, fmt::format("'@{}' on a payloaded enum: it carries "
+                                          "members, not fields; the member ops come "
+                                          "with enum_from",
+                                          name));
+            return true;
+        }
+        if (name == "type_name") {
+            // A scalar answers what was written; a struct answers the declared
+            // name, which is the same text in every corpus shape.
+            std::string answer = ident->name;
+            if (subject->structInfo) answer = subject->structInfo->finName;
+            value_ = CgVal{internedString(answer), *types_.byName("string")};
+            return true;
+        }
+        if (name == "type_size") {
+            if (!subject->llvmType || subject->llvmType->isVoidTy()) {
+                // `void` resolves just like a scalar and has no allocation:
+                // asking LLVM's DataLayout for its size would be a crash, not
+                // an answer, so the guard names it before the measurement.
+                unsupported(node, fmt::format("'@type_size' names no size for '{}'",
+                                              ident->name));
+                return true;
+            }
+            const uint64_t size = module_.getDataLayout().getTypeAllocSize(subject->llvmType);
+            value_ = CgVal{llvm::ConstantInt::get(builder_.getInt32Ty(),
+                                                  static_cast<uint64_t>(size)),
+                           *types_.byName("int")};
+            return true;
+        }
+        if (name == "field_count") {
+            const size_t count = subject->structInfo ? subject->structInfo->fields.size() : 0;
+            value_ = CgVal{llvm::ConstantInt::get(builder_.getInt32Ty(), (uint64_t)count),
+                           *types_.byName("int")};
+            return true;
+        }
+        // field_offset: the field name must be the literal, the one thing a
+        // compile-time fold can read.
+        auto* lit = dynamic_cast<Literal*>(node.args[1].get());
+        if (!lit || lit->kind != ASTTokenKind::STRING_LITERAL) {
+            unsupported(*node.args[1], "argument 2 to '@field_offset' expects a string literal");
+            return true;
+        }
+        if (!subject->structInfo) {
+            unsupported(node, fmt::format("'@field_offset': '{}' has no fields",
+                                          ident->name));
+            return true;
+        }
+        const std::string member = decodeLiteral(lit->value);
+        const auto& fields = subject->structInfo->fields;
+        size_t at = fields.size();
+        for (size_t i = 0; i < fields.size(); ++i) {
+            if (fields[i].name == member) at = i;
+        }
+        if (at == fields.size()) {
+            unsupported(node, fmt::format("'@field_offset': type '{}' has no field '{}'",
+                                          ident->name, member));
+            return true;
+        }
+        const auto* layout = module_.getDataLayout().getStructLayout(
+            subject->structInfo->llvmType);
+        const uint64_t offset = layout->getElementOffset(static_cast<unsigned>(at));
+        value_ = CgVal{llvm::ConstantInt::get(builder_.getInt32Ty(), (uint64_t)offset),
+                       *types_.byName("int")};
+        return true;
+    }
+
     // `getkeyid(v)` / `keyidof(m)`: the two tag intrinsics lib/std's enum modules
     // declare bodiless (`enums.fin`, used by `typing.fin` and `stdio.fin`) and
     // nothing defines. A bodiless declaration otherwise lowers as a call to its
@@ -11549,6 +11685,9 @@ private:
                 return;
             }
 
+            // The reflected intrinsics fold before the refusal below.
+            if (tryReflectedIntrinsic(node, node.name)) return;
+
             // A `@special` runs at compile time (wave 4). Reaching codegen means
             // nothing consumed it, and lowering it as an ordinary call would emit a
             // call to a symbol no object file contains.
@@ -12000,6 +12139,7 @@ private:
         // conversion from the tag constant to whatever `$enum_member` mapped to).
         if (tryEnumTagIntrinsic(node, name)) return;
         if (tryMetaIntrinsic(node, name)) return;
+        if (tryReflectedIntrinsic(node, name)) return;
         if (tryHashWordIntrinsic(node, name)) return;
         auto found = functions_.find(name);
         if (currentOwner_) {

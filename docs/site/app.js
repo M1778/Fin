@@ -405,6 +405,23 @@
         "url": "stdlib.html#module-btreemap"
     },
     {
+        "id": "module-reflect",
+        "title": "std::reflect - Reflection That Runs",
+        "category": "Standard Library",
+        "tags": [
+            "reflect",
+            "reflection",
+            "type_name",
+            "type_size",
+            "field_count",
+            "field_offset",
+            "layout",
+            "offset"
+        ],
+        "snippet": "Reflection that runs: the compiler folds a type's name, size, field count and field offsets into constants from the facts it already lowers with.",
+        "url": "stdlib.html#module-reflect"
+    },
+    {
         "id": "module-intern",
         "title": "std::intern - String Interner",
         "category": "Standard Library",

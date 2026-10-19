@@ -1,0 +1,40 @@
+//@ normative
+//@ ok
+// Reflection that runs: the reflected intrinsics the issue's `typeof`/
+// `fields_of` scope ships (issue #53 Scope A), spelled at the use site --
+// the builtins are the surface, and a wrapper would need the Phase B
+// monomorphization work in both compilers to carry a type parameter.
+//
+// WHAT THE EXAMPLE PINS.
+//
+//   * The answers are CONSTANTS the compiler folds, not a runtime metadata
+//     walk: a name prints through the string-literal path and a measure
+//     through an integer constant, so the layout model changing -- a field
+//     moved, a width widened -- breaks this file, exactly as such a change
+//     should. `Point{int, long}` is 16 wide with `y` at 8 on the layout
+//     model (`int` at 0), and the field count is 2.
+//   * A payloadless enum answers as the `int` its tag is: `Fuel` names the
+//     enum, size 4, field count 0.
+//   * `@field_offset` takes the field LITERAL by design: a runtime string
+//     cannot name a field at compile time, which is also why `fields_of`
+//     (which would need each FieldInfo's name at run time) is waiting on
+//     its string owner, not silently absent.
+//
+// THE RANGE NOT SWEPT: a payloaded enum refuses all four ops, an interface
+// refuses every reflected op, an alias answers what it aliases on the C++
+// side, and a type parameter folds at the call's turbofish on the C++ side
+// (`Soundness_Reflect.ATypeParameterBindsThroughTheWrapper pins it) -- all
+// stated in the module header beside the boundary. A sample that compiles
+// pins what RUNS, not what planned-for refusals look like; the refusals
+// have their own tests (Soundness_Reflect in tests/test_soundness.cpp).
+
+struct Point { pub x <int>, pub y <long> }
+
+enum Fuel { Petrol, Diesel }
+
+fun main() <noret> {
+    printf("%s\n", @type_name(Point));
+    printf("%d %d\n", @type_size(Point), @field_count(Point));
+    printf("%d\n", @field_offset(Point, "y"));
+    printf("%s %d %d\n", @type_name(Fuel), @type_size(Fuel), @field_count(Fuel));
+}

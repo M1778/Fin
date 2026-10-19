@@ -1968,6 +1968,63 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
             lastExprType = boolType;
             return;
         }
+        // The reflected intrinsics (issue #53 Scope A; docs/reflect-derive-plan.md):
+        // `@type_name`, `@type_size`, `@field_count`, `@field_offset`. The argument
+        // is a TYPE'S NAME, read the way `@implements` and Soundness_TypeAsValue read
+        // one: what was written where a type is expected resolves as a type. The
+        // analyzer checks the spelling and types the answer; the identity, the field
+        // list and the fold all belong to the backend, which holds the same facts it
+        // lowers with (CodeGen_LLVM.cpp's tryReflectedIntrinsic). The result types are
+        // `string` and `int` -- every answer here is a count or a byte measure,
+        // the rounding `typeid` already chose (`<int>`), and not a layout width.
+        if (node.name == "type_name" || node.name == "type_size" ||
+            node.name == "field_count" || node.name == "field_offset") {
+            const size_t want = (node.name == "field_offset") ? 2 : 1;
+            if (node.args.size() != want) {
+                error(node, fmt::format("'@{}' expects {} argument{}, got {}", node.name,
+                                        want, want == 1 ? "" : "s", node.args.size()));
+                lastExprType = nullptr;
+                return;
+            }
+            auto metaType = currentScope->resolveType("$type");
+            if (!metaType) metaType = std::make_shared<PrimitiveType>("$type");
+            typeHintFor = node.args[0].get();
+            typeHint = metaType;
+            node.args[0]->accept(*this);
+            typeHintFor = nullptr;
+            typeHint = nullptr;
+            const auto* argPrim = lastExprType ? lastExprType->as<PrimitiveType>() : nullptr;
+            if (!argPrim || argPrim->name != "$type") {
+                // A variable or a value won the lookup: a name in the value scope is
+                // a value unless a meta-type is the thing expected, and only the
+                // meta-type admits a type here.
+                error(*node.args[0], fmt::format("Argument 1 to '@{}' expects a type name", node.name));
+                lastExprType = nullptr;
+                return;
+            }
+            if (want == 2) {
+                // The field name rides as an ordinary string expression here: the
+                // analyzer checks it is a string, and the backend requires the
+                // LITERAL, which is the only thing a compile-time fold can read.
+                node.args[1]->accept(*this);
+                const auto* name_prim = lastExprType ? lastExprType->as<PrimitiveType>() : nullptr;
+                if (!name_prim || name_prim->name != "string") {
+                    error(*node.args[1], "Argument 2 to '@field_offset' must be a string");
+                    lastExprType = nullptr;
+                    return;
+                }
+            }
+            auto intType = currentScope->resolveType("int");
+            if (!intType) intType = std::make_shared<PrimitiveType>("int");
+            if (node.name == "type_name") {
+                auto stringType = currentScope->resolveType("string");
+                if (!stringType) stringType = std::make_shared<PrimitiveType>("string");
+                lastExprType = stringType;
+            } else {
+                lastExprType = intType;
+            }
+            return;
+        }
     }
 
     std::shared_ptr<FunctionType> funcType = nullptr;

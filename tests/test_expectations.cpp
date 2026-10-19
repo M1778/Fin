@@ -637,7 +637,13 @@ TEST(Census, EverySampleIsAnnotatedAndClassified) {
     // (fresh_temp order, ir_opcode_name mnemonics, ret last), and the
     // refuse arms as Outcome::Err messages; the grammar rides parse.fin's
     // lit/alt combinators and the lower is all ir.fin instructions.
-    EXPECT_EQ(t.samples, 72)
+    // 72 -> 73 on 2026-10-19: tests/samples/stdlib/reflect.fin arrives for
+    // issue #53 Scope A: the reflected intrinsics through reflect::std --
+    // a struct's name/size/field count folded as constants on the layout
+    // model, `@field_offset` pinned on the short-must-be-literal rule, and a
+    // payloadless enum answering as the int its tag is through the generic
+    // wrapper binding.
+    EXPECT_EQ(t.samples, 73)
         << "the corpus is 51 samples. Sample code changes only by a ratified "
            "language decision (ADR 0008), so a different count is either such a "
            "decision — update this — or a file globbed in by accident";
