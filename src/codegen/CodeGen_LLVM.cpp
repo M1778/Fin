@@ -3650,6 +3650,247 @@ private:
         value_ = CgVal{raw, intTy};
     }
 
+    // ---------------------------------------------------------------------------
+    // derive-hash (issue #53 Scope B; ADR 0058). `derive_hash(v)` walks a
+    // struct value's fields in declaration order and mixes them with FNV-1a
+    // 64: h = 14695981039346656037 to start; per byte, least-significant
+    // first, h = (h ^ byte) * 1099511628211 mod 2^64. Field VALUES, never
+    // object bytes: padding never enters, so equal field values hash equal
+    // under any layout that keeps their order, and a layout-model change --
+    // a field moved, a width widened -- shows up in the number.
+    //
+    // An integer field zero-extends to 64 bits and rides its
+    // two's-complement bytes (`int` is 4, `long` 8, `bool` and `char` 1);
+    // float and double ride their IEEE bit patterns; a nested struct
+    // recurses into its own fields (an empty struct adds nothing, so `{}`
+    // hashes to the basis alone); a payloadless enum field rides its tag
+    // word, which is the `int` it lowers as. Every kind the walk does not
+    // lower refuses naming the field and the kind, never silently skipping:
+    // a skipped field would still answer a number, which is the quiet bug
+    // kind of answer a derive must not give.
+    //
+    // The argument is a VALUE the address of which this file already knows
+    // how to take (an identifier, a chain of field reads, a capture, a
+    // global -- the same set `emitAddress` answers). Anything with no
+    // address is materialized through an allocation first, the same cell a
+    // struct-typed parameter lives in. Both backends run the same chain on
+    // the same constants, so the same Point hashes the same on both.
+    //
+    // The stage mirrors this with a walk of its own on the same model; the
+    // rules, not the emitted IR, are what must agree.
+    // ---------------------------------------------------------------------------
+    static constexpr uint64_t kDeriveHashBasis = 14695981039346656037ULL;
+    static constexpr uint64_t kDeriveHashPrime = 1099511628211ULL;
+
+    // Why a field refuses: the tail is one construct named wrong. `string`
+    // is spelled through cgDisplay ("string") like every other kind; a
+    // pointer with a known pointee gets its own phrase because "&Point" is
+    // not the claim the refusal needs -- the claim is that NO pointer rides
+    // a struct's hash through an address.
+    static std::string deriveHashKindPhrase(const CgType& ty, const std::string& field) {
+        // unsupported() appends the gap ("is not lowered yet"); what this
+        // returns is the construct named wrong: the field, and its kind.
+        const std::string tail = fmt::format(
+            "derive-hash of field '{}'", field);
+        if (ty.kind != CgType::Kind::Ptr) {
+            return tail + " of type '" + cgDisplay(ty) + "'";
+        }
+        if (ty.pointee) {
+            return tail + " of a pointer type";
+        }
+        return tail + " of type 'string'";
+    }
+
+    // Every byte of one field, into the mixing state `h` held so far. The
+    // bytes of a scalar's IN-MEMORY value, least-significant first, are the
+    // same whatever the host endianness is: IR order owns the byte order.
+    llvm::Value* deriveHashWalkField(ASTNode& node, llvm::Value* h, llvm::Value* ptr,
+                                     const CgType& ty, const std::string& field,
+                                     unsigned depth) {
+        if (ty.isStruct()) {
+            // A nested struct recurses through its own fields; an empty one
+            // adds nothing, so the hash rides unchanged.
+            if (!ty.structInfo) {
+                unsupported(node, deriveHashKindPhrase(ty, field));
+                return h;
+            }
+            if (!ty.structInfo->complete) {
+                unsupported(node, fmt::format("derive-hash of field '{}': the struct is "
+                                              "still incomplete at lowering", field));
+                return h;
+            }
+            return deriveHashWalkStruct(node, h, ptr, *ty.structInfo, depth + 1);
+        }
+        // The kinds the walk refuses. Not scalar: interface fat values, any
+        // boxes, unions, nullables, arrays, prototypes, function values,
+        // payloaded enums (a tag a runtime type system owns, not a layout
+        // question the walk can answer program-side).
+        if (ty.kind == CgType::Kind::Ptr) {
+            unsupported(node, deriveHashKindPhrase(ty, field));
+            return h;
+        }
+        if (ty.kind == CgType::Kind::Array) {
+            unsupported(node, fmt::format("derive-hash of field '{}': an array field",
+                                          field));
+            return h;
+        }
+        if (ty.isNullable) {
+            unsupported(node, fmt::format("derive-hash of field '{}': a nullable field",
+                                          field));
+            return h;
+        }
+        if (ty.isInterface) {
+            unsupported(node, fmt::format("derive-hash of field '{}': an interface reference",
+                                          field));
+            return h;
+        }
+        if (ty.isAny) {
+            unsupported(node, fmt::format("derive-hash of field '{}': an 'any' box",
+                                          field));
+            return h;
+        }
+        if (ty.isUnion) {
+            unsupported(node, fmt::format("derive-hash of field '{}': a union value",
+                                          field));
+            return h;
+        }
+        if (ty.isFn() || ty.isPrototype()) {
+            unsupported(node, fmt::format("derive-hash of field '{}': a function value",
+                                          field));
+            return h;
+        }
+        if (ty.isPayloadedEnum()) {
+            unsupported(node, fmt::format("derive-hash of field '{}': a payloaded "
+                                          "enum member carries members, not field words",
+                                          field));
+            return h;
+        }
+        if (ty.kind != CgType::Kind::Int && ty.kind != CgType::Kind::Float) {
+            unsupported(node, deriveHashKindPhrase(ty, field));
+            return h;
+        }
+
+        // The scalar chain. Width comes from the DataLayout, which is where
+        // the layout op names sizes too, so neither backend may pick its own
+        // idea: `int` is 4 bytes both ways. `bool` stores as 1 byte; float as
+        // 4 and double as 8.
+        llvm::Value* raw = builder_.CreateLoad(ty.llvmType, ptr, "derive.ld");
+        llvm::Type* i64 = llvm::Type::getInt64Ty(ctx_);
+        llvm::Value* wide = raw;
+        unsigned width = module_.getDataLayout().getTypeStoreSize(ty.llvmType);
+        if (ty.kind == CgType::Kind::Float) {
+            // The IEEE bit pattern is what mixing reads: a float rides its
+            // 32 bits, a double its 64.
+            llvm::Type* intTy = (width == 4)
+                ? llvm::Type::getInt32Ty(ctx_) : llvm::Type::getInt64Ty(ctx_);
+            wide = builder_.CreateBitCast(raw, intTy, "derive.bits");
+        }
+        wide = builder_.CreateZExtOrTrunc(wide, i64, "derive.wide");
+        for (unsigned k = 0; k < width; ++k) {
+            llvm::Value* byte = wide;
+            if (k) byte = builder_.CreateLShr(byte, builder_.getInt64(8 * k), "derive.sh");
+            byte = builder_.CreateAnd(byte, builder_.getInt64(0xFF), "derive.b");
+            h = builder_.CreateXor(h, byte, "derive.xor");
+            h = builder_.CreateMul(h, builder_.getInt64(kDeriveHashPrime), "derive.mul");
+        }
+        return h;
+    }
+
+    // A struct's fields in declaration order: one GEP by index per field,
+    // the walk of a nested struct recursing through the field's own pointer.
+    llvm::Value* deriveHashWalkStruct(ASTNode& node, llvm::Value* h, llvm::Value* ptr,
+                                      const StructInfo& info, unsigned depth) {
+        if (depth > 16) {
+            unsupported(node, "derive-hash of a struct nested more than sixteen "
+                              "fields deep");
+            return h;
+        }
+        for (size_t i = 0; i < info.fields.size(); ++i) {
+            const StructField& f = info.fields[i];
+            llvm::Value* fieldPtr = builder_.CreateStructGEP(
+                info.llvmType, ptr, static_cast<unsigned>(i), "derive.f");
+            h = deriveHashWalkField(node, h, fieldPtr, f.type, f.name, depth);
+            if (failed_) return h;
+        }
+        return h;
+    }
+
+    void emitDeriveHash(FunctionCall& node) {
+        if (!currentFn_) {
+            unsupported(node, "derive-hash outside a function");
+            return;
+        }
+        // The value's own address, whatever emitAddress answers for it; a
+        // struct-typed result the address path does not reach is stored into
+        // a cell first, exactly what a struct parameter already is.
+        auto addr = emitAddress(*node.args[0]);
+        if (failed_) return;
+        llvm::Value* ptr = nullptr;
+        CgType cell;
+        if (addr) {
+            ptr = addr->ptr;
+            cell = addr->type;
+        } else {
+            CgVal v = emit(*node.args[0]);
+            if (failed_) return;
+            if (!v.ok()) { unsupported(node, "this argument"); return; }
+            ptr = entryAlloca(v.type.llvmType, "derive.cell");
+            builder_.CreateStore(v.value, ptr);
+            cell = v.type;
+        }
+        if (!cell.isStruct() || !cell.structInfo) {
+            unsupported(node, fmt::format("'derive_hash' expects a struct value, got "
+                                          "'{}'", cgDisplay(cell)));
+            return;
+        }
+        llvm::Type* i64 = llvm::Type::getInt64Ty(ctx_);
+        llvm::Value* h = llvm::ConstantInt::get(i64, kDeriveHashBasis);
+        h = deriveHashWalkStruct(node, h, ptr, *cell.structInfo, 0);
+        if (failed_) return;
+        value_ = CgVal{h, *types_.byName("ulong")};
+    }
+
+    // The derive_hash leaf: a bodiless generic declaration. A definition in
+    // the corpus wins the name and falls through, exactly as hash_word's own
+    // dispatch admits a local version over the compiler's lowering.
+    bool deriveHashDeclIsBodilessGeneric() {
+        if (auto it = fnTemplates_.find("derive_hash"); it != fnTemplates_.end()) {
+            // The root wins a name both declare, so a root entry settles it:
+            // bodiless is ours, a body is a definition that wins.
+            return it->second && !it->second->generic_params.empty() &&
+                   !it->second->body;
+        }
+        for (const Program* unit : modules_) {
+            if (!unit) continue;
+            for (auto& stmt : unit->statements) {
+                auto* fn = dynamic_cast<FunctionDeclaration*>(stmt.get());
+                if (!fn || fn->name != "derive_hash" || fn->generic_params.empty())
+                    continue;
+                return fn->body == nullptr;
+            }
+        }
+        if (rootProgram_) {
+            for (auto& stmt : rootProgram_->statements) {
+                auto* fn = dynamic_cast<FunctionDeclaration*>(stmt.get());
+                if (!fn || fn->name != "derive_hash" || fn->generic_params.empty())
+                    continue;
+                return fn->body == nullptr;
+            }
+        }
+        return false;
+    }
+
+    bool tryDeriveHash(FunctionCall& node, const std::string& name) {
+        if (name != "derive_hash" || node.args.size() != 1) return false;
+        if (auto found = functions_.find(name);
+            found != functions_.end() && found->second.fn && !found->second.fn->isDeclaration() &&
+            found->second.fn->getFunctionType()->isSized())
+            return false;
+        if (!deriveHashDeclIsBodilessGeneric()) return false;
+        emitDeriveHash(node);
+        return true;
+    }
+
     StructDeclaration* findModuleStruct(const std::string& name) {
         for (const Program* unit : modules_) {
             if (!unit) continue;
@@ -12141,6 +12382,7 @@ private:
         if (tryMetaIntrinsic(node, name)) return;
         if (tryReflectedIntrinsic(node, name)) return;
         if (tryHashWordIntrinsic(node, name)) return;
+        if (tryDeriveHash(node, name)) return;
         auto found = functions_.find(name);
         if (currentOwner_) {
             // A body its defining module owns calls the module's own

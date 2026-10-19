@@ -88,6 +88,7 @@
 <li><a href="#module-types" class="stdlib-module-link"><span>types</span><span class="stdlib-module-count">6</span></a></li>
 <li><a href="#module-typing" class="stdlib-module-link"><span>typing</span><span class="stdlib-module-count">2</span></a></li>
 <li><a href="#module-reflect" class="stdlib-module-link"><span>reflect</span><span class="stdlib-module-count">4</span></a></li>
+<li><a href="#module-derive" class="stdlib-module-link"><span>derive</span><span class="stdlib-module-count">1</span></a></li>
 <li><a href="#module-enums" class="stdlib-module-link"><span>enums</span><span class="stdlib-module-count">4</span></a></li>
 <li><a href="#module-error" class="stdlib-module-link"><span>error</span><span class="stdlib-module-count">2</span></a></li>
 <li><a href="#module-operators" class="stdlib-module-link"><span>operators</span><span class="stdlib-module-count">6</span></a></li>
@@ -275,6 +276,17 @@
       <p class="stdlib-card-desc">Reflection that runs: the compiler folds a type's name, size, field count and field offsets into constants from the facts it already lowers with. No runtime walk, no metadata blob -- a name is a string literal, a measure an integer constant.</p>
       <div class="stdlib-card-items">
         <span class="stdlib-card-item-tag">@type_name</span><span class="stdlib-card-item-tag">@type_size</span><span class="stdlib-card-item-tag">@field_count</span><span class="stdlib-card-item-tag">@field_offset</span>
+      </div>
+    </a>
+
+    <a href="#module-derive" class="stdlib-card" data-category="Types &amp; Semantics">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">derive</span>
+        <span class="stdlib-card-badge">Types &amp; Semantics</span>
+      </div>
+      <p class="stdlib-card-desc">Explicit derive that runs: derive_hash turns a struct value into a number by mixing its fields in declaration order with FNV-1a 64. Field VALUES, never object bytes -- padding never enters the mix, so the two backends answer the same number though they lay objects out differently.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">derive_hash</span>
       </div>
     </a>
    
@@ -1413,6 +1425,71 @@ fun main() &lt;noret&gt; {
     printf(&quot;%s\n&quot;, @type_name(Point));
     printf(&quot;%d %d\n&quot;, @type_size(Point), @field_count(Point));
     printf(&quot;%d\n&quot;, @field_offset(Point, &quot;y&quot;));
+}</code></pre>
+      </div>
+    </section>
+    
+    <section id="module-derive" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">derive</h2>
+        <span class="module-import-path">derive::std</span>
+        <span class="badge-tag">Types &amp; Semantics</span>
+      </div>
+      <p class="module-description">Explicit derive that runs (issue #53 Scope B): the module home of <code>derive_hash</code>, the derive that turns a struct value into a number the two backends agree on. The walk mixes the fields in declaration order with FNV-1a 64 -- field VALUES, never object bytes: padding never enters the mix and a layout-model change shows up in the number, exactly as such a change should.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> A field&rsquo;s width comes from its own written type: integers ride their two&rsquo;s-complement bytes zero-extended (<code>int</code> 4, <code>long</code> 8, <code>bool</code>/<code>char</code> 1), float and double their IEEE bit patterns, a nested struct recurses, an empty struct stays the basis alone, and a payloadless enum&rsquo;s tag mixes as the <code>int</code> it is. <code>Type</code> binds from the value argument -- <code>derive_hash(p)</code> with <code>p</code> a Point needs no turbofish. Every kind the walk does not lower refuses naming the field and the kind -- a <code>string</code> field, an array, a pointer, a nullable, an interface reference, an <code>any</code> box, a union value, a fn-typed field, a payloaded enum, a struct nested more than sixteen deep -- never silently skipping: a skipped field would still answer a number. ADR 0058.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { derive_hash } from derive::std;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>derive_hash(x: Type) &lt;ulong&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Derive</span></td>
+          <td>FNV-1a 64 over the struct value&rsquo;s fields in declaration order; per byte, least-significant first, <code>h = (h ^ byte) * 1099511628211</code> from <code>14695981039346656037</code>. <code>Type</code> binds from the value argument&rsquo;s spelling, so the call site names no turbofish.</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">Example</span>
+          <button type="button" class="copy-btn" aria-label="Copy example">
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">struct Point { pub x &lt;int&gt;, pub y &lt;long&gt; }
+
+fun main() &lt;noret&gt; {
+    let p &lt;Point&gt;;
+    p.x = 3;
+    p.y = -5;
+    // 7192506404828969274 -- x's four bytes, then y's eight.
+    printf(&quot;%lu\n&quot;, derive_hash(p));
 }</code></pre>
       </div>
     </section>

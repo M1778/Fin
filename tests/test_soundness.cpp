@@ -16362,3 +16362,209 @@ TEST(Soundness_Reflect, ArityIsChecked) {
     EXPECT_NE(stripAnsi(r3.err).find("'@field_offset' expects 2 arguments"), std::string::npos)
         << stripAnsi(r3.err);
 }
+
+// ---------------------------------------------------------------------------
+// Soundness_Derive -- issue #53 Scope B, ADR 0058. `derive_hash(v)` walks a
+// struct value's fields in declaration order and mixes them with FNV-1a 64
+// (h = 14695981039346656037; per byte, least-significant first:
+// h = (h ^ byte) * 1099511628211, mod 2^64). Field values only, never object
+// bytes: padding never enters, so equal field values hash equal under any
+// layout that keeps their order. Each integer field zero-extends to 64 bits
+// before the byte chain; float/double mix their IEEE bit patterns; a nested
+// struct recurses into its own fields; a payloadless enum field mixes its
+// tag word.
+//
+// The numbers below were computed from the SAME spec, one field and byte at
+// a time, independently of the compiler: `Point{x: 3, y: -5}` is
+// 7192506404828969274; `Outer{Inner{7, 9}, 5}` is 10913862503654881342; the
+// empty struct adds nothing, so `{}` hashes to the offset basis,
+// 14695981039346656037. A backend that answers any other number on these
+// inputs is itself the bug.
+//
+// `derive_hash<T>` is a generic wrapper -- `fun derive_hash<Type>(x: Type)
+// <ulong> { return derive_hash(x); }` -- whose `Type` binds from the VALUE
+// argument the same way `tp_size::<Point>` binds from its turbofish: the
+// call site proves the wrapper route the phase-A record deferred to Phase
+// B, in the value-bound form both backends monomorphize before the turbofish
+// route exists on the stage. In this suite the wrapper is spelled inline,
+// the way the reflect suite spells its own; in lib/std/derive.fin it is the
+// bodiless declaration the backends lower, on the hash_word footing.
+//
+// Not swept here: string/array/pointer/nullable/interface/payloaded-enum
+// FIELDS refuse naming the field and the kind (backend invariant), and the
+// argument must be a variable naming a struct value -- a pointer to a
+// struct does not dereference into the walk yet.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const char* const kDerivePoint =
+    "@define printf(fmt: string, ...) <noret>;\n"
+    "struct Point { pub x <int>, pub y <long> }\n"
+    "fun derive_hash<Type>(x: Type) <ulong>;\n";
+
+}  // namespace
+
+TEST(Soundness_Derive, TheWrapperBindsFromTheValue) {
+    // The wrapper's own binding: `derive_hash(p)` with `p: Point` monomorphizes
+    // `Type := Point` and the walk lowers inside the instantiation. The number
+    // pins the whole walk: field order, zero-extension, byte order, constants.
+#ifdef FIN_TESTS_HAVE_BACKEND
+    const CompiledRun run = compileAndRun(std::string(kDerivePoint) +
+        "fun main() <int> {\n"
+        "    let p <Point>;\n"
+        "    p.x = 3;\n"
+        "    p.y = -5;\n"
+        "    printf(\"%lu\\n\", derive_hash(p));\n"
+        "    let q <Point>;\n"
+        "    q.x = 3;\n"
+        "    q.y = -5;\n"
+        "    printf(\"%d\\n\", derive_hash(p) == derive_hash(q));\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_EQ(run.compileExit, 0) << stripAnsi(run.compileErr);
+    EXPECT_EQ(run.out, "7192506404828969274\n1\n") << run.out;
+#endif
+}
+
+TEST(Soundness_Derive, EveryByteOfEveryFieldEntersTheMix) {
+    // -5 through a `long` field rides its two's-complement bytes in the first
+    // test; this one widens the input range (123, 4567890123) and pins its
+    // own number, so a truncating or sign-clipping walker cannot pass the
+    // suite on the first pin and drift here.
+#ifdef FIN_TESTS_HAVE_BACKEND
+    const CompiledRun run = compileAndRun(std::string(kDerivePoint) +
+        "fun main() <int> {\n"
+        "    let p <Point>;\n"
+        "    p.x = 123;\n"
+        "    p.y = 4567890123;\n"
+        "    printf(\"%lu\\n\", derive_hash(p));\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_EQ(run.compileExit, 0) << stripAnsi(run.compileErr);
+    EXPECT_EQ(run.out, "2952561617234395016\n") << run.out;
+#endif
+}
+
+TEST(Soundness_Derive, AnEmptyStructHasNothingToMix) {
+    // `{}` contributes no field, so the answer is the FNV offset basis alone --
+    // the walk's identity, not a decided-by-the-backend number. The wrapper
+    // is bodied like `hash_of` is: only `derive_hash` itself is the leaf.
+#ifdef FIN_TESTS_HAVE_BACKEND
+    const CompiledRun run = compileAndRun(std::string(kDerivePoint) +
+        "struct Empty { }\n"
+        "fun empty_hash<E>(x: E) <ulong> { return derive_hash(x); }\n"
+        "fun main() <int> {\n"
+        "    let e <Empty>;\n"
+        "    printf(\"%lu\\n\", empty_hash(e));\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_EQ(run.compileExit, 0) << stripAnsi(run.compileErr);
+    EXPECT_EQ(run.out, "14695981039346656037\n") << run.out;
+#endif
+}
+
+TEST(Soundness_Derive, ANestedStructWalksItsOwnFields) {
+    // The nested walk recurses: `Outer`'s fields -- the two ints of `Inner`
+    // (7 at the walk of `i`'s own fields, then 9), then `z`'s eight bytes of
+    // 5 -- in one chain, 16 bytes total. Field ORDER across the nesting is
+    // what this pins.
+#ifdef FIN_TESTS_HAVE_BACKEND
+    const CompiledRun run = compileAndRun(std::string(kDerivePoint) +
+        "struct Inner { pub a <int>, pub b <int> }\n"
+        "struct Outer { pub i <Inner>, pub z <long> }\n"
+        "fun outer_hash<O>(x: O) <ulong> { return derive_hash(x); }\n"
+        "fun main() <int> {\n"
+        "    let o <Outer>;\n"
+        "    o.i.a = 7;\n"
+        "    o.i.b = 9;\n"
+        "    o.z = 5;\n"
+        "    printf(\"%lu\\n\", outer_hash(o));\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_EQ(run.compileExit, 0) << stripAnsi(run.compileErr);
+    EXPECT_EQ(run.out, "10913862503654881342\n") << run.out;
+#endif
+}
+
+TEST(Soundness_Derive, AStringFieldRefusesByName) {
+    // The backend invariant in the walk: a kind this derive does not lower
+    // refuses naming the FIELD and the KIND, never silently skipping a field
+    // (a skipped field would still answer a number, which is the quiet bug).
+#ifdef FIN_TESTS_HAVE_BACKEND
+    const CompiledRun run = compileAndRun(std::string(kDerivePoint) +
+        "struct Tagged { pub name <string>, pub n <int> }\n"
+        "fun tagged_hash<T>(x: T) <ulong> { return derive_hash(x); }\n"
+        "fun main() <int> {\n"
+        "    let t <Tagged>;\n"
+        "    printf(\"%lu\\n\", tagged_hash(t));\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_NE(run.compileExit, 0);
+    const std::string err = stripAnsi(run.compileErr);
+    EXPECT_EQ(errorCount(err), 1u) << err;
+    EXPECT_NE(err.find("field 'name'"), std::string::npos) << err;
+    EXPECT_NE(err.find("'string'"), std::string::npos) << err;
+#endif
+}
+
+TEST(Soundness_Derive, APointerFieldRefusesByName) {
+#ifdef FIN_TESTS_HAVE_BACKEND
+    const CompiledRun run = compileAndRun(std::string(kDerivePoint) +
+        "struct Holder { pub w <int>, pub raw <&int> }\n"
+        "fun holder_hash<H>(x: H) <ulong> { return derive_hash(x); }\n"
+        "fun main() <int> {\n"
+        "    let v <int>;\n"
+        "    let h <Holder>;\n"
+        "    h.raw = &v;\n"
+        "    printf(\"%lu\\n\", holder_hash(h));\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_NE(run.compileExit, 0);
+    const std::string err = stripAnsi(run.compileErr);
+    EXPECT_EQ(errorCount(err), 1u) << err;
+    EXPECT_NE(err.find("field 'raw'"), std::string::npos) << err;
+    EXPECT_NE(err.find("pointer"), std::string::npos) << err;
+#endif
+}
+
+TEST(Soundness_Derive, ANonStructValueRefusesAtTheWalk) {
+    // The argument must BE a struct value. `5` types fine at the call (the
+    // generic `Type` unifies with anything), so the shape refusal belongs to
+    // the walk, which is where the answer gets computed -- and refused rather
+    // than guessed.
+#ifdef FIN_TESTS_HAVE_BACKEND
+    const CompiledRun run = compileAndRun(std::string(kDerivePoint) +
+        "fun main() <int> {\n"
+        "    printf(\"%lu\\n\", derive_hash(5));\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_NE(run.compileExit, 0);
+    const std::string err = stripAnsi(run.compileErr);
+    EXPECT_EQ(errorCount(err), 1u) << err;
+    EXPECT_NE(err.find("expects a struct value"), std::string::npos) << err;
+    EXPECT_NE(err.find("got 'int'"), std::string::npos) << err;
+#endif
+}
+
+TEST(Soundness_Derive, TheTypeSlotIsNotTheArgumentSlot) {
+    // `derive_hash::<Point>()` spells the type in the turbofish; the parameter
+    // slot still wants its value, and nothing in the analyzer turns a typed
+    // parameter into a no-argument call.
+    const FincRun r = compile(std::string(kDerivePoint) +
+        "fun main() <noret> { const w <ulong> = derive_hash::<Point>(); }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("expects 1 arguments"), std::string::npos) << err;
+}
+
+TEST(Soundness_Derive, ArityIsChecked) {
+    const FincRun r1 = compile(std::string(kDerivePoint) +
+        "fun main() <noret> { let p <Point>; const w <ulong> = derive_hash(p, p); }\n");
+    EXPECT_NE(stripAnsi(r1.err).find("'derive_hash' expects 1 arguments"), std::string::npos)
+        << stripAnsi(r1.err);
+
+    const FincRun r2 = compile(std::string(kDerivePoint) +
+        "fun main() <noret> { let p <Point>; const w <ulong> = derive_hash(); }\n");
+    EXPECT_NE(stripAnsi(r2.err).find("expects 1 arguments"), std::string::npos)
+        << stripAnsi(r2.err);
+}

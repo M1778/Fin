@@ -643,7 +643,12 @@ TEST(Census, EverySampleIsAnnotatedAndClassified) {
     // model, `@field_offset` pinned on the short-must-be-literal rule, and a
     // payloadless enum answering as the int its tag is through the generic
     // wrapper binding.
-    EXPECT_EQ(t.samples, 73)
+    // 73 -> 74 on 2026-10-20: tests/samples/stdlib/derive.fin arrives for
+    // issue #53 Scope B: the derive_hash walk (FNV-1a 64 over a struct
+    // value's field values in declaration order, lib/std/derive.fin), the
+    // hash pin pure number against drifted constants, equal values hash
+    // equal, through the generic wrapper binding on all three compilers.
+    EXPECT_EQ(t.samples, 74)
         << "the corpus is 51 samples. Sample code changes only by a ratified "
            "language decision (ADR 0008), so a different count is either such a "
            "decision — update this — or a file globbed in by accident";

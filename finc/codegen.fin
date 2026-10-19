@@ -4802,6 +4802,19 @@ fun cg_decl_is_hash_word_leaf(decl: &AstNode) <bool> {
     return true;
 }
 
+// The `derive_hash` leaf (issue #53 Scope B, ADR 0058): the same footing
+// the `hash_word` leaf stands on (ADR 0049) -- a bodiless generic
+// declaration lowered per concrete call by the backend. A definition wins
+// and falls through; a non-generic extern of the same name is an ordinary
+// call and never counts here.
+fun cg_decl_is_derive_hash_leaf(decl: &AstNode) <bool> {
+    if (decl == null || decl.kind != ast_fun_decl()) { return false; }
+    if (decl.name == null || !cg_str_eq(decl.name, "derive_hash")) { return false; }
+    if (!is_generic_method(decl)) { return false; }
+    if (decl.left != null) { return false; }
+    return true;
+}
+
 // Prototype member erasure for `delete &p[k]` (C++ emitPrototypeRemove):
 // scan the keys the way the subscript load does (integer words compare,
 // string words compare by content), then close the gap by shifting every
@@ -4937,6 +4950,18 @@ fun cg_hash_word_is_leaf(ctx: &FnContext, name: string) <bool> {
     return true;
 }
 
+// The derive_hash leaf's call-side twin: a definition wins and falls
+// through to the normal path.
+fun cg_derive_hash_is_leaf(ctx: &FnContext, name: string) <bool> {
+    if (name == null || !cg_str_eq(name, "derive_hash")) { return false; }
+    let sym <&FnSymbol> = fn_ctx_find_fn(ctx, name);
+    if (sym == null || sym.tmpl == null) { return false; }
+    let tmpl <&AstNode> = sym.tmpl;
+    if (tmpl.left != null) { return false; }
+    if (!is_generic_method(tmpl)) { return false; }
+    return true;
+}
+
 // FNV-1a over the `strlen` bytes, 32-bit wrap: offset basis 2166136261,
 // prime 16777619. The empty string hashes as the basis. Same constants
 // both compilers implement, so both partition string keys identically
@@ -4979,6 +5004,215 @@ fun cg_hash_word_string(ctx: &FnContext, data: &LLVMValue) <&LLVMValue> {
     llvm_build_br(ctx.builder, cond_bb);
     llvm_position_builder(ctx.builder, end_bb);
     return llvm_build_load2(ctx.builder, ctx.i32_ty, h_slot, "hash.result");
+}
+
+// ---------------------------------------------------------------------------
+// derive_hash (issue #53 Scope B, ADR 0058): the stage's FNV-1a 64 walk.
+// h starts 14695981039346656037; per field byte, least-significant first,
+// h = (h ^ byte) * 1099511628211 mod 2^64. Field VALUES, not object bytes:
+// padding never enters, so equal field values hash equal under any layout
+// keeping their order. The stage walks the fields the way member stores
+// write them: a struct value is its heap box and every field is a gep
+// index into the column cg_derive_inline_type forges (a box carries no
+// header -- cg_prototype_erase geeps its keys through the same shape).
+// Both compilers run the same chain on the same constants, so the same
+// value hashes the same.
+// ---------------------------------------------------------------------------
+
+fun cg_derive_refuse(ctx: &FnContext, msg: string) <int> {
+    cg_dprintf(2, "finc codegen refusal: %s\n", msg);
+    refuse_and_poison(ctx);
+    llvm_build_unreachable(ctx.builder);
+    return 0;
+}
+
+// One field value into the mixing state. `wide` carries the value as a
+// 64-bit word (zero-extended, or bit-cast for float/double); `width` is
+// the field's byte count, a compile-time constant like the C++ helper's
+// DataLayout store size, so the chain lowers straight-line: no loop, no
+// blocks, nothing a host layout could pick differently.
+
+fun cg_derive_mix_chain(ctx: &FnContext, h: &LLVMValue, wide: &LLVMValue, width: int) <&LLVMValue> {
+    let prime <&LLVMValue> = llvm_const_int_of_string(ctx.i64_ty, "1099511628211", 10);
+    let mask <&LLVMValue> = llvm_const_int(ctx.i64_ty, 255, 0);
+    let cur <&LLVMValue> = h;
+    let k <int> = 0;
+    while (k < width) {
+        let b <&LLVMValue> = wide;
+        if (k > 0) {
+            b = llvm_build_lshr(ctx.builder, b, llvm_const_int(ctx.i64_ty, 8 * k, 0), "derive.sh");
+        }
+        b = llvm_build_and(ctx.builder, b, mask, "derive.b");
+        cur = llvm_build_xor(ctx.builder, cur, b, "derive.xor");
+        cur = llvm_build_mul(ctx.builder, cur, prime, "derive.mul");
+        k = k + 1;
+    }
+    return cur;
+}
+
+// A struct's fields in declaration order, one gep by index per field,
+// the per-field classification inlined with the recursion it runs
+// (deriveHashWalkField is the C++'s split of this; the stage keeps one
+// self-recursive function, because the checker does not hoist an
+// imported-typed signature for a forward call). `depth` counts nesting
+// against the C++ cap: sixteen and deeper refuses naming the gap. A
+// refused field never silently skips: a skipped field would still
+// answer a number, which is the quiet bug a derive must not give.
+
+// A struct's fields in declaration order, one slot per field. The
+// stage's box stores field slot i at byte i * pointer size (the member
+// store lane writes and reads that stride; cg_prototype_erase geeps its
+// keys and lengths through the same shape), so the walk geeps the same
+// slot and loads the field's own width out of it. The C++ side walks
+// its DataLayout-packed column; both streams carry the same field VALUE
+// bytes in declaration order, which is the agreement the pin needs --
+// a slot's unused padding never enters the mix on either side.
+// deriveHashWalkField is the C++'s split of the classification; the
+// stage keeps one self-recursive function, because the checker does not
+// hoist an imported-typed signature for a forward call. `depth` counts
+// nesting against the C++ cap: sixteen and deeper refuses naming the
+// gap. A refused field never silently skips: a skipped field would
+// still answer a number, which is the quiet bug a derive must not give.
+
+fun cg_derive_hash_walk(ctx: &FnContext, h: &LLVMValue, ptr: &LLVMValue, sinfo: &StructInfo, depth: int) <&LLVMValue> {
+    fun fr_refuse(c: &FnContext, nm: string, msg: string) <int> {
+        let ab <Buffer> = new_buffer(224);
+        ab.write_string("derive-hash of field '");
+        ab.write_string(nm);
+        ab.write_string("'");
+        ab.write_string(msg);
+        cg_derive_refuse(c, ab.to_string());
+        free_buffer(ab);
+        return 0;
+    }
+    if (depth > 16) {
+        cg_derive_refuse(ctx, "derive-hash of a struct nested more than sixteen fields deep is not lowered yet");
+        return null;
+    }
+    let cur <&LLVMValue> = h;
+    let fi <int> = 0;
+    while (fi < sinfo.field_count) {
+        let f <&StructFieldInfo> = sinfo.fields[fi];
+        if (f != null && cur != null) {
+            let ind_f <&LLVMIndices> = new LLVMIndices{};
+            ind_f.i0 = llvm_const_int(ctx.i64_ty, fi, 0);
+            let fptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, ptr, ind_f, 1, "derive.f");
+            delete ind_f;
+            let fname <string> = f.name;
+            let s <string> = f.type_annotation;
+            if (s == null) { s = ""; }
+            s = cg_trim_spaces(s);
+            let slen <int> = cast<int>(cg_strlen(s));
+            let ifc <&InterfaceInfo> = find_interface(ctx, s);
+            let ee2 <&EnumInfo> = find_enum(ctx, s);
+            let st4 <&StructInfo> = find_struct(ctx, s);
+            // The kinds the walk refuses, checked in the order the C++
+            // walk checks them. `string` names its spelling like
+            // cgDisplay; a pointer is any & or * the written annotation
+            // carries, because no pointer rides a struct's hash through
+            // an address.
+            if (slen == 0) {
+                fr_refuse(ctx, fname, " of type '' is not lowered yet");
+                cur = null;
+            } else if (cg_str_eq(s, "string")) {
+                fr_refuse(ctx, fname, " of type 'string' is not lowered yet");
+                cur = null;
+            } else if (cg_str_eq(substr(s, 0, 1), "&") || cg_str_eq(substr(s, 0, 1), "*") ||
+              cg_str_eq(substr(s, slen - 1, 1), "*")) {
+                fr_refuse(ctx, fname, " of a pointer type is not lowered yet");
+                cur = null;
+              } else if (cg_str_eq(substr(s, 0, 1), "[")) {
+                fr_refuse(ctx, fname, ": an array field is not lowered yet");
+                cur = null;
+              } else if (cg_str_contains(s, "fn(")) {
+                fr_refuse(ctx, fname, ": a function value is not lowered yet");
+                cur = null;
+              } else if (cg_str_contains(s, "<")) {
+                // A generic instance is a walk the stage does not own yet
+                // (the C++ walks them; recorded asymmetry). Payloaded
+                // enum instances included: the C++ fallback names the
+                // instance's cgDisplay, so the stage does the same
+                // (r5/r5c probes).
+                let ab <Buffer> = new_buffer(224);
+                ab.write_string(" of type '");
+                ab.write_string(s);
+                ab.write_string("' is not lowered yet");
+                fr_refuse(ctx, fname, ab.to_string());
+                cur = null;
+              } else if (cg_str_contains(s, "?")) {
+                fr_refuse(ctx, fname, ": a nullable field is not lowered yet");
+                cur = null;
+              } else if (ifc != null) {
+                fr_refuse(ctx, fname, ": an interface reference is not lowered yet");
+                cur = null;
+              } else if (cg_str_eq(s, "any")) {
+                fr_refuse(ctx, fname, ": an 'any' box is not lowered yet");
+                cur = null;
+              } else if (ee2 != null && ee2.has_payload) {
+                // A bare payloaded enum spelling lands on the C++'s
+                // fallback (cgDisplay names it), not the payloaded phrase
+                // -- that one is the generic instance's (the `<` lane).
+                let ab <Buffer> = new_buffer(224);
+                ab.write_string(" of type '");
+                ab.write_string(s);
+                ab.write_string("' is not lowered yet");
+                fr_refuse(ctx, fname, ab.to_string());
+                free_buffer(ab);
+                cur = null;
+              } else if (st4 != null) {
+                // A nested struct's field value is its box (the stage's
+                // struct representation): load the pointer and walk the
+                // box through its own slots. The C++ side recurses into
+                // its packed column; equal field values make the streams
+                // equal either way.
+                let box_ptr <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, fptr, "derive.box");
+                if (box_ptr == null) {
+                    fr_refuse(ctx, fname, ": the field's box does not lower");
+                    cur = null;
+                } else {
+                    cur = cg_derive_hash_walk(ctx, cur, box_ptr, st4, depth + 1);
+                }
+              } else {
+                // The scalar chain, last because struct/enum/interface
+                // spellings all matched above. Widths come from the same
+                // types map_type gives everything else (`int` 4 bytes
+                // both ways, `bool` 1, float 4, double 8). A payloadless
+                // enum field lands here with the int its tag lowers as;
+                // float and double ride their IEEE bit patterns.
+                let ft <&LLVMType> = map_type(ctx, s);
+                let width <int> = 0;
+                if (ft == ctx.i64_ty) { width = 8; }
+                else if (ft == ctx.i32_ty) { width = 4; }
+                else if (ft == ctx.i16_ty) { width = 2; }
+                else if (ft == ctx.i8_ty) { width = 1; }
+                else if (ft == ctx.i1_ty) { width = 1; }
+                else if (ft == ctx.float_ty) { width = 4; }
+                else if (ft == ctx.double_ty) { width = 8; }
+                if (width == 0) {
+                    let ab <Buffer> = new_buffer(224);
+                    ab.write_string(" of type '");
+                    ab.write_string(s);
+                    ab.write_string("' is not lowered yet");
+                    fr_refuse(ctx, fname, ab.to_string());
+                    free_buffer(ab);
+                    cur = null;
+                } else {
+                    let v <&LLVMValue> = llvm_build_load2(ctx.builder, ft, fptr, "derive.ld");
+                    if (ft == ctx.float_ty) {
+                        v = llvm_build_bitcast(ctx.builder, v, ctx.i32_ty, "derive.bits");
+                        v = llvm_build_zext(ctx.builder, v, ctx.i64_ty, "derive.wide");
+                    } else if (ft == ctx.double_ty) {
+                        v = llvm_build_bitcast(ctx.builder, v, ctx.i64_ty, "derive.bits");
+                    } else if (ft != ctx.i64_ty) {
+                        v = llvm_build_zext(ctx.builder, v, ctx.i64_ty, "derive.wide");
+                    }
+                    cur = cg_derive_mix_chain(ctx, cur, v, width);
+                }
+              }
+        }
+        fi = fi + 1;
+    }
+    return cur;
 }
 
 // MC1 ordering: declare_function and the method-cache helpers sit before
@@ -6326,6 +6560,42 @@ fun cg_free_spelling_of(ctx: &FnContext, node: &AstNode, depth: int) <string> {
         return "";
     }
     return "";
+}
+
+// The written source's sign, per scalarByName's table (src/types/
+// Layout.cpp:59): which spellings widen through sign extension. `bool`
+// never asks -- it widens unsigned whatever the target (C++ coerce's
+// isSigned && !isBool gate). Unknown spellings default signed, the same
+// default CgType::isSigned keeps.
+fun cg_ann_is_signed(sp: string) <bool> {
+    if (sp == null || cg_strlen(sp) == cast<ulong>(0)) { return true; }
+    if (cg_str_eq(sp, "char") || cg_str_eq(sp, "int8") || cg_str_eq(sp, "i8") ||
+      cg_str_eq(sp, "short") || cg_str_eq(sp, "int16") || cg_str_eq(sp, "i16") ||
+      cg_str_eq(sp, "int") || cg_str_eq(sp, "int32") || cg_str_eq(sp, "i32") ||
+      cg_str_eq(sp, "long") || cg_str_eq(sp, "int64") || cg_str_eq(sp, "i64") ||
+      cg_str_eq(sp, "isize")) {
+        return true;
+      }
+    return false;
+}
+
+// Int widen into an i64 slot: the source's WRITTEN sign decides zext
+// against sext (the LLVM types do not carry it; uint keys must keep
+// zero extension). Narrow targets and widening float reads stay on
+// coerce_val; this gate exists for the field-store lane, where a
+// negative int source zero-extended into a long field would hand the
+// rest of the program -- the derive walk among them -- the wrong bits.
+fun cg_coerce_field_int(ctx: &FnContext, val: &LLVMValue, src_node: &AstNode, target_ty: &LLVMType) <&LLVMValue> {
+    if (val == null || target_ty == null) { return val; }
+    let v_ty <&LLVMType> = llvm_type_of(val);
+    if (target_ty == ctx.i64_ty && v_ty != ctx.i64_ty) {
+        let src_ann <string> = cg_free_spelling_of(ctx, src_node, 8);
+        let s_ann <string> = cg_trim_spaces(cg_strip_markers(src_ann));
+        if (cg_ann_is_signed(s_ann)) {
+            return llvm_build_sext(ctx.builder, val, ctx.i64_ty, "w64s");
+        }
+    }
+    return coerce_val(ctx, val, target_ty);
 }
 
 // Try the per-key free-function instance for a call: infer the bindings
@@ -8833,7 +9103,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                                 llvm_build_unreachable(ctx.builder);
                                 return rhs;
                             } else {
-                                rhs = coerce_val(ctx, rhs, fld_ty);
+                                rhs = cg_coerce_field_int(ctx, rhs, n.right, fld_ty);
                             }
                             llvm_build_store(ctx.builder, rhs, gep);
                         }
@@ -10558,6 +10828,50 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                                 if (hw_w != null) { return hw_w; }
                             }
                         }
+                    }
+                }
+            }
+        }
+        // `derive_hash(v)` -- the derive walk (issue #53 Scope B, ADR
+        // 0058), the same footing hash_word stands on: a bodiless generic
+        // declaration lowered per concrete call by the backend, a
+        // definition in the corpus winning the name and falling through.
+        // The concrete type binds from the value argument's spelling.
+        // Generic or exotic spellings fall through to the old path.
+        if (cg_str_eq(n.name, "derive_hash") && n.left != null) {
+            if (cg_derive_hash_is_leaf(ctx, n.name)) {
+                let dh_argc <int> = 0;
+                let dh_cw <&AstNode> = n.left;
+                while (dh_cw != null && dh_argc < 3) {
+                    dh_argc = dh_argc + 1;
+                    dh_cw = dh_cw.right;
+                }
+                if (dh_argc != 1) {
+                    cg_dprintf(2, "finc codegen refusal: a call to 'derive_hash' with %d argument(s) where it declares 1\n", dh_argc);
+                    refuse_and_poison(ctx);
+                    return null;
+                }
+                let dh_actual <&AstNode> = n.left.left;
+                if (dh_actual == null) { dh_actual = n.left; }
+                let dh_spell <string> = cg_free_spelling_of(ctx, dh_actual, 8);
+                if (cg_strlen(dh_spell) > cast<ulong>(0)) {
+                    let dh_s <string> = cg_trim_spaces(cg_strip_markers(dh_spell));
+                    if (!cg_str_eq(dh_s, "Self") && !cg_is_generic_ann(ctx, dh_s) && !cg_is_type_param(dh_s)) {
+                        let dh_st <&StructInfo> = find_struct(ctx, dh_s);
+                        if (dh_st == null) {
+                            let ab <Buffer> = new_buffer(160);
+                            ab.write_string("'derive_hash' expects a struct value, got '");
+                            ab.write_string(dh_s);
+                            ab.write_string("' is not lowered yet");
+                            cg_derive_refuse(ctx, ab.to_string());
+                            free_buffer(ab);
+                            return null;
+                        }
+                        let dh_arg <&LLVMValue> = lower_expr(ctx, dh_actual);
+                        if (dh_arg == null) { return null; }
+                        let dh_h <&LLVMValue> = llvm_const_int_of_string(ctx.i64_ty, "14695981039346656037", 10);
+                        let dh_res <&LLVMValue> = cg_derive_hash_walk(ctx, dh_h, dh_arg, dh_st, 0);
+                        return dh_res;
                     }
                 }
             }
@@ -13757,7 +14071,7 @@ pub fun lower_decl(
         // demand (see pass 1.5): skipping them here keeps uncalled generics
         // out of the object. The `hash_word` leaf is bodiless and lowers per
         // concrete call instead (ADR 0049), so it never declares either.
-        if (decl.int_val != 2 && (cg_decl_is_free_over_struct(decl, structs, struct_count) || cg_decl_is_free_bare_generic(decl, structs, struct_count) || cg_decl_is_struct_seeded_generic(decl) || cg_decl_is_hash_word_leaf(decl))) { return false; }
+        if (decl.int_val != 2 && (cg_decl_is_free_over_struct(decl, structs, struct_count) || cg_decl_is_free_bare_generic(decl, structs, struct_count) || cg_decl_is_struct_seeded_generic(decl) || cg_decl_is_hash_word_leaf(decl) || cg_decl_is_derive_hash_leaf(decl))) { return false; }
         return lower_fun_decl(module, builder, decl, fn_syms, fn_sym_count, structs, struct_count, enums, enum_count, interfaces, interface_count, move_claim, src_file);
     } else if (decl.kind == ast_struct_decl()) {
         // ADR 0049: `HashMap` methods lower on demand per instantiation
@@ -14644,7 +14958,7 @@ pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int, 
             // leaf is bodiless and lowers per concrete call instead
             // (ADR 0049), so it registers too and never declares.
             // Anything else declares eager as before.
-            if (cg_decl_is_free_over_struct(decl, structs, struct_count) || cg_decl_is_free_bare_generic(decl, structs, struct_count) || cg_decl_is_struct_seeded_generic(decl) || cg_decl_is_hash_word_leaf(decl)) {
+            if (cg_decl_is_free_over_struct(decl, structs, struct_count) || cg_decl_is_free_bare_generic(decl, structs, struct_count) || cg_decl_is_struct_seeded_generic(decl) || cg_decl_is_hash_word_leaf(decl) || cg_decl_is_derive_hash_leaf(decl)) {
                 let dup <bool> = false;
                 let di <int> = 0;
                 while (di < fn_sym_count) {

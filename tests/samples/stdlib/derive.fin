@@ -1,0 +1,45 @@
+//@ normative
+//@ ok
+// Explicit derive that runs (issue #53 Scope B): `derive_hash` over a struct
+// value's fields, the issue's ONE derive shipped hash-first (a hash function
+// is an ordinary function, so ADR 0036's `==` ruling does not reach here) --
+// and an explicit call by design: derive is opt-in, never default.
+//
+// WHAT THE EXAMPLE PINS.
+//
+//   * The number itself: `Point{x: 3, y: -5}` mixes 12 field-value bytes --
+//     x's four, y's eight as its two's-complement bits, least-significant
+//     byte first, each field zero-extended to 64 bits -- into FNV-1a 64 and
+//     lands on 7192506404828969274. That sentence pins byte order,
+//     extension, field order and the mixer constants against either
+//     backend drifting first.
+//   * Equal values hash equal: a second Point written with the same fields
+//     through the same wrapper reports the same number, printed below as
+//     the comparison's `1`.
+//   * The wrapper is the module surface: derive_hash rides lib/std/derive.fin
+//     and `Type` binds from the VALUE argument (`p` spells Point), the
+//     wrapper route the phase-A records deferred to Phase B for handles
+//     bound this way.
+//
+// THE RANGE NOT SWEPT: a field the walk does not lower (string, array,
+// pointer, nullable, interface, payloaded enum) refuses naming the field and
+// the kind; a nested struct repeats the walk over its own fields. The refusals
+// have their own tests (Soundness_Derive); a sample that compiles pins what
+// RUNS, not what planned-for refusals look like.
+
+import { derive_hash } from derive::std;
+
+struct Point { pub x <int>, pub y <long> }
+
+fun main() <noret> {
+    let p <Point>;
+    p.x = 3;
+    p.y = -5;
+
+    printf("%lu\n", derive_hash(p));
+
+    let q <Point>;
+    q.x = 3;
+    q.y = -5;
+    printf("%d\n", derive_hash(p) == derive_hash(q));
+}

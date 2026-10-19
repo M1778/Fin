@@ -422,6 +422,21 @@
         "url": "stdlib.html#module-reflect"
     },
     {
+        "id": "module-derive",
+        "title": "std::derive - The Explicit Derive",
+        "category": "Standard Library",
+        "tags": [
+            "derive",
+            "derive_hash",
+            "hash",
+            "fnv",
+            "struct",
+            "layout"
+        ],
+        "snippet": "Explicit derive that runs: derive_hash mixes a struct value's fields in declaration order with FNV-1a 64 -- field values, never object bytes.",
+        "url": "stdlib.html#module-derive"
+    },
+    {
         "id": "module-intern",
         "title": "std::intern - String Interner",
         "category": "Standard Library",

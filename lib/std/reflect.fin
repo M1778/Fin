@@ -35,8 +35,9 @@
 //   * A type parameter names no layout inside one erased body (`fun
 //     tp_size<T>() { return @type_size(T); }` folds `Point` at the call's
 //     turbofish on the C++ side and refuses by name on the stage side,
-//     which keeps one body); the wrapper route lands with the Phase B
-//     monomorphization work in both compilers.
+//     which keeps one body); the wrapper route is the shape that landed
+//     (derive.fin's bodiless declaration from Scope B; the stage refuses
+//     the in-body `T` spelling the same way).
 //   * `fields_of` exists as a concept in the issue and is NOT shipped: the
 //     field list materializes only when a runtime `FieldInfo` has an owner
 //     for its string (Phase B). `@field_offset` and `@field_count` are what

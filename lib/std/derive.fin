@@ -1,0 +1,56 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Explicit derive that runs (issue #53 Scope B; ADR 0058): the module home of
+// `derive_hash`, the derive that turns a struct value into a number the two
+// backends agree on. Nothing else is declared here yet: the derive is a
+// bodiless generic declaration lowered per concrete `Type` at the call site,
+// never a metadata blob -- decl-listing its body would only add a name both
+// backends must special-case, one more thing to drift.
+//
+// THE DERIVE. `derive_hash(v)` mixes a struct value's fields in declaration
+// order with FNV-1a 64:
+//   h = 14695981039346656037;
+//   for each byte of each field's value, least-significant byte first:
+//     h = (h ^ byte) * 1099511628211  (mod 2^64)
+// It is never a byte blit of the whole object: padding never enters the mix
+// (two representations with the same field values always hash the same) and a
+// layout-model change -- a field moved, a width widened -- shows up in the
+// number, exactly as such a change should.
+//
+// WHAT EACH FIELD CONTRIBUTES.
+//   * An integer scalar mixes its two's-complement bytes zero-extended to 64
+//     bits first (int is 4 bytes, long 8, bool and char 1); the extension
+//     only pads, because the mixer reads no more bytes than the field's own
+//     width. `int` -1's four bytes are ff ff ff ff exactly like the `uint`
+//     clamp, and -1 stored into a long is ff ff ff ff ff ff ff ff.
+//   * float and double mix their IEEE bit patterns (4 and 8 bytes).
+//   * A nested struct recurses with its own fields; an empty struct adds
+//     nothing, so the sole hash of `{}` is the FNV offset basis,
+//     14695981039346656037.
+//   * A payloadless enum field mixes its tag word as the `int` it is
+//     (reflect.fin's model: a payloadless enum is its tag).
+//
+// BOUNDARIES, STATED SO A CALLER IS NOT SURPRISED BY A REFUSAL: a field of
+// type `string`, an array, a pointer, a nullable, an interface reference,
+// a payloaded enum (bare or instantiated), a `fn`-typed field or a struct
+// nested more than sixteen deep refuses naming the field and the kind --
+// each of those needs its own measured walk before this derive lowers it
+// rather than guesses at one (backend invariant: a refusal names the
+// construct and the gap; the stage walks generic instances under its own
+// recorded boundary, the C++ walks them). The value argument binds through
+// its type spelling, so a plain value spelling (`p`, `q`) lowers while an
+// exotic argument falls through to the old path, which refuses on its own.
+// These have their own tests (Soundness_Derive in tests/test_soundness.cpp).
+//
+// The `Type` parameter is not spelled at most call sites: `derive_hash(p)`
+// with `p` a Point binds through the VALUE argument on both backends (the
+// monomorphization the phase-B plan promised for wrappers bound this way;
+// `@type_size(T)` inside one erased body still refuses on the stage, which
+// keeps one body -- reflect.fin records that door separately). The spelling
+// lives on hash_word's footing (lib/std/hashmap.fin:107): a bodiless generic
+// declaration, lowered per concrete `T` by each backend at the call site.
+
+pub fun derive_hash<Type>(x: Type) <ulong>;
+
+namespace std {
+
+}
