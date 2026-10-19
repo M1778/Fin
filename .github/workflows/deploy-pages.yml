@@ -33,6 +33,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Issue #81: docs/site is a checked-in rendering of docs/guide + lib/std,
+      # but until a generator exists nothing noticed when it drifted — the site
+      # once shipped a #module-memory section for a module the library does not
+      # have. Refuse to publish a site that contradicts its source.
+      - name: Refuse to publish a site that contradicts its source
+        run: python3 tests/tools/check_site.py
+
       - name: Push to gh-pages branch
         uses: peaceiris/actions-gh-pages@v4
         with:

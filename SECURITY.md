@@ -108,10 +108,24 @@ issues.
 Fin is a systems language with explicit memory management, raw pointers,
 file/network/process access, and C FFI. Treat it accordingly:
 
-- **The documented install is `curl ... | sh`.** That trusts this repo, its
-hosting, and your network on every run. Prefer a pinned checkout you have
-inspected (`git clone` + verify + read `install.sh`), esp. on shared/CI
-machines.
+- **Distribution chain: what is verified and what is not.** Fin ships three
+  ways, and the guarantee differs by lane.
+  *Released archives and packages* — every release carries
+  `<asset>.sha256` sidecars and a generated `index.json` (the authoritative
+  sums `finn` checks), so "did the download arrive intact?" is answerable —
+  but nothing is **signed**: GPG/Sigstore is deliberately not in this
+  fix's scope, and remains a separate maintainer decision.
+  *The source installer `install.sh`* — it never compiles a moving branch:
+  without `FIN_REF` it pins the newest released tag and refuses when no
+  release exists, and it prints the resolved commit, so "what did I just
+  install?" answers. Expected trust: GitHub TLS plus your DNS, the same as
+  any fetch. Not verified: the script's own bytes (read the file before
+  running; the one-pipe `curl ... | sh` pattern was retired deliberately —
+  see INSTALL.md for verification commands) — and any commit supplied to
+  `FIN_REF` without being read.
+  *Hand builds from a checkout* — trust is the git identity you hold.
+  Unverified everywhere still: conan packages fetched at build time and
+  GitHub runner-produced artifacts.
 - **Never compile-and-run untrusted `.fin` sources blindly.** A program you
 build and execute has native power: files, sockets, processes. Review
 first; run unfamiliar programs containerized with restricted network.

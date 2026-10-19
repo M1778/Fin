@@ -543,22 +543,6 @@
     "url": "stdlib.html#module-operators"
   },
   {
-    "id": "module-memory",
-    "title": "std::memory -Dynamic Heap & Arena Patterns",
-    "category": "Standard Library",
-    "tags": [
-      "memory",
-      "new",
-      "delete",
-      "heap",
-      "allocation",
-      "arena",
-      "deallocation"
-    ],
-    "snippet": "Explicit memory allocation mechanisms: native heap dynamic arrays new [T, n]{}, delete arr;, and user-defined arena allocators.",
-    "url": "stdlib.html#module-memory"
-  },
-  {
     "id": "module-stdptr",
     "title": "std::stdptr -Reference-Counted Pointer rptr<T>",
     "category": "Standard Library",

@@ -17,16 +17,25 @@ done.
 
 ## Install
 
-Fastest path (clones into `~/Fin`, or `$FIN_DIR` when set, then builds and
-smoke-tests a backend compiler):
+Prefer a released build when you can: `deb`, `rpm`, Windows setup exe, macOS
+`dmg`, and a static musl tarball ship on each
+[release](https://github.com/M1778/Fin/releases), each next to its `.sha256`;
+the release's `index.json` is the authoritative list `finn` reads. Building
+from source comes after you have read what gets run:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/M1778/Fin/master/install.sh | sh
+curl -o install.sh https://raw.githubusercontent.com/M1778/Fin/master/install.sh
+sh install.sh                          # newest released tag or REFUSE; commit printed
 ```
 
-Details, failure modes, and what the script checks first live in
-[INSTALL.md](INSTALL.md). To build this checkout by hand on Linux or macOS,
-install a C++20 compiler, CMake 3.20 or newer, Conan 2, Bison 3.2 or newer,
+The installer clones at a pinned release tag only — never `master` — verifies
+the LLVM major pinned in `CMakeLists.txt` against your `llvm-config`, runs
+`./build.sh --release --with-llvm --no-test`, and smoke-tests the built
+compiler on one sample. `FIN_REF=<tag-or-commit>` names exactly what to
+compile when you want a specific build. Details, failure modes, and what the
+script checks first live in [INSTALL.md](INSTALL.md). To build this checkout
+by hand on Linux or macOS, install a C++20 compiler, CMake 3.20 or newer,
+Conan 2, Bison 3.2 or newer,
 Flex, Python 3, the LLVM development headers for the major pinned in
 `CMakeLists.txt` (currently 22), and a C driver such as `cc` for linking —
 then run `./build.sh --release` from the repository root. Platform specifics

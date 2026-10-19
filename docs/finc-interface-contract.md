@@ -16,8 +16,28 @@ finc 0.4.0 (contract 3)
 
 Format: `finc <semver> (contract <int>)`, one line, on **stdout**, exit `0`. The two numbers move
 independently. The semver is the release; the **contract integer is what `finn` should branch on**, and it
-changes only when something in this document changes incompatibly. Parse the integer, do not compare
-semver ranges.
+changes only when something in this document changes incompatibly. Parse the integer, do not
+compare semver ranges.
+
+### One contract, two repositories
+
+`finc` and `finn` implement this document against each other; neither is
+authoritative alone, and a change only one side takes is a break both suites
+pass (issue #87). Two things make the agreement testable:
+
+- **The conformance corpus:** `tests/contract-corpus/` holds golden
+  `(argv, expected JSONL)` cases generated from the real compiler
+  (`tests/tools/contract_corpus_regen.sh`). Fin's `ContractConformance.*` /
+  `ContractCorpus.*` tests replay it; `finn` mirrors the same directory as
+  fixtures for its `finc` module (`src/finc.rs`), the parser side. Anyone
+  changing this
+  interface, starting with `emitJson`, must regenerate with the script and
+  check the finn side in the same change.
+- **The contract integer only moves with a matching `finn` move.** Bumping
+  `kFincContractVersion` requires `SUPPORTED_CONTRACT` in `finn`'s
+  `src/finc.rs` to take the same value in a coordinated change; the scheduled
+  cross-repo workflow (`contract-crosscheck.yml`) builds both and fails while
+  the two disagree, so the integer cannot drift unnoticed.
 
 `--help` is also stdout and exit `0`. These two are the only things `finc` writes to stdout, and they are
 written because the caller asked for them.

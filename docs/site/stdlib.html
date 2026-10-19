@@ -90,7 +90,6 @@
 <li><a href="#module-operators" class="stdlib-module-link"><span>operators</span><span class="stdlib-module-count">6</span></a></li>
 </ul></div>
 <div class="stdlib-category-group"><div class="stdlib-category-title">Memory &amp; Pointers</div><ul class="stdlib-module-list">
-<li><a href="#module-memory" class="stdlib-module-link"><span>memory</span><span class="stdlib-module-count">5</span></a></li>
 <li><a href="#module-stdptr" class="stdlib-module-link"><span>stdptr</span><span class="stdlib-module-count">2</span></a></li>
 </ul></div>
     </aside>
@@ -286,18 +285,6 @@
       <p class="stdlib-card-desc">Interfaces for user-defined operator overloading on structs: arithmetic, comparison, and index assignment.</p>
       <div class="stdlib-card-items">
         <span class="stdlib-card-item-tag">IndexAssign</span><span class="stdlib-card-item-tag">Add</span><span class="stdlib-card-item-tag">Sub</span><span class="stdlib-card-item-tag">Mul</span>
-      </div>
-    </a>
-    
-
-    <a href="#module-memory" class="stdlib-card" data-category="Memory &amp; Pointers">
-      <div class="stdlib-card-header">
-        <span class="stdlib-card-name">memory</span>
-        <span class="stdlib-card-badge">Memory &amp; Pointers</span>
-      </div>
-      <p class="stdlib-card-desc">Explicit memory allocation mechanisms: native heap dynamic arrays new [T, n]{}, delete arr;, and user-defined arena allocators for high-throughput batch lifetimes.</p>
-      <div class="stdlib-card-items">
-        <span class="stdlib-card-item-tag">new [T, n]{}</span><span class="stdlib-card-item-tag">delete arr;</span><span class="stdlib-card-item-tag">new T;</span><span class="stdlib-card-item-tag">delete ptr;</span>
       </div>
     </a>
     
@@ -2165,116 +2152,6 @@ fun main() &lt;noret&gt; {
     </section>
     
 
-    <section id="module-memory" class="module-doc-section">
-      <div class="module-header-row">
-        <h2 class="module-name-title">memory</h2>
-        <span class="module-import-path">memory (Core &amp; Custom)</span>
-        <span class="badge-tag">Memory &amp; Pointers</span>
-      </div>
-      <p class="module-description">Explicit memory allocation mechanisms: native heap dynamic arrays new [T, n]{}, delete arr;, and user-defined arena allocators for high-throughput batch lifetimes.</p>
-      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Fin has no background garbage collector. Memory is explicitly managed via arrays or custom allocators.</div>
-
-      <div class="code-block module-import-box">
-        <div class="code-header">
-          <span class="code-title">Import Statement</span>
-          <button type="button" class="copy-btn" aria-label="Copy import statement">
-            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
-            <span>Copy</span>
-          </button>
-        </div>
-        <pre><code class="language-fin">// Memory is an explicit library, not a rigid compiler burden\n// Core allocation: new [T, n]{} and delete arr;</code></pre>
-      </div>
-
-      <h3 class="api-section-title">
-        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
-        API Interface &amp; Signatures
-      </h3>
-      <div class="api-table-wrapper">
-        <table class="api-table">
-          <thead>
-            <tr>
-              <th style="width: 45%;">Signature</th>
-              <th style="width: 15%;">Type</th>
-              <th style="width: 40%;">Description</th>
-            </tr>
-          </thead>
-          <tbody>
-            
-        <tr>
-          <td class="api-name"><code>new [T, n]{}</code></td>
-          <td class="api-type"><span class="badge-tag">Syntax Operator</span></td>
-          <td>Allocates heap dynamic array of type T and length n, zero-initializing elements. Produces [T].</td>
-        </tr>
-        
-
-        <tr>
-          <td class="api-name"><code>delete arr;</code></td>
-          <td class="api-type"><span class="badge-tag">Syntax Statement</span></td>
-          <td>Frees the heap element buffer associated with dynamic array [T].</td>
-        </tr>
-        
-
-        <tr>
-          <td class="api-name"><code>new T;</code></td>
-          <td class="api-type"><span class="badge-tag">Syntax Operator</span></td>
-          <td>Allocates single instance of type T on heap, returning raw pointer *T.</td>
-        </tr>
-        
-
-        <tr>
-          <td class="api-name"><code>delete ptr;</code></td>
-          <td class="api-type"><span class="badge-tag">Syntax Statement</span></td>
-          <td>Frees single heap pointer *T.</td>
-        </tr>
-        
-
-        <tr>
-          <td class="api-name"><code>struct Arena</code></td>
-          <td class="api-type"><span class="badge-tag">Pattern</span></td>
-          <td>Linear bump allocator pattern: arena.alloc(bytes), arena.reset(), arena.destroy().</td>
-        </tr>
-        
-          </tbody>
-        </table>
-      </div>
-
-      <div class="ownership-box">
-        <strong>Memory &amp; Safety Semantics:</strong> Explicit manual memory semantics. Every heap allocation must be paired with delete by its owner.
-      </div>
-
-      <h3 class="api-section-title">
-        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#file-text"></use></svg>
-        Usage Example
-      </h3>
-      <div class="code-block">
-        <div class="code-header">
-          <span class="code-title">memory_example.fin</span>
-          <button type="button" class="copy-btn" aria-label="Copy code sample">
-            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
-            <span>Copy</span>
-          </button>
-        </div>
-        <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
-
-fun main() &lt;noret&gt; {
-    let size &lt;int&gt; = 16;
-    let buffer &lt;[int]&gt; = new [int, size]{};
-
-    for (let i &lt;int&gt; = 0; i &lt; buffer.length; i++) {
-        buffer[i] = i * i;
-    }
-
-    blame buffer.length == 16;
-    blame buffer[4] == 16;
-
-    printf(&quot;Allocated %d items, element 4 = %d\n&quot;, buffer.length, buffer[4]);
-
-    delete buffer;  // Explicit deallocation
-}</code></pre>
-      </div>
-    </section>
-    
-
     <section id="module-stdptr" class="module-doc-section">
       <div class="module-header-row">
         <h2 class="module-name-title">stdptr</h2>
@@ -2383,7 +2260,6 @@ fun main() &lt;noret&gt; {
 <li class="toc-item"><a class="toc-link" href="#module-enums">enums</a></li>
 <li class="toc-item"><a class="toc-link" href="#module-error">error</a></li>
 <li class="toc-item"><a class="toc-link" href="#module-operators">operators</a></li>
-<li class="toc-item"><a class="toc-link" href="#module-memory">memory</a></li>
 <li class="toc-item"><a class="toc-link" href="#module-stdptr">stdptr</a></li>
 </ul></aside>
   </div>

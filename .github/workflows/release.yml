@@ -476,6 +476,10 @@ jobs:
       - name: Create the release
         if: github.ref_type == 'tag' || inputs.publish
         run: |
+          # install.sh's own sum, from the exact bytes this tag carries, so a
+          # reader can verify the file install.sh pins (issue #88). The script
+          # frozen at this tag is what the README's raw URL serves at this tag.
+          install_sh="$(sha256sum install.sh | cut -d' ' -f1)"
           notes="finc $FIN_VERSION
 
           Portable archives (\`finc-<version>-<target>\`) unpack to \`bin/finc[.exe]\`
@@ -484,7 +488,12 @@ jobs:
           install with \`apt\`/\`dnf\`), macOS .dmg per arch. Arch Linux: use the
           static musl tarball (no distro coupling) with tools/packaging/PKGBUILD.
           Verify a download with its \`.sha256\` sidecar; \`index.json\` carries the
-          authoritative sums and is what \`finn\` reads (portable archives only)."
+          authoritative sums and is what \`finn\` reads (portable archives only).
+
+          install.sh for this release —
+          https://raw.githubusercontent.com/M1778/Fin/$FIN_TAG/install.sh —
+          has sha256 \`$install_sh\`. The installer pins this tag and prints the
+          commit it compiled; details in INSTALL.md."
           flags=()
           if [ "${{ needs.preflight.outputs.prerelease }}" = "true" ]; then flags+=(--prerelease); fi
           gh release create "$FIN_TAG" --target "$GITHUB_SHA" \

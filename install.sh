@@ -1,10 +1,22 @@
 #!/usr/bin/env sh
 # Fin compiler installer: clones M1778/Fin and builds it with ./build.sh.
-# Usage: curl -fsSL https://raw.githubusercontent.com/M1778/Fin/master/install.sh | sh
-# POSIX sh on purpose: the one-liner above pipes to `sh`, not `bash`.
+# Usage: curl -o install.sh https://raw.githubusercontent.com/M1778/Fin/master/install.sh
+#        (read it), then sh install.sh ; FIN_REF=<ref> pins what is compiled.
+# POSIX sh on purpose: the one-liner above is copy-paste into `sh`.
+#
+# What this script does and does not verify (issue #88):
+#   * It never compiles a moving branch. Without FIN_REF it clones the newest
+#     released tag (vX.Y.Z); it refuses when none exists. Compiling master
+#     moved under the user's feet; a release tag does not.
+#   * It prints the resolved commit so "what did I just install?" answers.
+#   * It assumes GitHub hosting: the bytes are as published by this repo, and
+#     the tags' contents are frozen at release time. Signatures are a
+#     maintainer-level decision (see SECURITY.md); for verification commands,
+#     read INSTALL.md.
 set -eu
 
-REPO="https://github.com/M1778/Fin"
+REPO="${FIN_REPO:-https://github.com/M1778/Fin}"
+# FIN_REPO exists for tests and mirrors only; it defaults to upstream.
 CLONE_ATTEMPTS=3
 
 if [ -z "${FIN_DIR:-}" ] && [ -z "${HOME:-}" ]; then
@@ -78,13 +90,47 @@ fi
 # An LLVM of the pinned major must exist; the exact major is read from the
 # clone in step 3 and checked there. Here, absence of any llvm-config already
 # means the backend cannot link, so fail now instead of at CMake configure.
-if ! command -v llvm-config >/dev/null 2>&1; then
-  echo "install.sh: llvm-config not found; the LLVM backend cannot link without it." >&2
+# Debian ships only the suffixed spelling (llvm-config-22), so a bare PATH hit
+# is not the whole test (issue #88 probe).
+pathdirs="$(printf '%s' "${PATH:-}" | tr ':' ' ')"
+have_llvm_config() {
+  if command -v llvm-config >/dev/null 2>&1; then return 0; fi
+  for d in $pathdirs; do
+    for c in "$d"/llvm-config-*; do
+      [ -x "$c" ] && return 0
+    done
+  done
+  return 1
+}
+if ! have_llvm_config; then
+  echo "install.sh: no llvm-config (any major) found; the LLVM backend cannot link without it." >&2
   echo "install.sh: install LLVM (Debian/Ubuntu: https://apt.llvm.org, then re-run)" >&2
   exit 1
 fi
 
-# --- 2. Fetch, with retries for transient network failures. ---
+# --- 2. Pin what gets compiled, or refuse. ---
+# A release tag (vX.Y.Z, newest) by default; `master` is never the default,
+# because a moving branch compiles whatever it points at when the user runs
+# this script. FIN_REF may name a tag or a full commit; the resolved commit is
+# printed so a user can check it against the release it came from.
+REF="${FIN_REF:-}"
+if [ -z "$REF" ]; then
+  REF="$(git ls-remote --tags "$REPO" \
+    | sed -E 's|.*refs/tags/||' \
+    | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+    | sed -E 's/^v//' \
+    | sort -t. -k1,1n -k2,2n -k3,3n \
+    | tail -1 \
+    | sed -E 's/^/v/')"
+fi
+if [ -z "$REF" ]; then
+  echo "install.sh: no released finc tag found at $REPO." >&2
+  echo "install.sh: run with FIN_REF=<full commit or vX.Y.Z tag> naming a ref" >&2
+  echo "install.sh: you have inspected (e.g. by reading the source at that commit)." >&2
+  exit 1
+fi
+echo "install.sh: compiling Fin at ref $REF"
+
 fetch() {
   n=0
   while [ "$n" -lt "$CLONE_ATTEMPTS" ]; do
@@ -99,10 +145,16 @@ fetch() {
 }
 
 if [ -d "$DIR/.git" ]; then
-  fetch git -C "$DIR" pull --ff-only || {
-    echo "install.sh: 'git pull --ff-only' in $DIR failed." >&2
-    echo "install.sh: the checkout may have local changes or a diverged branch;" >&2
-    echo "install.sh: stash or reset it, or point FIN_DIR elsewhere." >&2
+  # A previous install: move it to the same pinned ref; never a pull of a
+  # branch, which is how a pinned checkout becomes a moving one again.
+  fetch git -C "$DIR" fetch --depth 1 origin "$REF" || {
+    echo "install.sh: 'git fetch $REF' in $DIR failed." >&2
+    echo "install.sh: check network access and that $REF exists at $REPO." >&2
+    exit 1
+  }
+  git -C "$DIR" checkout --detach FETCH_HEAD || {
+    echo "install.sh: checking out $REF in $DIR failed." >&2
+    echo "install.sh: the checkout has local changes; stash, reset, or set FIN_DIR." >&2
     exit 1
   }
 elif [ -e "$DIR" ]; then
@@ -110,12 +162,54 @@ elif [ -e "$DIR" ]; then
   echo "install.sh: remove it or set FIN_DIR to another path." >&2
   exit 1
 else
-  fetch git clone --depth 1 "$REPO" "$DIR" || {
-    echo "install.sh: cloning $REPO failed after $CLONE_ATTEMPTS attempts." >&2
-    echo "install.sh: check network access to github.com and re-run." >&2
-    exit 1
-  }
+  case "$REF" in
+    v[0-9]*.[0-9]*.[0-9]*)
+      # A tag: clone knows it.
+      fetch git clone --depth 1 --branch "$REF" "$REPO" "$DIR" || {
+        echo "install.sh: cloning $REPO at $REF failed after $CLONE_ATTEMPTS attempts." >&2
+        echo "install.sh: check network access to github.com (or $REPO) and re-run." >&2
+        exit 1
+      }
+      ;;
+    *)
+      # A commit cannot be given to clone --branch; fetch that one object.
+      # The wrapper clears $DIR on entry so a failed attempt cannot leave a
+      # half-initialized clone that breaks the next retry.
+      fetch sh -c '
+        set -eu
+        rm -rf -- "$1"
+        git init -q -- "$1"
+        git -C "$1" remote add origin "$2"
+        git -C "$1" fetch --depth 1 origin "$3"
+        git -C "$1" checkout -q --detach FETCH_HEAD
+      ' install-fetch "$DIR" "$REPO" "$REF" || {
+        echo "install.sh: fetching commit $REF from $REPO failed." >&2
+        echo "install.sh: FIN_REF must be a tag vX.Y.Z or a full 40-hex commit." >&2
+        exit 1
+      }
+      ;;
+  esac
 fi
+
+# What is on disk is what gets compiled; say it, and for an explicit commit
+# ref, require it.
+RESOLVED="$(git -C "$DIR" rev-parse HEAD)"
+case "$RESOLVED" in
+  "$REF")
+    echo "install.sh: Fin is at commit $RESOLVED (ref $REF); this is what gets compiled."
+    ;;
+  *)
+    case "$REF" in
+      v[0-9]*.[0-9]*.[0-9]*)
+        echo "install.sh: Fin is at commit $RESOLVED (ref $REF)."
+        ;;
+      *)
+        echo "install.sh: requested commit $REF but the checkout resolved to $RESOLVED; refusing." >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
 
 # --- 3. The LLVM pin lives in CMakeLists.txt (ADR 0010); enforce it here so a
 # wrong-major llvm-config fails in the installer, not deep in CMake. ---

@@ -277,7 +277,8 @@ fn main() {
 
           <div class="code-block">
             <div class="code-header"><span class="code-lang">Install from a release</span><button type="button" class="copy-btn" id="hero-copy-install-btn" aria-label="Copy install command"><span>Copy</span></button></div>
-            <pre><code class="language-bash">curl -fsSL https://raw.githubusercontent.com/M1778/Fin/master/install.sh | sh</code></pre>
+            <pre><code class="language-bash">curl -o install.sh https://raw.githubusercontent.com/M1778/Fin/master/install.sh
+sh install.sh  # pins the newest released tag; the compiled commit is printed</code></pre>
           </div>
 
           <h3 id="prerequisites">Prerequisites <a href="#prerequisites" class="header-anchor">#</a></h3>
@@ -927,10 +928,6 @@ fun calculate() &lt;int&gt; {
             <a href="stdlib.html#module-operators" class="stdlib-card">
               <div class="stdlib-card-header"><span class="stdlib-card-name">operators</span><span class="stdlib-card-badge">Types &amp; Semantics</span></div>
               <p class="stdlib-card-desc">Operator overloading interfaces for user-defined structs (Add, Sub, Mul, Equals...).</p>
-            </a>
-            <a href="stdlib.html#module-memory" class="stdlib-card">
-              <div class="stdlib-card-header"><span class="stdlib-card-name">memory</span><span class="stdlib-card-badge">Memory &amp; Pointers</span></div>
-              <p class="stdlib-card-desc">Native dynamic arrays new [T, n]{}, delete arr;, and user-defined arena allocators.</p>
             </a>
             <a href="stdlib.html#module-stdptr" class="stdlib-card">
               <div class="stdlib-card-header"><span class="stdlib-card-name">stdptr</span><span class="stdlib-card-badge">Memory &amp; Pointers</span></div>
