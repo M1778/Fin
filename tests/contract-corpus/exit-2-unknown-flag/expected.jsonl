@@ -1,0 +1,2 @@
+{"kind":"diagnostic","severity":"error","code":null,"message":"unknown option '--no-such-flag'","file":null,"line":0,"column":0,"endLine":0,"endColumn":0,"help":"run `finc --help` for usage.","attribution":null}
+{"kind":"summary","errors":1,"warnings":0,"exitCode":2,"status":"failed"}

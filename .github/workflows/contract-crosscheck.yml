@@ -1,0 +1,112 @@
+# Contract cross-check between finc and finn (issue #87).
+#
+# finc and finn implement one versioned CLI contract (docs/finc-interface-contract.md),
+# but nothing tested one against the other: finn's parser is validated against
+# hand-written literals, so a contract change could break the pair with both CI
+# suites green. This workflow clones the other repository on a schedule — never
+# per-PR, deliberately, so Fin's CI does not depend on a finn checkout — builds
+# finc for real, and then:
+#
+#   1. runs Fin's contract conformance + corpus tests against the built finc
+#      (the compiler side of tests/contract-corpus/);
+#   2. runs finn's own test suite (its finc module is fixture-based until finn
+#      takes the corpus; running it still breaks the story that "finn passes"
+#      means anything about the real compiler, and gets the pair wired to real
+#      finc as soon as finn chooses to consume the corpus);
+#   3. compares the contract integers: `finc --version` vs `SUPPORTED_CONTRACT`
+#      in finn's src/finc.rs. A mismatch is the exact drift class issue #87
+#      describes, so it is an error with finn's own remedy message. It is red,
+#      on purpose, until the finn owner takes that bump — finc is at
+#      contract 3 and this build of finn pins 2.
+name: Contract cross-check
+
+on:
+  schedule:
+    # Weekly, Mondays 04:20 UTC.
+    - cron: '20 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  FIN_BUILD_TYPE: Release
+
+jobs:
+  finn-vs-finc:
+    name: contract agreement (finc ↔ finn)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-toolchain
+
+      - name: Build finc
+        run: |
+          conan profile detect --force
+          conan install . \
+            --output-folder=build \
+            --build=missing \
+            -pr:a=conan/profiles/fin \
+            -c tools.cmake.cmaketoolchain:generator=Ninja \
+            -s build_type="$FIN_BUILD_TYPE"
+          tc="$(find build -name conan_toolchain.cmake -print | head -n 1)"
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$tc" \
+            -DCMAKE_BUILD_TYPE="$FIN_BUILD_TYPE" \
+            -DFIN_WITH_LLVM=ON -DFIN_LLVM_MAJOR="$FIN_LLVM_MAJOR" \
+            -DLLVM_DIR="$LLVM_DIR"
+          cmake --build build --config "$FIN_BUILD_TYPE" --parallel
+          build/finc --version
+
+      - name: Fin side — replay the contract corpus against the built compiler
+        run: |
+          uv run --no-project tests/tools/contract_corpus_regen.sh build/finc
+          if [ -n "$(git status --porcelain tests/contract-corpus)" ]; then
+            git --no-pager diff -- tests/contract-corpus
+            echo "::error::tests/contract-corpus does not describe the built finc."
+            echo "::error::A regen differing from the checked-in corpus means the"
+            echo "::error::contract corpus is stale on this side; commit the regen"
+            echo "::error::(or, for a schema change, treat it as a contract change)."
+            exit 1
+          fi
+          ctest --test-dir build -R "ContractConformance|ContractCorpus" \
+            --output-on-failure --no-tests=error
+
+      - name: Check out finn
+        uses: actions/checkout@v4
+        with:
+          repository: M1778/finn
+          path: finn
+
+      - name: Pin finn against this finc, not against its beliefs
+        run: |
+          # The mechanical piece of the contract agreement: finn hard-codes the
+          # contract it speaks, finc reports the one it implements. Equality or
+          # the pair is broken even with every unit test green on both sides.
+          finc_contract="$(build/finc --version | sed -n 's/^finc [0-9][0-9.]* (contract [0-9]*)$/\1/p')"
+          finn_contract="$(sed -n 's/^pub const SUPPORTED_CONTRACT: u32 = \([0-9][0-9]*\);$/\1/p' finn/src/finc.rs)"
+          if [ -z "$finc_contract" ] || [ -z "$finn_contract" ]; then
+            echo "::error::could not read the contract integers (finc '$finc_contract', finn '$finn_contract')"
+            exit 1
+          fi
+          echo "finc speaks contract $finc_contract; finn implements contract $finn_contract"
+          if [ "$finc_contract" != "$finn_contract" ]; then
+            echo "::error::finc speaks contract $finc_contract and finn implements contract $finn_contract"
+            if [ "$finc_contract" -gt "$finn_contract" ]; then
+              echo "::error::Upgrade finn (finn/src/finc.rs SUPPORTED_CONTRACT -> $finc_contract)."
+            else
+              echo "::error::Upgrade finc with \`finn download\`, or file a contract change on M1778/Fin."
+            fi
+            exit 1
+          fi
+
+      - name: Run finn's own suite against this finc on PATH
+        run: |
+          rustup toolchain install stable --profile minimal
+          cd finn
+          cargo test --quiet

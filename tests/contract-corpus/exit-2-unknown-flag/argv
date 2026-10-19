@@ -1,0 +1,4 @@
+@DIR@/input.fin
+--fin-libs=
+--diagnostics=json
+--no-such-flag

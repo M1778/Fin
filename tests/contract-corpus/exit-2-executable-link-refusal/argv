@@ -1,0 +1,5 @@
+@DIR@/input.fin
+--fin-libs=
+-o
+@DIR@/link.bin
+--diagnostics=json

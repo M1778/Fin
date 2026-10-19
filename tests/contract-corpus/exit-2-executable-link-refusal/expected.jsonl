@@ -1,0 +1,2 @@
+{"kind":"diagnostic","severity":"error","code":null,"message":"'-o' with --diagnostics=json cannot be combined: linking an executable runs an external C driver whose own output bypasses the JSON stream","file":null,"line":0,"column":0,"endLine":0,"endColumn":0,"help":"add '-c' to stop at the object file and link it yourself with the C driver, or drop --diagnostics=json for '-o' builds","attribution":null}
+{"kind":"summary","errors":1,"warnings":0,"exitCode":2,"status":"failed"}

@@ -1,0 +1,2 @@
+{"kind":"diagnostic","severity":"error","code":null,"message":"syntax error, unexpected SEMICOLON, expecting IDENTIFIER","file":"@DIR@/input.fin","line":1,"column":26,"endLine":1,"endColumn":27,"help":null,"attribution":null}
+{"kind":"summary","errors":1,"warnings":0,"exitCode":1,"status":"failed"}

@@ -205,7 +205,19 @@ const std::vector<std::string>& scratchFinFiles() {
     // else in the corpus. Excluding it by name means a future .fin file dropped
     // outside tests/samples fails the discovery test instead of being silently
     // ignored.
-    static const std::vector<std::string> v = { "addits/plor.fin" };
+    //
+    // tests/contract-corpus/*/input.fin are the CLI-contract corpus's compile
+    // inputs (issue #87): executables of `argv` fixtures, not language samples —
+    // `exit-2-unreadable-file` deliberately has none at all. Each is a hidden-by
+    // design fixture, so the discovery rule counts them as scratch, not sample.
+    static const std::vector<std::string> v = {
+        "addits/plor.fin",
+        "contract-corpus/exit-0-clean-check/input.fin",
+        "contract-corpus/exit-0-fin-guard-warnings/input.fin",
+        "contract-corpus/exit-1-syntax-error/input.fin",
+        "contract-corpus/exit-2-executable-link-refusal/input.fin",
+        "contract-corpus/exit-2-unknown-flag/input.fin",
+    };
     return v;
 }
 

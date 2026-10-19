@@ -1,0 +1,2 @@
+{"kind":"diagnostic","severity":"error","code":null,"message":"could not read file: @DIR@/absent.fin","file":null,"line":0,"column":0,"endLine":0,"endColumn":0,"help":null,"attribution":null}
+{"kind":"summary","errors":1,"warnings":0,"exitCode":2,"status":"failed"}
