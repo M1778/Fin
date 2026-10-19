@@ -3266,6 +3266,23 @@ fun get_or_declare_calloc(ctx: &FnContext) <&LLVMValue> {
     return calloc_fn;
 }
 
+// Declares the C `realloc` once per module for prototype-subscript stores
+// growing the parallel keys/values buffers (mirrors the C++
+// emitPrototypeStore): `void *realloc(void *, size_t)`, word-sized like
+// every other count here.
+fun get_or_declare_realloc(ctx: &FnContext) <&LLVMValue> {
+    let realloc_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "realloc");
+    if (realloc_fn == null) {
+        let r_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
+        r_params.t[0] = ctx.ptr_ty;
+        r_params.t[1] = ctx.i64_ty;
+        let r_ty <&LLVMType> = llvm_function_type(ctx.ptr_ty, r_params, 2, 0);
+        delete r_params;
+        realloc_fn = llvm_add_function(ctx.module, "realloc", r_ty);
+    }
+    return realloc_fn;
+}
+
 // Declares the C `memcpy` once per module for by-value struct parameter
 // copies (see cg_param_needs_value_copy): `void *memcpy(void *, const
 // void *, size_t)`, pointer-sized length like every other word count here.
@@ -4845,8 +4862,12 @@ fun cg_prototype_erase(ctx: &FnContext, hdr_val: &LLVMValue, key_val: &LLVMValue
     let cand <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, cand_ptr, "rmkey.ld");
     let key_eq <&LLVMValue> = null;
     if (str_key) {
-        let cand_ptr_v <&LLVMValue> = llvm_build_int_to_ptr(ctx.builder, cand, ctx.ptr_ty, "rmkey.ptr");
-        key_eq = cg_lower_string_eq(ctx, cand_ptr_v, key_val, false);
+        // Words in the flat buffer carry no kind tag; string keys were
+        // stored as `ptr_to_int` text pointers, so a string key meets
+        // word equality like an int one. A deref'd content compare would
+        // read an int-holding entry's word as an address (C++ too only
+        // runs byte comparisons on tagged-as-string payloads).
+        key_eq = llvm_build_icmp(ctx.builder, llvm_int_eq(), cand, key64, "rmkey.eq");
     } else {
         key_eq = llvm_build_icmp(ctx.builder, llvm_int_eq(), cand, key64, "rmkey.eq");
     }
@@ -4977,7 +4998,6 @@ pub fun declare_function(
     let fn_name <string> = fn_node.name;
     let is_extern <bool> = (fn_node.left == null);
     let llvm_sym <string> = fn_name;
-
     if (is_extern && fn_node.attr_text != null && cg_strlen(fn_node.attr_text) > 0) {
         llvm_sym = cg_extern_sym(fn_name, fn_node.attr_text);
     }
@@ -6820,6 +6840,15 @@ fun cg_static_self_cache_sym(ctx: &FnContext, st: &StructInfo, struct_name: stri
 // instantiation (`let v <&Vec2<float>> = Vec2::zero()`), instantiate per
 // that spelling -- one declare + drained body per key, the same shape as
 // the Self-rooted statics above. Anything exotic stays eager.
+// ADR 0049 scopes the on-demand (never eager) method model to `HashMap`,
+// the only caller of `hash_of`. Pass 2 skips the struct's methods on this
+// predicate, so this is also what decides whether a flat ctor/static decl
+// at a call site has a body waiting: lazy means no (bind the keyed
+// route instead), anything else means the eager body was emitted.
+fun cg_struct_lazily_emitted(st_name: string) <bool> {
+    return cg_str_eq(st_name, "HashMap");
+}
+
 fun cg_static_expected_sym(ctx: &FnContext, struct_name: string, mshort: string, n: &AstNode) <&FnSymbol> {
     if (ctx == null || struct_name == null || mshort == null || n == null) { return null; }
     if (ctx.call_want == null || cg_strlen(ctx.call_want) == cast<ulong>(0)) { return null; }
@@ -6948,16 +6977,23 @@ fun cg_static_expected_sym(ctx: &FnContext, struct_name: string, mshort: string,
         args[ti] = s_args[ti];
         ti = ti + 1;
     }
+    // `Self` substitutes; the bare owner must NOT ride whole-word
+    // substitution ("HashMap" is the first word of every `HashMap<T, U>`
+    // annotation in the body, so its rewrite would composite the
+    // annotation, not the declaration it targets). A body spelling the
+    // bare owner types no field but the declared fn -- stamping the fn's
+    // return spelling below owns that, not the scanner.
     params[scount] = "Self";
     args[scount] = full;
-    params[scount + 1] = struct_name;
-    args[scount + 1] = full;
-    let clone <&AstNode> = cg_clone_subst(tmpl, params, args, scount + 2);
+    let clone <&AstNode> = cg_clone_subst(tmpl, params, args, scount + 1);
     delete params;
     delete args;
     delete s_params;
     delete s_args;
     if (clone == null) { return null; }
+    if (clone.type_annotation != null && cg_str_eq(cg_trim_spaces(clone.type_annotation), struct_name)) {
+        clone.type_annotation = full;
+    }
     clone.name = key;
     clone.right = null;
     clone.str_val = "";
@@ -7020,9 +7056,17 @@ fun cg_static_cache_sym(ctx: &FnContext, struct_name: string, mshort: string, n:
             // Only single-prototype statics instantiate (the
             // from_prototype shape); anything else stays eager.
             if (pw.right != null || cw.right != null) { delete s_params; return null; }
-            if (aa == null || aa.kind != ast_prototype_literal()) { delete s_params; return null; }
+            if (aa == null) { delete s_params; return null; }
+            if (aa.kind != ast_prototype_literal() && aa.kind != ast_ident()) { delete s_params; return null; }
             // Scan the entries: keys bind the K side, values the V
-            // side, unanimously. An exotic entry falls back to eager.
+            // side, unanimously. A typed prototype actual whose
+            // annotation names the sides (`{K, V}`/`prototype<K, V>`)
+            // binds from them; an erased `prototype` spelling states
+            // none, so the call falls to the Last expected shape (the
+            // call's target spelling). Anything exotic stays eager,
+            // where the fallback refuses by name — never a bodyless
+            // call.
+            if (aa.kind != ast_prototype_literal()) { break; }
             let kspell <string> = "";
             let vspell <string> = "";
             let ecur <&AstNode> = aa.left;
@@ -7987,8 +8031,14 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                     let cand <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, cand_ptr, "pkey.ld");
                     let key_eq <&LLVMValue> = null;
                     if (str_key) {
-                        let cand_ptr_v <&LLVMValue> = llvm_build_int_to_ptr(ctx.builder, cand, ctx.ptr_ty, "pkey.ptr");
-                        key_eq = cg_lower_string_eq(ctx, cand_ptr_v, idx_val, false);
+                        // Words in the flat buffer carry no kind tag;
+                        // string keys were stored as `ptr_to_int` text
+                        // pointers, so a string key meets word equality
+                        // like an int one. A deref'd content compare would
+                        // read an int-holding entry's word as an address
+                        // (C++ too only runs byte comparisons on
+                        // tagged-as-string payloads).
+                        key_eq = llvm_build_icmp(ctx.builder, llvm_int_eq(), cand, key64, "pkey.eq");
                     } else {
                         key_eq = llvm_build_icmp(ctx.builder, llvm_int_eq(), cand, key64, "pkey.eq");
                     }
@@ -8556,36 +8606,162 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                             arr_val = llvm_build_load2(ctx.builder, ctx.ptr_ty, arr_val, "ref_arr");
                         }
                         if (is_prototype_node(ctx, n.left.left)) {
-                            // Prototype subscript store. An integer index
-                            // walks the vals buffer positionally (mirroring
-                            // the load); anything else keeps the legacy
-                            // slot-0 store where key search is unmodeled.
+                            // Prototype subscript store (C++
+                            // emitPrototypeStore): the key scans the parallel
+                            // keys buffer -- a hit updates that value slot, a
+                            // miss grows both buffers with realloc and
+                            // appends, keeping the key/value index invariant
+                            // the loads scan back. Integer keys compare
+                            // words; string keys (pointer words holding
+                            // text) compare by content, so a literal here
+                            // matches the same text elsewhere. Any other key
+                            // kind refuses rather than storing slot 0.
                             let s_idx_ty <&LLVMType> = llvm_type_of(idx_val);
-                            if (cg_is_int_llvm(ctx, s_idx_ty)) {
+                            let str_key <bool> = false;
+                            if (s_idx_ty == ctx.ptr_ty && cg_operand_is_string(ctx, n.left.right)) {
+                                str_key = true;
+                            }
+                            if (cg_is_int_llvm(ctx, s_idx_ty) || str_key) {
+                                let key64 <&LLVMValue> = null;
+                                if (str_key) {
+                                    key64 = llvm_build_ptr_to_int(ctx.builder, idx_val, ctx.i64_ty, "pkey.w");
+                                } else {
+                                    key64 = coerce_val(ctx, idx_val, ctx.i64_ty);
+                                }
+                                // Converted once, whichever way the store
+                                // goes: an update and an append store the
+                                // same value word.
+                                let value64 <&LLVMValue> = coerce_val(ctx, rhs, ctx.i64_ty);
+                                let ind_k <&LLVMIndices> = new LLVMIndices{};
+                                ind_k.i0 = llvm_const_int(ctx.i64_ty, 0, 0);
+                                let k_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, arr_val, ind_k, 1, "pks_p");
+                                delete ind_k;
+                                let k_buf <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, k_ptr, "k_buf");
+                                let ind_l <&LLVMIndices> = new LLVMIndices{};
+                                ind_l.i0 = llvm_const_int(ctx.i64_ty, 1, 0);
+                                let len_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, arr_val, ind_l, 1, "plen_p2");
+                                delete ind_l;
+                                let len64 <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, len_ptr, "plen2");
                                 let ind_v <&LLVMIndices> = new LLVMIndices{};
                                 ind_v.i0 = llvm_const_int(ctx.i64_ty, 2, 0);
-                                let pv_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, arr_val, ind_v, 1, "pv_p");
+                                let pv_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, arr_val, ind_v, 1, "pv_p2");
                                 delete ind_v;
                                 let v_buf <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, pv_ptr, "v_buf");
-                                let sidx64 <&LLVMValue> = llvm_build_sext(ctx.builder, idx_val, ctx.i64_ty, "sidx64");
-                                let ind_s <&LLVMIndices> = new LLVMIndices{};
-                                ind_s.i0 = sidx64;
-                                let vs_gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, v_buf, ind_s, 1, "vs");
-                                delete ind_s;
-                                let rs64 <&LLVMValue> = coerce_val(ctx, rhs, ctx.i64_ty);
-                                llvm_build_store(ctx.builder, rs64, vs_gep);
+                                let cur_s <&LLVMValue> = llvm_build_alloca(ctx.builder, ctx.i64_ty, "pset.i");
+                                llvm_build_store(ctx.builder, llvm_const_int(ctx.i64_ty, 0, 0), cur_s);
+                                let at_s <&LLVMValue> = llvm_build_alloca(ctx.builder, ctx.i64_ty, "pset.at");
+                                llvm_build_store(ctx.builder, llvm_const_int(ctx.i64_ty, 0, 0), at_s);
+                                let hit_s <&LLVMValue> = llvm_build_alloca(ctx.builder, ctx.i1_ty, "pset.hit");
+                                llvm_build_store(ctx.builder, llvm_const_int(ctx.i1_ty, 0, 0), hit_s);
+                                let pscan_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "pset.scan");
+                                let pbody_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "pset.body");
+                                let pfound_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "pset.found");
+                                let pnext_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "pset.next");
+                                let pjoin_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "pset.joint");
+                                let pupd_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "pset.update");
+                                let papp_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "pset.append");
+                                let pdone_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "pset.done");
+                                llvm_build_br(ctx.builder, pscan_bb);
+                                llvm_position_builder(ctx.builder, pscan_bb);
+                                let cur_i <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, cur_s, "pset.i.ld");
+                                let pmore <&LLVMValue> = llvm_build_icmp(ctx.builder, llvm_int_ult(), cur_i, len64, "pset.more");
+                                llvm_build_cond_br(ctx.builder, pmore, pbody_bb, pjoin_bb);
+                                llvm_position_builder(ctx.builder, pbody_bb);
+                                let ind_c <&LLVMIndices> = new LLVMIndices{};
+                                ind_c.i0 = cur_i;
+                                let cand_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, k_buf, ind_c, 1, "pkey");
+                                delete ind_c;
+                                let cand <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, cand_ptr, "pkey.ld");
+                                let key_eq <&LLVMValue> = null;
+                                if (str_key) {
+                                    // Words in the flat buffer carry no
+                                    // kind tag; string keys were stored as
+                                    // `ptr_to_int` text pointers, so a
+                                    // string key meets word equality like
+                                    // an int one. A deref'd content compare
+                                    // would read an int-holding entry's
+                                    // word as an address (C++ too only runs
+                                    // byte comparisons on tagged-as-string
+                                    // payloads).
+                                    key_eq = llvm_build_icmp(ctx.builder, llvm_int_eq(), cand, key64, "pkey.eq");
+                                } else {
+                                    key_eq = llvm_build_icmp(ctx.builder, llvm_int_eq(), cand, key64, "pkey.eq");
+                                }
+                                llvm_build_cond_br(ctx.builder, key_eq, pfound_bb, pnext_bb);
+                                llvm_position_builder(ctx.builder, pfound_bb);
+                                llvm_build_store(ctx.builder, llvm_const_int(ctx.i1_ty, 1, 0), hit_s);
+                                llvm_build_store(ctx.builder, cur_i, at_s);
+                                llvm_build_br(ctx.builder, pjoin_bb);
+                                llvm_position_builder(ctx.builder, pnext_bb);
+                                llvm_build_store(ctx.builder, llvm_build_add(ctx.builder, cur_i, llvm_const_int(ctx.i64_ty, 1, 0), "pset.nxt"), cur_s);
+                                llvm_build_br(ctx.builder, pscan_bb);
+                                llvm_position_builder(ctx.builder, pjoin_bb);
+                                let was_hit <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i1_ty, hit_s, "pset.was");
+                                llvm_build_cond_br(ctx.builder, was_hit, pupd_bb, papp_bb);
+                                llvm_position_builder(ctx.builder, pupd_bb);
+                                let at_u <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, at_s, "pset.at.u");
+                                let ind_u <&LLVMIndices> = new LLVMIndices{};
+                                ind_u.i0 = at_u;
+                                let us_gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, v_buf, ind_u, 1, "pset.us");
+                                delete ind_u;
+                                llvm_build_store(ctx.builder, value64, us_gep);
+                                llvm_build_br(ctx.builder, pdone_bb);
+                                llvm_position_builder(ctx.builder, papp_bb);
+                                // The baseline representation has no capacity
+                                // word, so growth is realloc on both halves
+                                // and one length for both (-- the key i pairs
+                                // with value i is the whole invariant).
+                                let new_len <&LLVMValue> = llvm_build_add(ctx.builder, len64, llvm_const_int(ctx.i64_ty, 1, 0), "pset.nlen");
+                                let word_cnt <&LLVMValue> = llvm_build_mul(ctx.builder, new_len, llvm_const_int(ctx.i64_ty, 8, 0), "pset.bytes");
+                                let realloc_fn <&LLVMValue> = get_or_declare_realloc(ctx);
+                                let realloc_ty <&LLVMType> = llvm_global_get_value_type(realloc_fn);
+                                let rk_args <&LLVMValueArgs> = new LLVMValueArgs{};
+                                rk_args.v[0] = k_buf;
+                                rk_args.v[1] = word_cnt;
+                                let nk_buf <&LLVMValue> = llvm_build_call2(ctx.builder, realloc_ty, realloc_fn, rk_args, 2, "k_grow");
+                                delete rk_args;
+                                let rv_args <&LLVMValueArgs> = new LLVMValueArgs{};
+                                rv_args.v[0] = v_buf;
+                                rv_args.v[1] = word_cnt;
+                                let nv_buf <&LLVMValue> = llvm_build_call2(ctx.builder, realloc_ty, realloc_fn, rv_args, 2, "v_grow");
+                                delete rv_args;
+                                let ind_nk <&LLVMIndices> = new LLVMIndices{};
+                                ind_nk.i0 = llvm_const_int(ctx.i64_ty, 0, 0);
+                                let nk_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, arr_val, ind_nk, 1, "nk_p");
+                                delete ind_nk;
+                                llvm_build_store(ctx.builder, nk_buf, nk_ptr);
+                                let ind_nl <&LLVMIndices> = new LLVMIndices{};
+                                ind_nl.i0 = llvm_const_int(ctx.i64_ty, 1, 0);
+                                let nl_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, arr_val, ind_nl, 1, "nl_p");
+                                delete ind_nl;
+                                llvm_build_store(ctx.builder, new_len, nl_ptr);
+                                let ind_nv <&LLVMIndices> = new LLVMIndices{};
+                                ind_nv.i0 = llvm_const_int(ctx.i64_ty, 2, 0);
+                                let nv_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, arr_val, ind_nv, 1, "nv_p");
+                                delete ind_nv;
+                                llvm_build_store(ctx.builder, nv_buf, nv_ptr);
+                                let ind_n2 <&LLVMIndices> = new LLVMIndices{};
+                                ind_n2.i0 = llvm_const_int(ctx.i64_ty, 3, 0);
+                                let n2_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, arr_val, ind_n2, 1, "n2_p");
+                                delete ind_n2;
+                                llvm_build_store(ctx.builder, new_len, n2_ptr);
+                                let keystep <&LLVMIndices> = new LLVMIndices{};
+                                keystep.i0 = len64;
+                                let kslot <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, nk_buf, keystep, 1, "k_slot");
+                                delete keystep;
+                                llvm_build_store(ctx.builder, key64, kslot);
+                                let vstep <&LLVMIndices> = new LLVMIndices{};
+                                vstep.i0 = len64;
+                                let vslot <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, nv_buf, vstep, 1, "v_slot");
+                                delete vstep;
+                                llvm_build_store(ctx.builder, value64, vslot);
+                                llvm_build_br(ctx.builder, pdone_bb);
+                                llvm_position_builder(ctx.builder, pdone_bb);
                             } else {
-                                let ind_v <&LLVMIndices> = new LLVMIndices{};
-                                ind_v.i0 = llvm_const_int(ctx.i64_ty, 2, 0);
-                                let pv_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, arr_val, ind_v, 1, "pv_p");
-                                delete ind_v;
-                                let v_buf <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, pv_ptr, "v_buf");
-                                let ind0 <&LLVMIndices> = new LLVMIndices{};
-                                ind0.i0 = llvm_const_int(ctx.i64_ty, 0, 0);
-                                let v0_gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, v_buf, ind0, 1, "v0");
-                                delete ind0;
-                                let r64 <&LLVMValue> = coerce_val(ctx, rhs, ctx.i64_ty);
-                                llvm_build_store(ctx.builder, r64, v0_gep);
+                                cg_dprintf(2, "finc codegen refusal: prototype subscript store accepts integer or string keys only (this key kind is not scanned here)\n");
+                                refuse_and_poison(ctx);
+                                llvm_build_unreachable(ctx.builder);
+                                return rhs;
                             }
                         } else if (is_prototype_half(ctx, n.left.left)) {
                             // Store through `(prtp.0)[i]` / `(prtp.1)[i]`:
@@ -10571,6 +10747,38 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                         free_buffer(b_alt2);
                         let sym_alt2 <&FnSymbol> = fn_ctx_find_fn(ctx, m_alt2);
                         if (sym_alt2 != null) {
+                            // The keyed route is for the lazily-emitted
+                            // struct (ADR 0049, scoped to `HashMap`): its
+                            // flat decls were skipped at pass 2, so the call
+                            // must bind a per-key body via the expected
+                            // target. Any other generic struct's eager ctor
+                            // was lowered at pass 2 -- binding it directly is
+                            // the honest move (`const.fin`'s `rptr<int>(5)`
+                            // refused here once, with a body waiting).
+                            let route_ctor <bool> = false;
+                            if (st.gen_params != null && cg_strlen(st.gen_params) > 0 && sym_alt2.tmpl == null &&
+                              cg_str_eq(n.name, st.name) && cg_struct_lazily_emitted(st.name)) {
+                                let ctor_tmpl <&AstNode> = cg_find_method_ast(ctx, st.name, n.name);
+                                if (ctor_tmpl != null && ctor_tmpl.kind == ast_fun_decl() &&
+                                  ctor_tmpl.type_annotation != null) {
+                                    let r_ann <string> = cg_trim_spaces(ctor_tmpl.type_annotation);
+                                    route_ctor = cg_str_eq(r_ann, "Self") || cg_str_eq(r_ann, st.name);
+                                  }
+                              }
+                            if (route_ctor) {
+                                let c_sym <&FnSymbol> = cg_static_expected_sym(ctx, st.name, n.name, n);
+                                if (ctx.poisoned) { return null; }
+                                if (c_sym == null) {
+                                    cg_dprintf(2, "finc codegen refusal: generic struct constructor '%s' has no per-spelling body (call target unkeyed; not lowered yet)\n", m_alt2);
+                                    refuse_and_poison(ctx);
+                                    return null;
+                                }
+                                callee = c_sym.fn_val;
+                                callee_fn_ty = c_sym.fn_ty;
+                                is_ctor = true;
+                                if (!cg_ctor_gate(ctx, st.name, cg_ctor_ann(n))) { return null; }
+                                break;
+                            }
                             if (!ensure_template_instantiated(ctx, sym_alt2)) { return null; }
                             callee = sym_alt2.fn_val;
                             callee_fn_ty = sym_alt2.fn_ty;
@@ -10920,27 +11128,15 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             let masked <&LLVMValue> = llvm_build_and(ctx.builder, wide, llvm_const_int(ctx.i8_ty, 1, 0), "boolsafe");
             call_res = llvm_build_trunc(ctx.builder, masked, ctx.i1_ty, "boolsafe_t");
         }
-        // A call through an erased generic returns the representative
-        // width while the call site's spelling may name the
-        // instantiation (`Collection<int>` read through an erased `get`
-        // returns the pointer-width word): narrow the value to the
-        // promised word, so later consumers (notably `==`, which
-        // dereferences a pointer beside an int) see the value the
-        // checker promised. Only word targets coerce (pointer-ward or
-        // fatter shapes keep the value); `auto` keeps it untouched
-        // (narrowing it could drop a pointer the program still holds);
-        // anything coerce_val does not model also passes through.
-        if (call_res != null && ret_t != ctx.void_ty && n.type_annotation != null && cg_strlen(n.type_annotation) > cast<ulong>(0)) {
-            let want_ann <string> = cg_trim_spaces(n.type_annotation);
-            if (!cg_str_eq(want_ann, "auto")) {
-                let want_ty <&LLVMType> = map_type(ctx, want_ann);
-                if (want_ty != null && want_ty != ctx.void_ty &&
-                  (want_ty == ctx.i32_ty || want_ty == ctx.i64_ty || want_ty == ctx.i8_ty || want_ty == ctx.i1_ty || want_ty == ctx.float_ty || want_ty == ctx.double_ty) &&
-                  llvm_type_of(call_res) != want_ty) {
-                    call_res = coerce_val(ctx, call_res, want_ty);
-                  }
-            }
-        }
+        // The call result carries the callee's own return type, exactly
+        // what C++ emitCall hands back (CgVal{call, info.returnType}).
+        // The old "promised word" narrowing off n.type_annotation never
+        // had the data it guessed at: that field holds the turbofish
+        // instantiation argument for free calls (`Ok::<bool>` reads
+        // "bool") and nothing for flattened method calls, so the only
+        // call it ever touched was the turbofish one, coercing a
+        // struct-returning per-key clone's pointer to the argument's
+        // word and flipping `Outcome<bool>` to a tested bool.
         return call_res;
     }
     if (n.kind == ast_prototype_literal()) {
@@ -13342,7 +13538,7 @@ pub fun lower_decl(
         // generics out and lets instances carry every diagnostic. Scoped to
         // `HashMap` (the only caller of `hash_of`) so unrelated generics
         // keep their existing lowering.
-        if (decl.name != null && cg_str_eq(decl.name, "HashMap")) { return false; }
+        if (decl.name != null && cg_struct_lazily_emitted(decl.name)) { return false; }
         let refused <bool> = false;
         let m <&AstNode> = decl.extra;
         while (m != null) {
@@ -14324,17 +14520,23 @@ pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int, 
     }
 
     let ok <bool> = false;
+    let emit_err <&LLVMErrSlot> = new LLVMErrSlot{};
     if (!had_refusal) {
-        ok = emit_module_to_object(module, output_path, opt_level);
+        ok = emit_module_to_object(module, output_path, opt_level, emit_err);
         if (!ok) {
-            // Object emission failed with no lowering refusal above: name
-            // the input and the artifact instead of failing bare. On a host
-            // whose LLVM build carries no matching target (the linux-arm64
-            // bootstrap: only the X86 target is initialized) this is the
-            // only diagnostic the failure produces.
-            cg_dprintf(2, "finc codegen refusal: emitting LLVM for '%s' to object file '%s' failed (no target for this host?)\n", src_file, output_path);
+            // Object emission failed with no lowering refusal above: name the
+            // input, the artifact, and the LLVM diagnostic. "No targets are
+            // compatible" (the linux-arm64 bootstrap: only the X86 target is
+            // initialized) is expected to arrive as the message; when LLVM
+            // produced nothing at all, say so instead of a bare refusal.
+            if (emit_err.msg != "") {
+                cg_dprintf(2, "finc codegen refusal: emitting LLVM for '%s' to object file '%s' failed: %s\n", src_file, output_path, emit_err.msg);
+            } else {
+                cg_dprintf(2, "finc codegen refusal: emitting LLVM for '%s' to object file '%s' failed with no LLVM diagnostic\n", src_file, output_path);
+            }
         }
     }
+    delete emit_err;
     llvm_dispose_builder(builder);
     llvm_dispose_module(module);
 

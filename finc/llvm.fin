@@ -507,12 +507,17 @@ pub fun init_native_target() <bool> {
 
 // Helper: Emit LLVM module to object file
 #[export]
-pub fun emit_module_to_object(m: &LLVMModule, object_path: string, opt_level: int) <bool> {
+// err_out, when a failure returns false, receives the LLVM diagnostic of the
+// failed step (triple lookup, pass pipeline, or object emission). An empty
+// string means LLVM produced no message; the caller names what it can.
+#[export]
+pub fun emit_module_to_object(m: &LLVMModule, object_path: string, opt_level: int, err_out: &LLVMErrSlot) <bool> {
     let triple <string> = llvm_get_default_triple();
     let tgt_slot <&LLVMTargetSlot> = new LLVMTargetSlot{};
     let err_slot <&LLVMErrSlot> = new LLVMErrSlot{};
     let rc <int> = llvm_get_target_from_triple(triple, tgt_slot, err_slot);
     if (rc != 0) {
+        err_out.msg = err_slot.msg;
         delete tgt_slot;
         delete err_slot;
         return false;
@@ -536,6 +541,7 @@ pub fun emit_module_to_object(m: &LLVMModule, object_path: string, opt_level: in
         llvm_dispose_pass_builder_options(pb_opts);
         if (perr != null) {
             let emsg <string> = llvm_get_error_message(perr);
+            err_out.msg = emsg;
             llvm_dispose_error_message(emsg);
             llvm_dispose_target_machine(tm);
             delete tgt_slot;
@@ -545,6 +551,9 @@ pub fun emit_module_to_object(m: &LLVMModule, object_path: string, opt_level: in
     }
     // codegen = 1 for LLVMObjectFile
     let emit_rc <int> = llvm_target_machine_emit_to_file(tm, m, object_path, 1, err_slot);
+    if (emit_rc != 0) {
+        err_out.msg = err_slot.msg;
+    }
     llvm_dispose_target_machine(tm);
     delete tgt_slot;
     delete err_slot;
