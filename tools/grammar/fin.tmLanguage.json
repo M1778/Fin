@@ -1,0 +1,117 @@
+{
+  "name": "Fin",
+  "scopeName": "source.fin",
+  "fileTypes": [
+    "fin"
+  ],
+  "patterns": [
+    {
+      "include": "#comment"
+    },
+    {
+      "name": "string.quoted.double.fin",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.fin",
+          "match": "\\\\."
+        }
+      ]
+    },
+    {
+      "name": "string.quoted.single.fin",
+      "match": "'(?:[^'\\\\]|\\\\.)'"
+    },
+    {
+      "name": "keyword.directive.fin",
+      "match": "#(?:for|index)\\b"
+    },
+    {
+      "name": "meta.directive.grant.fin",
+      "begin": "#\\[",
+      "end": "\\]",
+      "patterns": [
+        {
+          "include": "$base"
+        }
+      ]
+    },
+    {
+      "name": "meta.attribute-block.fin",
+      "begin": "%\\{",
+      "end": "\\}%",
+      "patterns": [
+        {
+          "include": "$base"
+        }
+      ]
+    },
+    {
+      "name": "keyword.other.macro.fin",
+      "match": "@(?:define|macro|quote|special)\\b"
+    },
+    {
+      "name": "meta.macro.fin",
+      "match": "@[A-Za-z_]\\w*"
+    },
+    {
+      "name": "constant.numeric.float.fin",
+      "match": "\\b\\d+\\.\\d+\\b"
+    },
+    {
+      "name": "constant.numeric.integer.fin",
+      "match": "\\b\\d+\\b"
+    },
+    {
+      "name": "storage.type.fin",
+      "match": "\\b(?:bool|char|double|float|int|long|noret|string|void|Self)\\b"
+    },
+    {
+      "name": "constant.language.fin",
+      "match": "\\b(?:false|null|true)\\b"
+    },
+    {
+      "name": "keyword.control.fin",
+      "match": "\\b(?:blame|break|catch|continue|do|else|for|foreach|if|in|m1778|match|return|try|while)\\b"
+    },
+    {
+      "name": "keyword.declaration.fin",
+      "match": "\\b(?:any|as|as_ptr|auto|cast|class|const|define|delete|enum|extern|fn|from|fun|implements|import|interface|let|macro|namespace|new|operator|priv|pub|quote|readonly|sizeof|special|static|struct|super|type|typeof)\\b"
+    },
+    {
+      "name": "meta.type.annotation.fin",
+      "match": "<[A-Za-z_][^>&|;]*>"
+    },
+    {
+      "name": "keyword.operator.fin",
+      "match": "(?:=>|\\->|::|\\.\\.\\.|\\+\\+|\\-\\-|\\+=|\\-=|\\*=|/=|%=|\\&=|\\|=|==|!=|<=|>=|\\&\\&|\\|\\||<<=|>>=|<<|=|\\+|\\-|\\*|/|%|<|>|!|\\&|\\~|\\||\\^|`|\\?|\\$|@|\\#)"
+    },
+    {
+      "name": "punctuation.definition.punctuation.fin",
+      "match": "(?:;|:|,|\\.|\\(|\\)|\\{|\\}|\\[|\\])"
+    },
+    {
+      "name": "variable.other.fin",
+      "match": "[A-Za-z_]\\w*"
+    }
+  ],
+  "repository": {
+    "comment": [
+      {
+        "name": "comment.block.fin",
+        "begin": "/\\*",
+        "end": "\\*/",
+        "patterns": [
+          {
+            "include": "#comment"
+          }
+        ]
+      },
+      {
+        "name": "comment.line.double-slash.fin",
+        "match": "//.*"
+      }
+    ]
+  }
+}
