@@ -610,7 +610,14 @@ TEST(Census, EverySampleIsAnnotatedAndClassified) {
     // `blame` with every printed byte shape (sorted key order, escape
     // spellings, the leading-zero refusal wording) run under the
     // byte-for-byte agreement harness on all three compilers.
-    EXPECT_EQ(t.samples, 67)
+    // 67 -> 68 on 2026-10-19: tests/samples/stdlib/fs.fin arrives for issue
+    // #61 (stdlib/fs -- prove-or-fix every File call): the tmpdir round
+    // trip (mk_tmp_dir, write/append/copy, read back, sizes), mkdir_p, the
+    // walk_dir dirent-offset scan, rename/is_dir/is_file, and the removal
+    // chain, under `blame` and the byte-for-byte agreement harness on all
+    // three compilers. The tmpdir means no line prints a path (mkdtemp is
+    // random) and no call touches a fixed one.
+    EXPECT_EQ(t.samples, 68)
         << "the corpus is 51 samples. Sample code changes only by a ratified "
            "language decision (ADR 0008), so a different count is either such a "
            "decision — update this — or a file globbed in by accident";

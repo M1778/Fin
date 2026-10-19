@@ -1729,6 +1729,84 @@ json_decode_float: trailing data after the value
         << "refusal kinds or wording changed";
 }
 
+TEST(Soundness_Fs, EveryCallRunsInATmpdirAndNothingTouchesTheCwd) {
+    // Issue #61's shape, in one run: the scratch directory comes from
+    // mkdtemp, so no call touches a fixed path and none of them need (or
+    // change) the cwd. Printed lines are the pinned byte facts; the booleans
+    // a pin cannot see are blames. Teardown removes everything it made: a
+    // run that leaks into /tmp fails its own rmdir chain.
+    EXPECT_EQ(buildBundledAndRun(R"fsf(
+import { mk_tmp_dir, mkdir_p, walk_dir, write_string, read_to_string, file_size,
+         is_dir, is_file, file_exists, rename_path, remove_file, remove_dir, free_file_content } from fs::std;
+import { equals, concat, free_str } from strings::std;
+fun main() <noret> {
+    let made? <string> = mk_tmp_dir("finc_fstest");
+    blame made != null, "mkdtemp under /tmp";
+    let dir <string> = made?;
+    blame mkdir_p(concat(dir, "/a/b/c")), "mkdir_p makes the whole chain";
+    if (is_dir(concat(dir, "/a/b"))) { printf("leaf=dir\n"); }
+    blame !is_file(concat(dir, "/a/b")), "a directory is not a file";
+    let file <string> = concat(dir, "/hello.txt");
+    blame write_string(file, "hello fin"), "write_string answers true on a real file";
+    printf("size=%d\n", cast<int>(file_size(file)));
+    let back? <string> = read_to_string(file);
+    blame back != null, "the file it just wrote reads back";
+    if (equals(back?, "hello fin")) { printf("read=ok\n"); }
+    free_file_content(back);
+    blame file_size(file) == 9, "fputs writes nine bytes and no terminator";
+    let top <[string]> = walk_dir(dir);
+    printf("walk=%d\n", top.length);
+    blame top.length == 2, "the tmp dir holds exactly hello.txt and a";
+    let k <int> = 0;
+    while (k < top.length) { free_str(top[k]); k = k + 1; }
+    delete top;
+    let leafy <string> = concat(dir, "/a/b/c");
+    let moved <string> = concat(leafy, "/moved.txt");
+    blame rename_path(file, moved), "rename_path moves within the same tmpdir";
+    blame !file_exists(file), "the old name stops existing";
+    blame is_file(moved), "the moved thing is still a file";
+    blame remove_file(moved), "remove_file answers true for a real file";
+    let r1 <bool> = remove_dir(leafy);
+    let r2 <bool> = remove_dir(concat(dir, "/a/b"));
+    let r3 <bool> = remove_dir(concat(dir, "/a"));
+    let r4 <bool> = remove_dir(dir);
+    blame r1 && r2 && r3 && r4, "the run removes its own dirs bottom-up";
+    printf("gone=ok\n");
+    free_str(dir);
+    free_str(file);
+    free_str(leafy);
+    free_str(moved);
+}
+)fsf"),
+        R"fsf(leaf=dir
+size=9
+read=ok
+walk=2
+gone=ok
+)fsf")
+        << "the run's own tmpdir facts changed";
+}
+
+TEST(Soundness_Fs, AMissingPathIsRoutineAndNeverAFault) {
+    // The deliberate contrast with the networking module: a missing file is
+    // not a diagnostic, it is null / -1 / an empty walk, the shapes a caller
+    // branches on. Three calls, one nonexistent path family, no abort.
+    EXPECT_EQ(buildBundledAndRun(R"fsf(
+import { read_to_string, file_size, walk_dir } from fs::std;
+fun main() <noret> {
+    let missing? <string> = read_to_string("/no/such/fin test file");
+    if (missing == null) { printf("read=null\n"); } else { printf("read=value\n"); }
+    printf("size=%d\n", cast<int>(file_size("/no/such/fin test file")));
+    printf("walk=%d\n", walk_dir("/no/such/fin test dir").length);
+}
+)fsf"),
+        R"fsf(read=null
+size=-1
+walk=0
+)fsf")
+        << "a missing path stopped being routine";
+}
+
 #endif  // FIN_TESTS_HAVE_BACKEND
 
 #ifdef FIN_TESTS_HAVE_BACKEND

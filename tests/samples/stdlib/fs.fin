@@ -1,0 +1,123 @@
+//@ normative
+//@ ok
+// The fs module (issue #61): every declared call, run. lib/std/fs.fin is the
+// module; this file is the runnable half of the specification.
+//
+// THE RUN TOUCHES NO FIXED PATH. The scratch directory comes from
+// `mk_tmp_dir` (a mkdtemp directory under /tmp), and because its name carries
+// a random suffix, the run never prints a path -- every line below is a
+// pinned byte shape the corpus compares across the reference and both stage
+// compilers, and every fact the pins cannot see is a `blame` (write, append,
+// copy, mkdir_p, rename_path, and remove_file all answer true; the nested
+// leaf answers is_dir, not is_file; the old name stops existing; the run
+// removes every path it made before it ends).
+//
+// THE BYTE-READING ROUTES ARE STATED IN lib/std/fs.fin: the library has no
+// pointer arithmetic (a `&char` neither adds an integer nor indexes), so
+// `readdir`'s dirent is copied whole through `memcpy` into a `[char]` buffer
+// and read back at the Linux x86-64 glibc offsets -- name at byte 19,
+// `d_reclen` at 16..17 bounding the entry. `mkdir_p` walks prefixes spelled
+// with `substr`, skipping prefixes that already exist, because that is what
+// `-p` means.
+//
+// MISSING FILES ARE ROUTINE, not faults: `read_to_string` answers null and
+// `file_size` answers -1, the deliberate contrast with the networking
+// module, whose connection-establishment failures carry diagnostics instead.
+// No missed-file line prints here; the CI harness in tests/test_stdlib.cpp
+// pins the miss side of `read_to_string` and `file_size`.
+//
+// OWNERSHIP. Each path string (from `concat`), each `read_to_string` result
+// (`free_file_content`), and each `walk_dir` entry (`free_str`, then the
+// array with `delete`) is released by the code that made it, the way a
+// caller must.
+
+import { mk_tmp_dir, file_exists, file_size, read_to_string, write_string,
+      append_string, copy_file, free_file_content, remove_file, remove_dir,
+      mkdir_p, walk_dir, rename_path, is_dir, is_file } from fs::std;
+    import { equals, concat, free_str } from strings::std;
+
+    fun main() <noret> {
+        let made? <string> = mk_tmp_dir("finfs");
+        blame made != null, "a writable /tmp is what this run assumes";
+        let dir <string> = made?;
+
+        // Write then read back, byte exact. `fputs` writes the nine bytes of
+        // text and no terminator, so the size is 9.
+        let file <string> = concat(dir, "/hello.txt");
+        let written <bool> = write_string(file, "hello fin");
+        blame written, "write_string answers true on a real file";
+        printf("size=%d\n", cast<int>(file_size(file)));
+        let back? <string> = read_to_string(file);
+        blame back != null, "the file it just wrote reads back";
+        if (equals(back?, "hello fin")) { printf("read=ok\n"); }
+        free_file_content(back);
+
+        // Appending grows the same file by the appended bytes.
+        let appended <bool> = append_string(file, " fin");
+        blame appended, "append_string answers true on a real file";
+        printf("size=%d\n", cast<int>(file_size(file)));
+
+        // A copy holds the same bytes under another name.
+        let twin <string> = concat(dir, "/twin.txt");
+        let copied <bool> = copy_file(file, twin);
+        blame copied, "copy_file answers true for a real source";
+        printf("size=%d\n", cast<int>(file_size(twin)));
+
+        // mkdir_p makes the whole nested chain in one call; the leaf is a
+        // directory, not a file.
+        let nested <string> = concat(dir, "/a/b/c");
+        let pined <bool> = mkdir_p(nested);
+        blame pined, "mkdir_p answers true for every missing level";
+        if (is_dir(nested)) { printf("leaf=dir\n"); }
+        blame !is_file(nested), "a directory is not a file";
+
+        // walk_dir lists one directory with the dots left out: `a/b` holds
+        // exactly `c`. Entries are released here, the way a caller must.
+        let walk_path <string> = concat(dir, "/a/b");
+        let walked <[string]> = walk_dir(walk_path);
+        printf("walk_len=%d\n", walked.length);
+        blame walked.length == 1, "a/b holds exactly the c directory";
+        if (equals(walked[0], "c")) { printf("first=c\n"); }
+        let k <int> = 0;
+        while (k < walked.length) {
+            free_str(walked[k]);
+            k = k + 1;
+        }
+        delete walked;
+
+        // rename moves the file; the old name stops existing.
+        let moved <string> = concat(nested, "/moved.txt");
+        let moved_it <bool> = rename_path(twin, moved);
+        blame moved_it, "rename_path answers true on same-filesystem moves";
+        if (file_exists(moved)) { printf("moved=yes\n"); }
+        blame !file_exists(twin), "the old name stops existing";
+        blame is_file(moved), "the moved thing is still a file";
+
+        // Removing is real: after it, the name answers false.
+        let removed <bool> = remove_file(moved);
+        blame removed, "remove_file answers true for a real file";
+        if (!file_exists(moved)) { printf("removed=yes\n"); }
+
+        // Teardown unwinds the whole chain: the surviving file goes first
+        // (rmdir answers false on a non-empty directory -- and `twin` is not
+        // here: it was renamed and then removed above), then four levels of
+        // directories bottom-up.
+        let gone_f1 <bool> = remove_file(file);
+        let top <string> = concat(dir, "/a/b");
+        let mid <string> = concat(dir, "/a");
+        let r1 <bool> = remove_dir(nested);
+        let r2 <bool> = remove_dir(top);
+        let r3 <bool> = remove_dir(mid);
+        let r4 <bool> = remove_dir(dir);
+        blame gone_f1 && r1 && r2 && r3 && r4, "the run removes its own files and dirs";
+        printf("teardown=done\n");
+
+        free_str(file);
+        free_str(twin);
+        free_str(moved);
+        free_str(nested);
+        free_str(walk_path);
+        free_str(top);
+        free_str(mid);
+        free_str(dir);
+    }

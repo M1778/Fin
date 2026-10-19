@@ -66,7 +66,7 @@
       <p class="stdlib-filter-empty" id="stdlib-filter-empty" hidden>No modules match. Try another name.</p>
       <div class="stdlib-category-group"><div class="stdlib-category-title">Core &amp; I/O</div><ul class="stdlib-module-list">
 <li><a href="#module-stdio" class="stdlib-module-link"><span>stdio</span><span class="stdlib-module-count">10</span></a></li>
-<li><a href="#module-fs" class="stdlib-module-link"><span>fs</span><span class="stdlib-module-count">7</span></a></li>
+<li><a href="#module-fs" class="stdlib-module-link"><span>fs</span><span class="stdlib-module-count">16</span></a></li>
 <li><a href="#module-path" class="stdlib-module-link"><span>path</span><span class="stdlib-module-count">7</span></a></li>
 </ul></div>
 <div class="stdlib-category-group"><div class="stdlib-category-title">Collections</div><ul class="stdlib-module-list">
@@ -126,9 +126,9 @@
         <span class="stdlib-card-name">fs</span>
         <span class="stdlib-card-badge">Core &amp; I/O</span>
       </div>
-      <p class="stdlib-card-desc">Direct filesystem interaction: checking file existence, querying file sizes, reading entire files into memory strings, writing, appending, and removing files.</p>
+      <p class="stdlib-card-desc">Direct filesystem interaction: file existence, sizes, whole-file reads, writes and appends, copies, directory creation and walks (mkdir -p, readdir entries), and mkdtemp scratch dirs.</p>
       <div class="stdlib-card-items">
-        <span class="stdlib-card-item-tag">file_exists</span><span class="stdlib-card-item-tag">remove_file</span><span class="stdlib-card-item-tag">file_size</span><span class="stdlib-card-item-tag">read_to_string</span>
+        <span class="stdlib-card-item-tag">read_to_string</span><span class="stdlib-card-item-tag">write_string</span><span class="stdlib-card-item-tag">mkdir_p</span><span class="stdlib-card-item-tag">walk_dir</span>
       </div>
     </a>
     
@@ -456,8 +456,8 @@ fun main() &lt;noret&gt; {
         <span class="module-import-path">fs::std</span>
         <span class="badge-tag">Core &amp; I/O</span>
       </div>
-      <p class="module-description">Direct filesystem interaction: checking file existence, querying file sizes, reading entire files into memory strings, writing, appending, and removing files.</p>
-      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Reaches standard C runtime file I/O primitives (fopen, fclose, fseek, ftell, fread, fwrite, remove).</div>
+      <p class="module-description">Direct filesystem interaction: file existence, sizes, whole-file reads, writes and appends, copies, directory creation and walks, and mkdtemp scratch dirs.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Reaches standard C runtime file I/O and directory primitives (fopen, fclose, fseek, ftell, fread, fwrite, fputs, remove, mkdir, rmdir, rename, opendir, readdir, closedir, rewinddir, memcpy, mkdtemp). walk_dir copies each dirent through memcpy and reads the name at the Linux x86-64 glibc offsets (name at byte 19, d_reclen at 16..17) -- the library has no pointer arithmetic.</div>
 
       <div class="code-block module-import-box">
         <div class="code-header">
@@ -467,7 +467,7 @@ fun main() &lt;noret&gt; {
             <span>Copy</span>
           </button>
         </div>
-        <pre><code class="language-fin">import { file_exists, remove_file, file_size, read_to_string, write_string, append_string, free_file_content } from fs::std;</code></pre>
+        <pre><code class="language-fin">import { file_exists, remove_file, file_size, read_to_string, write_string, append_string, free_file_content, copy_file, create_dir, remove_dir, rename_path, is_dir, is_file, mk_tmp_dir, mkdir_p, walk_dir } from fs::std;</code></pre>
       </div>
 
       <h3 class="api-section-title">
@@ -533,12 +533,75 @@ fun main() &lt;noret&gt; {
           <td>Frees the heap buffer returned by read_to_string.</td>
         </tr>
         
+
+        <tr>
+          <td class="api-name"><code>copy_file(src: string, dst: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Copies a whole file byte for byte. A missing source reads null and answers false.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>create_dir(path: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Makes one directory (mode 0755). True on success.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>remove_dir(path: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Removes one empty directory (rmdir). True on success.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>rename_path(old_path: string, new_path: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Moves or renames a file. True on success.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>is_dir(path: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>True when opendir opens the path as a directory.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>is_file(path: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>True when the path opens for reading and is not a directory.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>mk_tmp_dir(prefix: string) &lt;string?&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>A fresh uniquely-named directory under /tmp: prefix plus the six characters mkdtemp overwrites. The name is fresh memory; release with free_str.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>mkdir_p(path: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>mkdir -p: every missing directory on the way to path. Prefixes that already exist are not failures.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>walk_dir(path: string) &lt;[string]&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>The entries of one directory with the dots left out, in readdir's order. delete the array and free_str each entry.</td>
+        </tr>
+        
           </tbody>
         </table>
       </div>
 
       <div class="ownership-box">
-        <strong>Memory &amp; Safety Semantics:</strong> Strings returned by read_to_string are heap-allocated via calloc. The caller owns the string and must release it with free_file_content(s).
+        <strong>Memory &amp; Safety Semantics:</strong> Strings returned by read_to_string are heap-allocated via calloc. The caller owns the string and must release it with free_file_content(s). Paths from concat, mk_tmp_dir's name, and each walk_dir entry are also caller-owned: free_str each and delete the walk_dir array. A missing file is routine, never a fault: read_to_string answers null, file_size answers -1, walk_dir answers an empty array.
       </div>
 
       <h3 class="api-section-title">

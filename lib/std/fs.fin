@@ -2,10 +2,16 @@
 // Filesystem operations: reading, writing, appending, query, and removal.
 //
 // Reaches standard C library I/O facilities (fopen, fclose, fseek, ftell,
-// fread, fwrite, fputs, remove).
+// fread, fwrite, fputs, remove) and the directory walks of dirent (opendir,
+// readdir, closedir, rewinddir, mkdtemp) copied through `memcpy`.
 //
-// Every string returned by `read_to_string` is dynamically allocated and
-// caller-owned. `free_file_content` is provided to release it.
+// OWNERSHIP: every string returned by `read_to_string` and by `walk_dir`'s
+// entries is dynamically allocated and caller-owned. `free_file_content`
+// releases a `read_to_string` result; `delete` the array `walk_dir` returns
+// and `free_str` each entry it holds. `mk_tmp_dir` answers one fresh name,
+// freed with `free_str`.
+
+import { len, substr, to_chars, from_chars, clone, free_str, concat } from strings::std;
 
 namespace std {
 
@@ -158,11 +164,48 @@ pub fun copy_file(src: string, dst: string) <bool> {
 #[llvm_name="closedir"]
 @define fs_closedir(dirp: &void) <int>;
 
+#[llvm_name="readdir"]
+@define fs_readdir(dirp: &void) <string>;
+
+#[llvm_name="rewinddir"]
+@define fs_rewinddir(dirp: &void) <noret>;
+
+#[llvm_name="memcpy"]
+@define fs_memcpy(dst: &char, src: string, count: ulong) <&char>;
+
+#[llvm_name="mkdtemp"]
+@define fs_mkdtemp(template: &char) <string>;
+
 #[export]
 pub fun create_dir(path: string) <bool> {
     if (path == null) { return false; }
     // 0755 octal = 493 decimal
     return fs_mkdir(path, 493) == 0;
+}
+
+// `mkdir -p`: every missing directory on the way to `path` is created, each
+// prefix spelled with `substr` (fresh, freed here). A prefix that already
+// exists is not a failure, because that is what `-p` means; the empty root of
+// an absolute path is skipped the same way.
+#[export]
+pub fun mkdir_p(path: string) <bool> {
+    if (path == null || len(path) == 0) { return false; }
+    let chars <[char]> = to_chars(path);
+    let n <int> = chars.length;
+    let made <bool> = true;
+    let i <int> = 0;
+    while (made && i <= n) {
+        if (i == n || chars[i] == cast<char>(47)) {
+            let prefix <string> = substr(path, 0, i);
+            if (len(prefix) > 0 && !is_dir(prefix)) {
+                made = create_dir(prefix);
+            }
+            free_str(prefix);
+        }
+        i = i + 1;
+    }
+    delete chars;
+    return made;
 }
 
 #[export]
@@ -190,6 +233,88 @@ pub fun is_dir(path: string) <bool> {
 pub fun is_file(path: string) <bool> {
     if (path == null) { return false; }
     return file_exists(path) && !is_dir(path);
+}
+
+// A fresh uniquely-named directory under /tmp: `mk_tmp_dir("finfs")` spellings
+// build `/tmp/finfs` followed by the six characters `mkdtemp` overwrites, so
+// no call ever touches a fixed path and the caller's cwd stays clean. The
+// template must live in writable memory, so it is spelled through a `[char]`
+// buffer (`to_chars`) and the answer is cloned out of that buffer before it
+// is released -- the pointer `mkdtemp` returns points inside it. A null
+// prefix or an already taken template answers null, the routine miss.
+#[export]
+pub fun? mk_tmp_dir(prefix: string) <string> {
+    if (prefix == null) { return null; }
+    let base <string> = concat(concat("/tmp/", prefix), "XXXXXX");
+    let chars <[char]> = to_chars(base);
+    free_str(base);
+    let made <string> = fs_mkdtemp(&chars[0]);
+    if (made == null) { delete chars; return null; }
+    let fresh <string> = clone(made);
+    delete chars;
+    return fresh;
+}
+
+// The entries of one directory (not recursive), with `.` and `..` left out,
+// in `readdir`'s order.
+//
+// There is no pointer arithmetic in this library -- a `&char` does not add
+// an integer and does not index -- so `readdir`'s dirent pointer is copied
+// whole through `fs_memcpy` into a `[char]` buffer and read back there. The
+// Linux x86-64 glibc dirent layout is what makes byte offsets possible at
+// all: `d_reclen` is bytes 16..17 (little-endian, so it also bounds the
+// entry) and the NUL-terminated name starts at byte 19. Both reads go
+// through that fixed layout, and a `d_reclen` outside the window this walk
+// was compiled for refuses loudly rather than guessing.
+#[export]
+pub fun walk_dir(path: string) <[string]> {
+    let nothing <[string]> = new [string, 0]{};
+    if (path == null) { return nothing; }
+    let dir <&void> = fs_opendir(path);
+    if (dir == null) { return nothing; }
+
+    let raw <[char]> = new [char, 320]{};
+
+    // Pass one counts the entries this answer will hold.
+    let count <int> = 0;
+    while (true) {
+        let ent <string> = fs_readdir(dir);
+        if (ent == null) { break; }
+        let head <&char> = fs_memcpy(&raw[0], ent, cast<ulong>(18));
+        let reclen <int> = cast<int>(raw[16]) + cast<int>(raw[17]) * 256;
+        blame reclen >= 21 && reclen < 320, "dirent d_reclen outside the layout walk_dir reads";
+        let body <&char> = fs_memcpy(&raw[0], ent, cast<ulong>(reclen));
+        if (raw[19] == cast<char>(46) && (raw[20] == cast<char>(0) || (raw[20] == cast<char>(46) && raw[21] == cast<char>(0)))) {
+            continue;
+        }
+        count = count + 1;
+    }
+
+    // Pass two spells each name out of the same buffer.
+    fs_rewinddir(dir);
+    let out <[string]> = new [string, count]{};
+    let fill <int> = 0;
+    while (fill < count) {
+        let ent <string> = fs_readdir(dir);
+        if (ent == null) { break; }
+        let head <&char> = fs_memcpy(&raw[0], ent, cast<ulong>(18));
+        let reclen <int> = cast<int>(raw[16]) + cast<int>(raw[17]) * 256;
+        blame reclen >= 21 && reclen < 320, "dirent d_reclen outside the layout walk_dir reads";
+        let body <&char> = fs_memcpy(&raw[0], ent, cast<ulong>(reclen));
+        if (raw[19] == cast<char>(46) && (raw[20] == cast<char>(0) || (raw[20] == cast<char>(46) && raw[21] == cast<char>(0)))) {
+            continue;
+        }
+        let name_end <int> = 19;
+        while (name_end < reclen && raw[name_end] != cast<char>(0)) {
+            name_end = name_end + 1;
+        }
+        out[fill] = from_chars(raw, 19, name_end - 19);
+        fill = fill + 1;
+    }
+
+    delete raw;
+    fs_closedir(dir);
+    return out;
 }
 
 }
