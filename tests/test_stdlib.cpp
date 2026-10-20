@@ -1759,7 +1759,7 @@ json_decode_float: trailing data after the value
 
 TEST(Soundness_Fs, EveryCallRunsInATmpdirAndNothingTouchesTheCwd) {
 #ifdef _WIN32
-    GTEST_SKIP() << "fs externs (mkdtemp, opendir, closedir, getdirentries) do not resolve on Windows (lib/std/fs.fin names the refusal)";
+    GTEST_SKIP() << "fs externs (mkdtemp, opendir, readdir, closedir, rewinddir) do not resolve on Windows (lib/std/fs.fin names the refusal)";
 #endif
     // Issue #61's shape, in one run: the scratch directory comes from
     // mkdtemp, so no call touches a fixed path and none of them need (or
@@ -1820,7 +1820,7 @@ gone=ok
 
 TEST(Soundness_Fs, AMissingPathIsRoutineAndNeverAFault) {
 #ifdef _WIN32
-    GTEST_SKIP() << "fs externs (mkdtemp, opendir, closedir, getdirentries) do not resolve on Windows (lib/std/fs.fin names the refusal)";
+    GTEST_SKIP() << "fs externs (mkdtemp, opendir, readdir, closedir, rewinddir) do not resolve on Windows (lib/std/fs.fin names the refusal)";
 #endif
     // The deliberate contrast with the networking module: a missing file is
     // not a diagnostic, it is null / -1 / an empty walk, the shapes a caller

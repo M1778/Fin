@@ -2,17 +2,17 @@
 // Filesystem operations: reading, writing, appending, query, and removal.
 //
 // Reaches standard C library I/O facilities (fopen, fclose, fseek, ftell,
-// fread, fwrite, fputs, remove, open, close, mkdir, rmdir, rename, mkdtemp)
-// and the directory walk through `getdirentries` (the record shape behind
-// that call differs per platform: 64-bit-inode on glibc, legacy on darwin;
-// `walk_dir` spells that page out below).
+// fread, fwrite, fputs, remove, mkdir, rmdir, rename, mkdtemp) and the
+// directory walk through the `opendir`/`readdir`/`closedir` trio (the one
+// dirent symbol set musl, glibc and macOS all export; `readdir`'s record
+// shape differs per platform, and `walk_dir` spells that page out below).
 //
 // WINDOWS is namedly unimplemented the way sync.fin spells it: a child that
-// imports fs::std refuses at the Windows link on this module's `mkdtemp`,
-// `opendir`/`closedir` and `getdirentries` externs (ucrt ships none of these),
-// so the soundness tests for those paths skip there instead of showing a red
-// link. The directory facts this walk needs wait on a FindFirstFile-shaped
-// spine; nothing here silently degrades in the meantime.
+// imports fs::std refuses at the Windows link on this module's `mkdtemp` and
+// `opendir`/`readdir`/`closedir`/`rewinddir` externs (ucrt ships none of the
+// dirent family), so the soundness tests for those paths skip there instead
+// of showing a red link. The directory facts this walk needs wait on a
+// FindFirstFile-shaped spine; nothing here silently degrades in the meantime.
 //
 // OWNERSHIP: every string returned by `read_to_string` and by `walk_dir`'s
 // entries is dynamically allocated and caller-owned. `free_file_content`
@@ -173,14 +173,14 @@ pub fun copy_file(src: string, dst: string) <bool> {
 #[llvm_name="closedir"]
 @define fs_closedir(dirp: &void) <int>;
 
-#[llvm_name="open"]
-@define fs_open(path: string, flags: int, ...) <int>;
+#[llvm_name="readdir"]
+@define fs_readdir(dirp: &void) <string>;
 
-#[llvm_name="close"]
-@define fs_close(fd: int) <int>;
+#[llvm_name="rewinddir"]
+@define fs_rewinddir(dirp: &void) <noret>;
 
-#[llvm_name="getdirentries"]
-@define fs_getd64(fd: int, buf: &char, count: ulong, base: &long) <long>;
+#[llvm_name="memcpy"]
+@define fs_memcpy(dst: &char, src: string, count: ulong) <&char>;
 
 #[llvm_name="mkdtemp"]
 @define fs_mkdtemp(template: &char) <string>;
@@ -268,108 +268,93 @@ pub fun? mk_tmp_dir(prefix: string) <string> {
 // in the directory's order.
 //
 // There is no pointer arithmetic in this library -- a `&char` does not add
-// an integer and does not index -- so the records are read out of a `[char]`
-// buffer filled by `getdirentries`. That one libc symbol exists unchanged
-// on Linux and on macOS, which is why this walk does not go through
-// `readdir`: there the exported symbol hands the legacy 32-bit-inode ABI on
-// darwin x86_64 and the 64-bit one on darwin arm64, and getdirentries' own
-// records differ by platform too -- measured on both CI arches, the macOS
-// syscall keeps filling the legacy record (`d_reclen` at 4..5, `d_namlen`
-// at 7, name at 8) that glibc replaced with the 64-bit-inode kind
-// (`d_reclen` at 16..17, name at 19). The two shapes are told apart per
-// record on byte 7, which is 0 on every 64-bit-inode record (the top byte
-// of `d_ino`) and never 0 on the legacy kind (`d_namlen`, at least 1).
-// Each shape's window blame is read before the name, and a reclen outside
-// it refuses loudly rather than guessing.
+// an integer and does not index -- so `readdir`'s dirent pointer is copied
+// whole through `fs_memcpy` into a `[char]` buffer and read back there.
+// `opendir`/`readdir`/`closedir` is the one dirent symbol set musl, glibc
+// and macOS all export (musl ships no `getdirentries` at all, which is why
+// the walk leaves that path), and it is also why the record shape cannot be
+// fixed at build time: the same `readdir` call hands back three shapes --
+// the legacy 32-bit-inode record on darwin x86_64 (`d_reclen` at 4..5,
+// `d_namlen` at 7, name at 8), glibc/musl's 64-bit-inode record (`d_reclen`
+// at 16..17, `d_type` at 18, name at 19), and darwin arm64's identical head
+// with `d_namlen` at 18..19, so its name lands at 21. Each shape is told
+// apart per record: byte 7 is `d_namlen` (at least 1) on the legacy kind and
+// the top byte of `d_ino` (0 in practice) on the 64-bit kind; byte 19 is a
+// name character on glibc/musl and the high byte of `d_namlen` (0) on
+// darwin arm64. Each shape windows its own `d_reclen` before the name is
+// read, and anything outside the window refuses loudly rather than guessing.
 #[export]
 pub fun walk_dir(path: string) <[string]> {
     let nothing <[string]> = new [string, 0]{};
     if (path == null) { return nothing; }
-    let raw <[char]> = new [char, 4096]{};
-    let seek <[long]> = new [long, 1]{};
+    let dir <&void> = fs_opendir(path);
+    if (dir == null) { return nothing; }
+
+    let raw <[char]> = new [char, 320]{};
 
     // Pass one counts the entries this answer will hold.
-    let fd <int> = fs_open(path, 0);
-    if (fd < 0) { delete raw; delete seek; return nothing; }
-    let filled <long> = fs_getd64(fd, &raw[0], cast<ulong>(4096), &seek[0]);
-    let at <int> = 0;
     let count <int> = 0;
     while (true) {
-        if (at >= filled) {
-            filled = fs_getd64(fd, &raw[0], cast<ulong>(4096), &seek[0]);
-            at = 0;
-            if (filled <= 0) { break; }
-        }
-        // Two record shapes share this buffer (see walk_dir's header): byte 7
-        // picks the layout per record, each branch windows its own reclen.
+        let ent <string> = fs_readdir(dir);
+        if (ent == null) { break; }
+        // Three record shapes share this buffer (see walk_dir's header):
+        // byte 7 picks the legacy kind from the 64-bit kind, byte 19 splits
+        // the two 64-bit shapes, each branch windows its own reclen.
+        let head <&char> = fs_memcpy(&raw[0], ent, cast<ulong>(24));
         let reclen <int> = 0;
         let name_start <int> = 0;
-        if (raw[at + 7] == cast<char>(0)) {
-            reclen = cast<int>(raw[at + 16]) + cast<int>(raw[at + 17]) * 256;
+        if (raw[7] == cast<char>(0)) {
+            reclen = cast<int>(raw[16]) + cast<int>(raw[17]) * 256;
             blame reclen >= 21 && reclen < 320, "dirent d_reclen outside the 64-bit-record layout walk_dir reads";
             name_start = 19;
+            if (raw[19] == cast<char>(0)) { name_start = 21; }
         } else {
-            reclen = cast<int>(raw[at + 4]) + cast<int>(raw[at + 5]) * 256;
+            reclen = cast<int>(raw[4]) + cast<int>(raw[5]) * 256;
             blame reclen >= 12 && reclen < 320, "dirent d_reclen outside the legacy record layout walk_dir reads";
             name_start = 8;
         }
-        let name_end <int> = name_start;
-        while (name_end < reclen && raw[at + name_end] != cast<char>(0)) {
-            name_end = name_end + 1;
-        }
-        blame name_end < reclen, "dirent name is not NUL terminated inside its record";
-        if (raw[at + name_start] == cast<char>(46) && (raw[at + name_start + 1] == cast<char>(0) || (raw[at + name_start + 1] == cast<char>(46) && raw[at + name_start + 2] == cast<char>(0)))) {
-            at = at + reclen;
+        let body <&char> = fs_memcpy(&raw[0], ent, cast<ulong>(reclen));
+        if (raw[name_start] == cast<char>(46) && (raw[name_start + 1] == cast<char>(0) || (raw[name_start + 1] == cast<char>(46) && raw[name_start + 2] == cast<char>(0)))) {
             continue;
         }
         count = count + 1;
-        at = at + reclen;
     }
-    fs_close(fd);
 
     // Pass two spells each name out of the same buffer.
-    fd = fs_open(path, 0);
-    if (fd < 0) { delete raw; delete seek; return nothing; }
-    filled = fs_getd64(fd, &raw[0], cast<ulong>(4096), &seek[0]);
-    at = 0;
+    fs_rewinddir(dir);
     let out <[string]> = new [string, count]{};
     let fill <int> = 0;
     while (fill < count) {
-        if (at >= filled) {
-            filled = fs_getd64(fd, &raw[0], cast<ulong>(4096), &seek[0]);
-            at = 0;
-            if (filled <= 0) { break; }
-        }
-        // Two record shapes share this buffer (see walk_dir's header): byte 7
-        // picks the layout per record, each branch windows its own reclen.
+        let ent <string> = fs_readdir(dir);
+        if (ent == null) { break; }
+        let head <&char> = fs_memcpy(&raw[0], ent, cast<ulong>(24));
         let reclen <int> = 0;
         let name_start <int> = 0;
-        if (raw[at + 7] == cast<char>(0)) {
-            reclen = cast<int>(raw[at + 16]) + cast<int>(raw[at + 17]) * 256;
+        if (raw[7] == cast<char>(0)) {
+            reclen = cast<int>(raw[16]) + cast<int>(raw[17]) * 256;
             blame reclen >= 21 && reclen < 320, "dirent d_reclen outside the 64-bit-record layout walk_dir reads";
             name_start = 19;
+            if (raw[19] == cast<char>(0)) { name_start = 21; }
         } else {
-            reclen = cast<int>(raw[at + 4]) + cast<int>(raw[at + 5]) * 256;
+            reclen = cast<int>(raw[4]) + cast<int>(raw[5]) * 256;
             blame reclen >= 12 && reclen < 320, "dirent d_reclen outside the legacy record layout walk_dir reads";
             name_start = 8;
         }
+        let body <&char> = fs_memcpy(&raw[0], ent, cast<ulong>(reclen));
+        if (raw[name_start] == cast<char>(46) && (raw[name_start + 1] == cast<char>(0) || (raw[name_start + 1] == cast<char>(46) && raw[name_start + 2] == cast<char>(0)))) {
+            continue;
+        }
         let name_end <int> = name_start;
-        while (name_end < reclen && raw[at + name_end] != cast<char>(0)) {
+        while (name_end < reclen && raw[name_end] != cast<char>(0)) {
             name_end = name_end + 1;
         }
         blame name_end < reclen, "dirent name is not NUL terminated inside its record";
-        if (raw[at + name_start] == cast<char>(46) && (raw[at + name_start + 1] == cast<char>(0) || (raw[at + name_start + 1] == cast<char>(46) && raw[at + name_start + 2] == cast<char>(0)))) {
-            at = at + reclen;
-            continue;
-        }
-        out[fill] = from_chars(raw, at + name_start, name_end - name_start);
+        out[fill] = from_chars(raw, name_start, name_end - name_start);
         fill = fill + 1;
-        at = at + reclen;
     }
-    fs_close(fd);
 
     delete raw;
-    delete seek;
+    fs_closedir(dir);
     return out;
 }
 
