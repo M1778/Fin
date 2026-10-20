@@ -3527,9 +3527,11 @@ std::string readelfSections(const std::string& objectPath) {
     return captureCommand("otool -l " + objectPath + " 2>&1");
 }
 
-// `llvm-dwarfdump` by PATH, or the brew keg bins on macOS (keg-only, off
-// PATH), or "" when absent. Mirrors the objdumpPath fallback in
-// test_codegen.cpp: Homebrew's LLVM is never on PATH by itself.
+// `llvm-dwarfdump` by PATH (also its only-on-alpine `llvm-dwarfdump-<N>`
+// spelling), or the brew keg bins on macOS (keg-only, off PATH), or the flat
+// `/usr/lib/llvm<N>` trees distros keep off PATH, or "" when absent. Mirrors
+// the objdumpPath fallback in test_codegen.cpp: Homebrew's LLVM is never on
+// PATH by itself, and alpine names the suffixed tool only.
 static std::string dwarfdumpPath() {
     const fs::path probeOut = uniqueTempPath("fin_dwarfdump_probe");
     const bool found =
@@ -3538,6 +3540,28 @@ static std::string dwarfdumpPath() {
     std::error_code probeEc;
     fs::remove(probeOut, probeEc);
     if (found) return "llvm-dwarfdump";
+#ifdef FIN_LLVM_MAJOR
+    const std::string suffixed =
+        "llvm-dwarfdump-" + std::to_string(FIN_LLVM_MAJOR);
+    const fs::path suffixedOut = uniqueTempPath("fin_dwarfdump_probe_sfx");
+    const bool suffixedFound =
+        fin::runProcess({suffixed, "--version"}, suffixedOut.string(),
+                        suffixedOut.string()) == 0;
+    std::error_code suffixedEc;
+    fs::remove(suffixedOut, suffixedEc);
+    if (suffixedFound) return suffixed;
+    // A distro install one PATH step above never reaches: alpine mounts its
+    // llvm tree at /usr/lib/llvm<N>, the debian family at /usr/lib/llvm-<N>,
+    // and neither is linked into /usr/bin/llvm-dwarfdump.
+    for (const std::string& bin :
+         {std::string("/usr/lib/llvm") + std::to_string(FIN_LLVM_MAJOR) +
+              "/bin/llvm-dwarfdump",
+          std::string("/usr/lib/llvm-") + std::to_string(FIN_LLVM_MAJOR) +
+              "/bin/llvm-dwarfdump"}) {
+        std::error_code ec;
+        if (fs::exists(bin, ec)) return bin;
+    }
+#endif
 #ifdef __APPLE__
     std::vector<std::string> bins;
 #ifdef FIN_LLVM_MAJOR
