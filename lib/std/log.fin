@@ -32,6 +32,13 @@
 // configuration is also inheritable-by-fork process state, which a config struct
 // would not be. That is the recorded trade.
 //
+// WINDOWS is namedly unimplemented the way sync.fin spells it: a child that
+// imports log::std refuses at the Windows link on this module's `setenv` and
+// `dprintf` externs (ucrt ships neither), so the soundness tests for these
+// paths skip there instead of showing a red link. A runtime platform gate
+// exists in no language construct yet, which is why the refusal lives where
+// the linker is.
+//
 // THE FILTER. Default level is `info`, exactly as the issue says. `LOG_LEVEL`
 // (values `debug`|`info`|`warn`|`error`, anything else `blame`s with the bad
 // value in the message — never silent) *overrides* the level `init` was handed;

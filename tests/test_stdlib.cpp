@@ -1399,6 +1399,9 @@ TEST(Soundness_Log, TheSurfaceResolves) {
 #ifdef FIN_TESTS_HAVE_BACKEND
 
 TEST(Soundness_Log, TextModeEmitsToStderrAndNeverToStdout) {
+#ifdef _WIN32
+    GTEST_SKIP() << "log externs (setenv, dprintf) do not resolve on Windows (lib/std/log.fin names the refusal)";
+#endif
     // The stream-discipline half of the issue's acceptance ("mirror finc's
     // stdout-reserved rule"): the lines land on fd 2 with the padded label and
     // the message, stdout stays empty, and a debug line under the default
@@ -1423,6 +1426,9 @@ TEST(Soundness_Log, TextModeEmitsToStderrAndNeverToStdout) {
 }
 
 TEST(Soundness_Log, TheFilterRanksAndTheEnvOverrideWins) {
+#ifdef _WIN32
+    GTEST_SKIP() << "log externs (setenv, dprintf) do not resolve on Windows (lib/std/log.fin names the refusal)";
+#endif
     // The rank order, held as runs: at `init(Level::Error())` only the error
     // call emits; at `LOG_LEVEL=debug` with no init at all, the debug call
     // does — which pins both the default-resolve path and the filter — and at
@@ -1466,6 +1472,9 @@ TEST(Soundness_Log, TheFilterRanksAndTheEnvOverrideWins) {
 }
 
 TEST(Soundness_Log, ABadLogLevelBlamesAndNamesTheValue) {
+#ifdef _WIN32
+    GTEST_SKIP() << "log externs (setenv, dprintf) do not resolve on Windows (lib/std/log.fin names the refusal)";
+#endif
     // `debug|info|warn|error`, and a bad value aborts with the value in the
     // message — the issue's "never silent" rule as a run. The abort happens at
     // the first emit unless `init` came first, so both spells are pinned.
@@ -1486,6 +1495,9 @@ TEST(Soundness_Log, ABadLogLevelBlamesAndNamesTheValue) {
 }
 
 TEST(Soundness_Log, JsonlModeEmitsTheFincContractShape) {
+#ifdef _WIN32
+    GTEST_SKIP() << "log externs (setenv, dprintf) do not resolve on Windows (lib/std/log.fin names the refusal)";
+#endif
     // kind first, message next, the escaped message, and the record closed —
     // with the finc-style prefix intact; the timestamp, when it rides, is an
     // appended field precisely so this prefix stays the contract's own. The
@@ -1512,6 +1524,9 @@ TEST(Soundness_Log, JsonlModeEmitsTheFincContractShape) {
 }
 
 TEST(Soundness_Log, TheTimestampPrefixRidesByDefault) {
+#ifdef _WIN32
+    GTEST_SKIP() << "log externs (setenv, dprintf) do not resolve on Windows (lib/std/log.fin names the refusal)";
+#endif
     // The `time` (#59) half of the shape: by default an emitted line carries an
     // rfc3339 prefix (which ends where the level label begins), and
     // `timestamps(false)` takes it off. Contains, never equality — the clock
@@ -1743,6 +1758,9 @@ json_decode_float: trailing data after the value
 }
 
 TEST(Soundness_Fs, EveryCallRunsInATmpdirAndNothingTouchesTheCwd) {
+#ifdef _WIN32
+    GTEST_SKIP() << "fs externs (mkdtemp, opendir, closedir, getdirentries) do not resolve on Windows (lib/std/fs.fin names the refusal)";
+#endif
     // Issue #61's shape, in one run: the scratch directory comes from
     // mkdtemp, so no call touches a fixed path and none of them need (or
     // change) the cwd. Printed lines are the pinned byte facts; the booleans
@@ -1801,6 +1819,9 @@ gone=ok
 }
 
 TEST(Soundness_Fs, AMissingPathIsRoutineAndNeverAFault) {
+#ifdef _WIN32
+    GTEST_SKIP() << "fs externs (mkdtemp, opendir, closedir, getdirentries) do not resolve on Windows (lib/std/fs.fin names the refusal)";
+#endif
     // The deliberate contrast with the networking module: a missing file is
     // not a diagnostic, it is null / -1 / an empty walk, the shapes a caller
     // branches on. Three calls, one nonexistent path family, no abort.

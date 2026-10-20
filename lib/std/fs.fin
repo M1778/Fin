@@ -7,6 +7,13 @@
 // is not one thing across darwin x86_64 and arm64; `walk_dir` spells that
 // page out below).
 //
+// WINDOWS is namedly unimplemented the way sync.fin spells it: a child that
+// imports fs::std refuses at the Windows link on this module's `mkdtemp`,
+// `opendir`/`closedir` and `getdirentries` externs (ucrt ships none of these),
+// so the soundness tests for those paths skip there instead of showing a red
+// link. The directory facts this walk needs wait on a FindFirstFile-shaped
+// spine; nothing here silently degrades in the meantime.
+//
 // OWNERSHIP: every string returned by `read_to_string` and by `walk_dir`'s
 // entries is dynamically allocated and caller-owned. `free_file_content`
 // releases a `read_to_string` result; `delete` the array `walk_dir` returns
