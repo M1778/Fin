@@ -16415,7 +16415,9 @@ TEST(Soundness_Derive, TheWrapperBindsFromTheValue) {
         "    let p <Point>;\n"
         "    p.x = 3;\n"
         "    p.y = -5;\n"
-        "    printf(\"%lu\\n\", derive_hash(p));\n"
+        // `%llu`, not `%lu`: a Fin `ulong` is 64-bit, and `unsigned long` is
+        // 32-bit on LLP64 Windows, so the pinned number gets cut there.
+        "    printf(\"%llu\\n\", derive_hash(p));\n"
         "    let q <Point>;\n"
         "    q.x = 3;\n"
         "    q.y = -5;\n"
@@ -16438,7 +16440,7 @@ TEST(Soundness_Derive, EveryByteOfEveryFieldEntersTheMix) {
         "    let p <Point>;\n"
         "    p.x = 123;\n"
         "    p.y = 4567890123;\n"
-        "    printf(\"%lu\\n\", derive_hash(p));\n"
+        "    printf(\"%llu\\n\", derive_hash(p));\n"
         "    return 0;\n"
         "}\n");
     EXPECT_EQ(run.compileExit, 0) << stripAnsi(run.compileErr);
@@ -16456,7 +16458,7 @@ TEST(Soundness_Derive, AnEmptyStructHasNothingToMix) {
         "fun empty_hash<E>(x: E) <ulong> { return derive_hash(x); }\n"
         "fun main() <int> {\n"
         "    let e <Empty>;\n"
-        "    printf(\"%lu\\n\", empty_hash(e));\n"
+        "    printf(\"%llu\\n\", empty_hash(e));\n"
         "    return 0;\n"
         "}\n");
     EXPECT_EQ(run.compileExit, 0) << stripAnsi(run.compileErr);
@@ -16479,7 +16481,7 @@ TEST(Soundness_Derive, ANestedStructWalksItsOwnFields) {
         "    o.i.a = 7;\n"
         "    o.i.b = 9;\n"
         "    o.z = 5;\n"
-        "    printf(\"%lu\\n\", outer_hash(o));\n"
+        "    printf(\"%llu\\n\", outer_hash(o));\n"
         "    return 0;\n"
         "}\n");
     EXPECT_EQ(run.compileExit, 0) << stripAnsi(run.compileErr);
