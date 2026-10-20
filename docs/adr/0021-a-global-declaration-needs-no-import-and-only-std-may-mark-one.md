@@ -1,5 +1,7 @@
 # A declaration marked `#[global]` needs no import, and only `std` may mark one
 
+**Status:** Accepted
+
 A declaration carrying the attribute `#[global]` is visible to **every file in the compiler
 session**, with no import written anywhere. The attribute is **opt-in per declaration** and
 **legal only inside `namespace std`**. Written anywhere else it is a **diagnostic**, not a

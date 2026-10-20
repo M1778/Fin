@@ -1,5 +1,7 @@
 # An interface reference is two words, and the pointer map has three states per word
 
+**Status:** Accepted
+
 Where an interface is used as a runtime type, the value is `{i8* data, vtable* }` — two words. And the
 per-type pointer map that a provider supplies (ADR 0014) distinguishes **three** states for each word, not
 two: traced, meaning the collector must follow it; not a pointer; and **a pointer the collector must not

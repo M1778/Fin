@@ -1,5 +1,7 @@
 # Compile-time code may read the host machine but may not branch on what it reads
 
+**Status:** Accepted
+
 A compile-time value obtained from the machine running the compiler — `compiler.system.get_available_memory`,
 `get_total_memory`, `get_memorycard_model`, and anything added beside them — is **tainted**. Using a tainted
 value as a value is allowed. Branching on one at compile time is a hard error, and the taint propagates

@@ -1,5 +1,9 @@
 # Compiler API builtins and compile-time intrinsics (@implements, @defined, @Alloc, @Free)
 
+**Status:** Proposed
+
+> 2026-10-20 status: still open — plan-before-code; docs/compiler-api.md is the design and implemented operations are verified against src/semantics/CompilerApi.cpp and src/semantics/impl/Analyzer_CompilerApi.cpp. Nothing here ships without the wave-4 plan.
+
 Compile-time special invocations (`@name(...)`) prefixed with the `@` sigil serve as
 first-class builtins that bridge directly into the compiler API component surface
 (`compiler.components.*` and `compiler.<component>.*`). Compile-time queries (`@implements`,

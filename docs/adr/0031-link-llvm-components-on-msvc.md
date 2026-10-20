@@ -1,5 +1,7 @@
 # On MSVC, finc links LLVM's component static libraries instead of the monolithic dylib
 
+**Status:** Accepted
+
 MSVC cannot build LLVM's monolithic `libLLVM` shared library at any version, so
 the Windows tarball exports no `LLVM` CMake target. On that platform finc links
 the component static libraries via `llvm_map_components_to_libnames` instead:

@@ -1,5 +1,7 @@
 # Uninitialised storage is zero-initialised
 
+**Status:** Accepted
+
 ## Context
 
 Issue #34 — "Decide and pin the uninitialized-memory policy" — asked what a local

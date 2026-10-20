@@ -1,5 +1,7 @@
 # Meta-types map to opaque words; `resolve_type*` evaluate at compile time
 
+**Status:** Accepted
+
 Each of `$type`, `$struct`, `$interface` and `$enum_member` maps to its own
 named single-word type (`fin.type` and kin), so the four stay distinct without
 claiming anything about what a word means. Nothing compares, prints, branches

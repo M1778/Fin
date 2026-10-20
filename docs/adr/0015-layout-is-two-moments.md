@@ -1,5 +1,7 @@
 # Layout is two moments, and a query asked in the wrong one refuses instead of answering
 
+**Status:** Accepted
+
 A type's layout is worked out in two named moments. In **decide** the type is incomplete: a library may
 contribute header words and alignment, and every query whose answer depends on the final layout is
 illegal. In **observe** the type is complete: layout may be measured, and contributions are illegal.

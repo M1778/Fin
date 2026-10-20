@@ -1,5 +1,7 @@
 # Signed-integer overflow wraps
 
+**Status:** Accepted
+
 ## Context
 
 Issue #45 — "Decide and pin the signed-integer overflow policy (wrap vs trap

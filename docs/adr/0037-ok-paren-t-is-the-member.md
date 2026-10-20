@@ -1,5 +1,9 @@
 # `Ok(T)` in comparison position denotes the member
 
+**Status:** Accepted
+
+> 2026-10-20 status: the ruling stands and remains unlowered — enum representation stays unruled; payloads and `Ok(10)` construction still refuse, and `Ok(T)` comparisons still diagnose (full suite 2931/2931).
+
 `enum_ == Ok(T)` asks whether the value holds the `Ok` member: the `T` is the
 payload type as written in the member's declaration -- disambiguation, not a
 value -- exactly as bare `Ok` already denotes the member where a

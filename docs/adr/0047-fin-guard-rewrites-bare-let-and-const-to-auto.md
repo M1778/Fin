@@ -1,5 +1,7 @@
 # Bare `let`/`const` rewrites to `<auto>` with a warning
 
+**Status:** Accepted
+
 ## Context
 
 Fin requires every `let`/`const` declaration to carry a type annotation (or a

@@ -1,5 +1,7 @@
 # Equality is declared, not synthesized
 
+**Status:** Accepted
+
 `==` on a struct without a declared `operator ==` (or the `Equal` interface)
 stays refused. The backend will not synthesize field-wise equality, and
 uncalled method bodies keep lowering eagerly -- so `Collection<Data>` fails
@@ -29,3 +31,4 @@ sample change, by language decision only) or a future ruling that revisits
 this one. Padding bytes are the sharpest reason synthesis stays out: a
 `memcmp` would compare indeterminate bytes, and anything finer is a language
 definition, not a lowering.
+See also: ADR 0058 (a derive is an opt-in call, which is why it does not collide with this ruling).

@@ -1,5 +1,7 @@
 # A macro takes named parameters and returns one quoted expression, and the bracket that delimits a call shapes its argument
 
+**Status:** Accepted
+
 A `@macro` declares an ordinary parameter list and a body that returns exactly one `quote`d
 expression. Parameters are referenced as `$name`. There are no rule arms, no fragment specifiers and
 no repetition. The bracket that delimits a call decides how the arguments arrive: `name!(a, b)` is

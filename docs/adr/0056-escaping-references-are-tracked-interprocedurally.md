@@ -1,5 +1,7 @@
 # Provenance for escaping references: literals, stores, and forwarding calls
 
+**Status:** Accepted
+
 ## Context
 
 ADR 0055's rule reads only `return`'s immediate operand: an identifier, a member

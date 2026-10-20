@@ -1,5 +1,9 @@
 # `m1778` means "not implemented" and nothing else
 
+**Status:** Accepted
+
+> 2026-10-20 status: shipped — the zero-production gap closed on 2026-08-23 (commit 0026fe5); `blame m1778;` is now a first-class blame expression, not a syntax error (full suite 2931/2931).
+
 `m1778` appeared in the corpus in two unrelated roles: as an expression meaning "not
 implemented" (`blame m1778;`) and as a statement wrapper that turned its body into an infinite
 loop with an implicit replacement (`m1778 { break; }` in `loops.fin`, `m1778 kilo = 19;` in

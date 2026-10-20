@@ -1,5 +1,7 @@
 # Events, protocols and providers are three mechanisms, told apart by what the library may produce
 
+**Status:** Accepted
+
 A library extends the compiler through exactly one of three mechanisms, and which one it needs is
 decided by what it produces rather than by what it is about.
 

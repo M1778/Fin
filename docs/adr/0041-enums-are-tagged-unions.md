@@ -1,5 +1,7 @@
 # Enums are tagged unions with 32-bit discriminants
 
+**Status:** Accepted
+
 An enum lowers representationally as a tagged union with a 32-bit (`i32`) integer
 discriminant tag. A fieldless enum consists solely of this 32-bit tag. An enum with
 member payloads consists of the 32-bit tag followed by a payload buffer sized to the
@@ -36,3 +38,4 @@ maximum member payload and aligned to the maximum member alignment:
   - Positional member access (`.0`, `.1`) loads from the payload buffer at the member offset.
   - Member comparisons (`enum == Ok(T)`, ADR 0037) and reflection (`getkeyid(enum)`) read
     the 32-bit tag and compare against the member's constant identifier.
+See also: ADR 0040 (nullable values are tagged discriminants; nullable pointers use the null sentinel).

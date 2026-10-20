@@ -1,5 +1,7 @@
 # The conditional expression is written `cond : then ? otherwise`
 
+**Status:** Accepted
+
 Fin's conditional expression puts both arms after the condition with `:` first and `?` second, so
 `result == -1 : false ? true` yields `false` when the condition holds. The grammar shipped the C
 order (`cond ? then : otherwise`) and no Fin code ever used it; the two sites in the corpus that

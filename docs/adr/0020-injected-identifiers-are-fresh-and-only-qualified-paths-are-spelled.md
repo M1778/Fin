@@ -1,5 +1,7 @@
 # Injected code mints fresh identifiers and can spell only module-qualified paths
 
+**Status:** Accepted
+
 Code that a handler injects gets its identifiers two ways and no third. `compiler.code.fresh()` mints an
 identifier that cannot collide with anything, and every binding the injected code introduces uses one.
 `compiler.code.ident(name)` builds a reference to an existing declaration and accepts **module-qualified

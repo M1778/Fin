@@ -48,6 +48,10 @@ NON_TEXT_SUFFIXES = {
 def check_adr_corpus():
     filings = {}
     for path in sorted(ADR_DIR.glob("*.md")):
+        # README.md is the index, not a filing: exempted so the numbering
+        # corpus stays exactly the NNNN-name.md rulings it points at via links.
+        if path.name == "README.md":
+            continue
         naming = ADR_NAME.match(path.name)
         if not naming:
             raise SystemExit(

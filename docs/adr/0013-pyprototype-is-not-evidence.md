@@ -1,5 +1,7 @@
 # `pyprototype/` is not evidence
 
+**Status:** Accepted
+
 `pyprototype/` may be read for ideas. It may never be cited as authority for what Fin is, and its
 design is not being ported. When it disagrees with `tests/samples/`, the samples win without argument.
 

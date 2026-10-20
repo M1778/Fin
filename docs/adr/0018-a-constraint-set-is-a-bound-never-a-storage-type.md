@@ -1,5 +1,7 @@
 # A constraint set is a bound, never a storage type
 
+**Status:** Accepted
+
 `type Number = int | uint | float | ...` declares a **constraint set**: a set of types admissible where a
 bound is expected. It is not a type a value can have. `let x <Number>;` and `fun f(x: Number)` are
 diagnostics at the point of use, naming the declaration.

@@ -1,5 +1,7 @@
 # Target triple is pinned to the host
 
+**Status:** Accepted
+
 ## Context
 
 Issue #39 asked whether `--target <triple>` should be supported for non-host targets (e.g.

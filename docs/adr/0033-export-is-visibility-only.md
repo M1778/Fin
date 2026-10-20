@@ -1,5 +1,7 @@
 # `#[export]` is import-visibility; emission stays shared
 
+**Status:** Accepted
+
 `#[export]` on a declaration means the module system hands it to importers.
 It does not change what the backend emits: every symbol this compiler
 publishes -- methods, constructors, operators, generic instances -- keeps the

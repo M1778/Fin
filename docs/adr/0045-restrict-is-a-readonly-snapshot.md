@@ -1,5 +1,7 @@
 # `restrict` is a readonly snapshot, not `&self`
 
+**Status:** Accepted
+
 `rptr.restrict` is a heap sibling built by `alias()` -- owned=false,
 borrowed=false -- instead of `self.restrict = &self` in the constructor.
 The snapshot is what `const.fin:83` always documented: "a copy of itself

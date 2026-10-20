@@ -1,5 +1,7 @@
 # A field's destructor runs from its parent's, and the compiler generates the parent when there is none
 
+**Status:** Accepted
+
 If a struct has a field whose type has a destructor, that destructor is called from the parent's
 destructor. If the parent declares no destructor, the compiler generates one. `has_destructor` already
 exists on the semantic type (`src/types/StructType.hpp:32`), so `compiler.structs.has_destructor` lets a

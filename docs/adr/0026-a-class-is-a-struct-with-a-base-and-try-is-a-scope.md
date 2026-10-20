@@ -1,5 +1,7 @@
 # A class is a struct that may name a base, and `try` is a scope
 
+**Status:** Accepted
+
 Two rulings, recorded together because both were made on 2026-08-28 and both are about
 `tests/samples/readonly.fin`, which needed each of them.
 

@@ -1,5 +1,9 @@
 # `finc` has a machine contract, and the package manager is its first consumer
 
+**Status:** Accepted
+
+> 2026-10-20 status: shipped — the contract is codified in docs/finc-interface-contract.md and pinned in-tree (`kFincContractVersion = 3`, src/driver/Version.hpp:38); the Context violations are long since repaired (full suite 2931/2931).
+
 `finc`'s command line, exit codes and diagnostic streams are a stable interface with a second program
 on the other end of it, not a convenience for whoever is typing. Concretely: diagnostics go to
 stderr and stdout is reserved; exit codes are `0` success, `1` diagnostics, `2` usage or CLI misuse,

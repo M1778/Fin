@@ -1,5 +1,7 @@
 # `any` maps as an opaque blob; its values do not lower
 
+**Status:** Accepted
+
 `any` is `{i8*, i64}` (payload, typeid) for layout and signatures only: big
 enough to hold, with no claim about what a value in it means. That unblocks
 types that mention `any` without giving it semantics -- a `fn(any) -> int`

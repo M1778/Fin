@@ -1,5 +1,7 @@
 # Event handlers read anything and write only at the event point
 
+**Status:** Accepted
+
 A library subscribes to a compile-time event in two steps: `#[on(variable_scope_exit)]` on a
 `@special` function declares the handler, and a `compiler.events.enable(handler)` call inside an init
 special function arms it. A handler may read any part of the program — every declaration, every

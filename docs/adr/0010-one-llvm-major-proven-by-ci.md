@@ -1,5 +1,9 @@
 # One LLVM major for every platform, and CI is what proves it
 
+**Status:** Accepted
+
+> 2026-10-20 status: the one-major rule stands, now enforced in CMakeLists.txt rather than merely documented; the pinned major is 22 since 2026-08-27 (commit 19b465c — 18 cannot be installed here), not 18 as written below.
+
 `finc` is built against a single LLVM major version — 18 — supplied the same way on every platform,
 and a GitHub Actions matrix builds and tests it on every supported platform on every change. The
 release archives the package manager downloads are produced by that same matrix.

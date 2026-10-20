@@ -1,5 +1,7 @@
 # `compiler.components.X` and `compiler.X` are different namespaces with different jobs
 
+**Status:** Accepted
+
 `compiler.components.<name>` is a **component reference** — a compile-time value naming one component,
 plus questions *about* that component. `compiler.<name>.<member>` is the **use** of that component —
 its operations and its constants. Grant and describe on one side, do work on the other.

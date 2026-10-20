@@ -1,5 +1,9 @@
 # Pattern matching (`match`) dispatches over tags the language already has
 
+**Status:** Accepted
+
+> 2026-10-20 status: shipped (commit 19ffc10, 2026-10-11 — match lowering stage 1; `tests/samples/match.fin` is normative `ok`; full suite 2931/2931).
+
 ## Context
 
 Fin has no `match` keyword and no pattern-matching statement or expression:

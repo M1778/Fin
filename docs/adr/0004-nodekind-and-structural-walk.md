@@ -1,5 +1,7 @@
 # AST nodes carry a kind discriminator and traversal has a default
 
+**Status:** Accepted
+
 The AST had one dispatch mechanism: a 55-method pure-virtual `Visitor` that every consumer
 implements in full. We are adding two things alongside it — a `NodeKind` discriminator on
 `ASTNode`, and a `StructuralWalk` base class that visits children by default so a consumer

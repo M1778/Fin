@@ -1,5 +1,9 @@
 # The derive_hash walk mixes field values, not object bytes
 
+**Status:** Accepted
+
+> 2026-10-20 status: shipped (commit 300458f — FNV-1a 64 over field values in declaration order, one walk on both compiler lanes); `derive_eq`/`derive_encode` stay blocked pending the R3 owner decision (docs/reflect-derive-plan.md §4); issue #53 CLOSED (ledger comment 6280766517: scopes A+B shipped; full suite 2931/2931).
+
 ## Context
 
 Issue #53's Scope B asks for explicit derives, hash first. A hash function is an

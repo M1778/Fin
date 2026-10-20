@@ -1,5 +1,7 @@
 # Compile-time execution is a tree-walking interpreter inside the compiler
 
+**Status:** Accepted
+
 A `@special` function runs during semantic analysis, executed by an interpreter that walks the AST
 on the host. `$type` is a real compiler-side object with structure the interpreter can inspect, and
 a compiler component is a native C++ function bound into the interpreter's environment. The

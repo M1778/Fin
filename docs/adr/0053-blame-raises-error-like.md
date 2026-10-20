@@ -1,5 +1,7 @@
 # A `blame` raises `string | Error-subtype-or-implements | any/object`
 
+**Status:** Accepted
+
 ## Context
 
 Issue #97 tracked two `KnownDefect_Blame` tests, the two halves of one ruling

@@ -1,5 +1,9 @@
 # enum_from! answers an enum value's member name
 
+**Status:** Accepted
+
+> 2026-10-20 status: shipped (commit cdc9331 — both compiler lanes land in finc/codegen.fin ~:11984; mx whitelist finc/driver.fin ~:1852, pass-through arity gate ~:2259); issue #53 CLOSED (ledger comment 6280766517: scopes A+B shipped; full suite 2931/2931).
+
 ## Context
 
 Issue #53's Scope B item 2: the one `!` helper the reflection refusals promise --
@@ -102,3 +106,4 @@ ADR 0041 (`Fruit::Plum` names the member the bare spelling names, tags are the
 ids this op dispatches on); ADR 0034 (EnumType as any-implements: the value
 argument arrives concrete, no runtime box is read -- the boxed dispatch is the
 gap that stays recorded beside getkeyid's).
+See also: ADR 0058 (the derive chain beside it) and docs/reflect-derive-plan.md (the live plan and its §6 status).

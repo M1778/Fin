@@ -1,5 +1,7 @@
 # `Any<I>` narrows to implementors of `I`
 
+**Status:** Accepted
+
 A bound written `Any<Printable>` -- and a bare `any implements <I>` in the
 same spirit -- means anything implementing the interface: method calls
 through such a value resolve against the bound. This is what makes
@@ -19,3 +21,4 @@ the arguments to -- `type Any = any` takes none today), and bound-checked
 method resolution through the bound's interface. Until both land, `Type 'X'
 does not have methods` stands, and it stands for missing machinery rather
 than a missing ruling.
+See also: ADR 0034 (`any` maps as an opaque blob; this rules what a bound over one means).

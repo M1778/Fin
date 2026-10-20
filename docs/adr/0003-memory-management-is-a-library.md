@@ -1,5 +1,7 @@
 # Memory management is written in Fin, not built into the compiler
 
+**Status:** Accepted
+
 Fin has neither a garbage collector nor a borrow checker. The compiler instead exposes its own
 machinery as compiler components, and memory-management strategies are written in Fin against
 them: an ownership model, a reference-counted pointer, or a full garbage collector is a library

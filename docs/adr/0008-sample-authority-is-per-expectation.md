@@ -1,5 +1,7 @@
 # Sample authority lives in per-construct expectations, not per-file labels
 
+**Status:** Accepted
+
 Every sample carries `//@` expectations — `ok`, `error <line>:<col> "<msg>"`, or `unimplemented
 "<reason>"` — and those, not the file's normative-or-aspirational label, decide whether the compiler
 is at fault. The label survives as a default and a reading aid. A sample carrying no expectation is

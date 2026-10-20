@@ -1,7 +1,7 @@
 # ADR 0043: Self-hosting compiler lowers to LLVM IR, refusing C generation
 
 **Date**: 2026-09-21
-**Status**: accepted
+**Status**: Accepted
 **Deciders**: M1778, Antigravity
 
 ## Context

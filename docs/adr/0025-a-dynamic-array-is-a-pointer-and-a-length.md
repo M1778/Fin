@@ -1,5 +1,7 @@
 # A dynamic `[T]` is a pointer and a length, and nothing else
 
+**Status:** Accepted
+
 `[T]` — an array with no extent in its type — is represented as two words:
 
 ```

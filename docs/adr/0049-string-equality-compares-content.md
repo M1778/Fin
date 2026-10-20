@@ -1,5 +1,7 @@
 # String equality compares content
 
+**Status:** Accepted
+
 ## Context
 
 `==` on two strings was a pointer `ICmpEQ` at runtime

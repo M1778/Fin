@@ -1,5 +1,7 @@
 # A module body calls its own module's function, whatever the import order
 
+**Status:** Accepted
+
 ## Context
 
 Two stdlib modules publish one free-function name with different signatures

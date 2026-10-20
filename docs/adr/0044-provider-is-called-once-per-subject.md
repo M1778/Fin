@@ -1,5 +1,7 @@
 # A provider is called once per subject, and the compiler keeps the answer
 
+**Status:** Accepted
+
 The owner accepted `provider` as the third mechanism (docs/compiler-api.md Q1):
 a `@special` function the compiler calls once per subject, whose returned
 value the compiler stores and emits, declared `#[provides(<slot>)]`. Exclusive

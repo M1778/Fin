@@ -1,5 +1,7 @@
 # Nullable values are tagged discriminants; nullable pointers use null sentinel
 
+**Status:** Accepted
+
 A nullable pointer (`(&T)?`) or nullable function (`fn?`) uses the standard 8-byte
 pointer representation where `null` is `0x0`. A nullable value type (`int?`, `float?`,
 `struct?`) lowers as a tagged aggregate `{ T, bool }`: a payload of type `T` paired with

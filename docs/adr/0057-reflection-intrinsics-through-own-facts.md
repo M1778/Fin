@@ -1,5 +1,9 @@
 # The reflected intrinsics fold the compiler's own facts through the nearest literal spelling
 
+**Status:** Accepted
+
+> 2026-10-20 status: shipped (commit 47ceb96 — `name_of`, `size_of`, `field_count`, `offset_of` fold from their own facts; `fields_of`/`FieldInfo` remain blocked — a runtime owner for the field-name string is still needed); issue #53 CLOSED (ledger comment 6280766517: scopes A+B shipped; full suite 2931/2931).
+
 ## Context
 
 Issue #53's Scope A asks for read-only introspection that runs, and the resolving

@@ -1,5 +1,7 @@
 # Imported templates reach the backend through a loader-backed registry
 
+**Status:** Accepted
+
 `finn` compiles one root file per invocation and hands `finc` source
 directories (`-I`, `--fin-libs`); it builds no per-dependency objects, passes
 none to link, and pins sources by content hash. Whole-program source

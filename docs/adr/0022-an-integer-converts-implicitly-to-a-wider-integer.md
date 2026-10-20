@@ -1,5 +1,7 @@
 # An integer converts implicitly to a wider integer, and never to a narrower one
 
+**Status:** Accepted
+
 `int` → `long`, `int` → `ulong`, `ushort` → `int` are implicit and need no cast. `ulong` → `int`
 is a diagnostic. The rule is **width**, taken from the compiler's one scalar table, and it is
 about integers only.

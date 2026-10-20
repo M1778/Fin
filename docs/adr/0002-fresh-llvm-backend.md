@@ -1,5 +1,7 @@
 # The LLVM backend is written fresh, not ported from `pyprototype`
 
+**Status:** Accepted
+
 `pyprototype/src/codegen/` is a working LLVM IR emitter covering monomorphisation, type
 erasure, `typeof`, and `as_ptr`, and porting it to C++ would have given us a differential
 oracle against the new front end almost for free. We are writing a new backend instead,

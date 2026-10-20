@@ -1,5 +1,7 @@
 # An interface reference is `{data, vtable}`, and the vtable carries field offsets
 
+**Status:** Accepted
+
 An interface used as a runtime type is **two words**: a pointer to the implementor's
 storage, and a pointer to a per-`(struct, interface)` vtable.
 

@@ -1,5 +1,7 @@
 # A diamond base is shared once; any other second base is still refused
 
+**Status:** Accepted
+
 `deeptest2.fin:83` writes `MultiInherit: <Person, Student>` where `Student: <Person>`, so `name` arrives twice. We share the ancestor: `MultiInherit` lays out as `Student` plus its own fields, with `Person`'s bytes once at offset 0, and `super::<Person>::name` and `super::<Student>::name` name the same slot. Both upcasts stay free.
 
 ## Considered Options

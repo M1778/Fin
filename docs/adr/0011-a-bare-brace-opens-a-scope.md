@@ -1,5 +1,7 @@
 # A bare brace in statement position opens a scope
 
+**Status:** Accepted
+
 `{` at the start of a statement always opens a block. A brace-initialised value only ever appears
 after something that introduces it — `st{}`, `= map!{...}`, `= {...}` — so the two never compete for
 the same position.

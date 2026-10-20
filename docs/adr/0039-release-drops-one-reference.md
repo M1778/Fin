@@ -1,5 +1,7 @@
 # `release()` drops one reference
 
+**Status:** Accepted
+
 `rptr::release` decrements the shared count and frees the value at zero; it
 nulls no handle, not even its own. A value with handles outstanding keeps
 reading through them after a release, and `const.fin:96` -- which expected a

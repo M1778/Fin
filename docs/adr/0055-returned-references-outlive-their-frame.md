@@ -1,5 +1,7 @@
 # A returned reference must name storage that outlives the call
 
+**Status:** Accepted
+
 ## Context
 
 Issue #99 tracked a known defect: the backend accepted an escaping interface

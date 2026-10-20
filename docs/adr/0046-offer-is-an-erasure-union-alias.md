@@ -1,5 +1,7 @@
 # `Offer<T, E>` is an erasure-union alias
 
+**Status:** Accepted
+
 `Offer<T, E>` (lib/std/types.fin) is the union `T | E` at check time and
 nothing at runtime: a value of an instantiation is stored as one of the
 alternatives with no tag of its own. Its only use in the corpus is a generic
