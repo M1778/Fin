@@ -3,9 +3,9 @@
 //
 // Reaches standard C library I/O facilities (fopen, fclose, fseek, ftell,
 // fread, fwrite, fputs, remove, open, close, mkdir, rmdir, rename, mkdtemp)
-// and the directory walk through `getdirentries` (`readdir`'s record layout
-// is not one thing across darwin x86_64 and arm64; `walk_dir` spells that
-// page out below).
+// and the directory walk through `getdirentries` (the record shape behind
+// that call differs per platform: 64-bit-inode on glibc, legacy on darwin;
+// `walk_dir` spells that page out below).
 //
 // WINDOWS is namedly unimplemented the way sync.fin spells it: a child that
 // imports fs::std refuses at the Windows link on this module's `mkdtemp`,
@@ -270,19 +270,17 @@ pub fun? mk_tmp_dir(prefix: string) <string> {
 // There is no pointer arithmetic in this library -- a `&char` does not add
 // an integer and does not index -- so the records are read out of a `[char]`
 // buffer filled by `getdirentries`. That one libc symbol exists unchanged
-// on Linux and on macOS and carries the 64-bit-inode records on both (LP64:
-// `off_t` is 64-bit everywhere `getdirentries` is declared), which
-// is why this walk does not go through `readdir`: the plain `readdir` symbol
-// names the legacy 32-bit-inode ABI on darwin x86_64 and the 64-bit one on
-// darwin arm64, so records read through a fixed layout would break on one
-// of the two. The name's byte offset still has to come off the record, and
-// that differs per platform: glibc (Linux) keeps `d_reclen` at bytes 16..17
-// and the NUL-terminated name at 19, where byte 19 is the name's first
-// character (never NUL); the darwin 64-bit record keeps the same `d_reclen`
-// at 16..17, `d_namlen` at 18..19 -- byte 19 is 0 whenever the name fits in
-// the 255 characters NAME_MAX allows -- and the name at 21. `d_reclen` sits
-// at the same offset on both, so the window blame is read before the branch,
-// and a `d_reclen` outside it refuses loudly rather than guessing.
+// on Linux and on macOS, which is why this walk does not go through
+// `readdir`: there the exported symbol hands the legacy 32-bit-inode ABI on
+// darwin x86_64 and the 64-bit one on darwin arm64, and getdirentries' own
+// records differ by platform too -- measured on both CI arches, the macOS
+// syscall keeps filling the legacy record (`d_reclen` at 4..5, `d_namlen`
+// at 7, name at 8) that glibc replaced with the 64-bit-inode kind
+// (`d_reclen` at 16..17, name at 19). The two shapes are told apart per
+// record on byte 7, which is 0 on every 64-bit-inode record (the top byte
+// of `d_ino`) and never 0 on the legacy kind (`d_namlen`, at least 1).
+// Each shape's window blame is read before the name, and a reclen outside
+// it refuses loudly rather than guessing.
 #[export]
 pub fun walk_dir(path: string) <[string]> {
     let nothing <[string]> = new [string, 0]{};
@@ -302,10 +300,19 @@ pub fun walk_dir(path: string) <[string]> {
             at = 0;
             if (filled <= 0) { break; }
         }
-        let reclen <int> = cast<int>(raw[at + 16]) + cast<int>(raw[at + 17]) * 256;
-        blame reclen >= 21 && reclen < 320, "dirent d_reclen outside the layout walk_dir reads";
-        let name_start <int> = 19;
-        if (raw[at + 19] == cast<char>(0)) { name_start = 21; }
+        // Two record shapes share this buffer (see walk_dir's header): byte 7
+        // picks the layout per record, each branch windows its own reclen.
+        let reclen <int> = 0;
+        let name_start <int> = 0;
+        if (raw[at + 7] == cast<char>(0)) {
+            reclen = cast<int>(raw[at + 16]) + cast<int>(raw[at + 17]) * 256;
+            blame reclen >= 21 && reclen < 320, "dirent d_reclen outside the 64-bit-record layout walk_dir reads";
+            name_start = 19;
+        } else {
+            reclen = cast<int>(raw[at + 4]) + cast<int>(raw[at + 5]) * 256;
+            blame reclen >= 12 && reclen < 320, "dirent d_reclen outside the legacy record layout walk_dir reads";
+            name_start = 8;
+        }
         let name_end <int> = name_start;
         while (name_end < reclen && raw[at + name_end] != cast<char>(0)) {
             name_end = name_end + 1;
@@ -333,10 +340,19 @@ pub fun walk_dir(path: string) <[string]> {
             at = 0;
             if (filled <= 0) { break; }
         }
-        let reclen <int> = cast<int>(raw[at + 16]) + cast<int>(raw[at + 17]) * 256;
-        blame reclen >= 21 && reclen < 320, "dirent d_reclen outside the layout walk_dir reads";
-        let name_start <int> = 19;
-        if (raw[at + 19] == cast<char>(0)) { name_start = 21; }
+        // Two record shapes share this buffer (see walk_dir's header): byte 7
+        // picks the layout per record, each branch windows its own reclen.
+        let reclen <int> = 0;
+        let name_start <int> = 0;
+        if (raw[at + 7] == cast<char>(0)) {
+            reclen = cast<int>(raw[at + 16]) + cast<int>(raw[at + 17]) * 256;
+            blame reclen >= 21 && reclen < 320, "dirent d_reclen outside the 64-bit-record layout walk_dir reads";
+            name_start = 19;
+        } else {
+            reclen = cast<int>(raw[at + 4]) + cast<int>(raw[at + 5]) * 256;
+            blame reclen >= 12 && reclen < 320, "dirent d_reclen outside the legacy record layout walk_dir reads";
+            name_start = 8;
+        }
         let name_end <int> = name_start;
         while (name_end < reclen && raw[at + name_end] != cast<char>(0)) {
             name_end = name_end + 1;
