@@ -325,7 +325,10 @@ pub fun debug(msg: string) <noret> { emit(msg, 0, json_now()); }
 #[export]
 pub fun info(msg: string) <noret> { emit(msg, 1, json_now()); }
 
+// `warn` is a libc export on BSD/macOS (`<err.h>`): it would preempt this weak
+// definition there, so the published symbol is renamed while the Fin name stays.
 #[export]
+#[llvm_name="fin_warn"]
 pub fun warn(msg: string) <noret> { emit(msg, 2, json_now()); }
 
 #[export]
