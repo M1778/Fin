@@ -164,14 +164,14 @@ pub fun copy_file(src: string, dst: string) <bool> {
 #[llvm_name="closedir"]
 @define fs_closedir(dirp: &void) <int>;
 
-#[llvm_name="readdir"]
-@define fs_readdir(dirp: &void) <string>;
+#[llvm_name="open"]
+@define fs_open(path: string, flags: int, ...) <int>;
 
-#[llvm_name="rewinddir"]
-@define fs_rewinddir(dirp: &void) <noret>;
+#[llvm_name="close"]
+@define fs_close(fd: int) <int>;
 
-#[llvm_name="memcpy"]
-@define fs_memcpy(dst: &char, src: string, count: ulong) <&char>;
+#[llvm_name="getdirentries64"]
+@define fs_getd64(fd: int, buf: &char, count: ulong, base: &long) <long>;
 
 #[llvm_name="mkdtemp"]
 @define fs_mkdtemp(template: &char) <string>;
@@ -256,64 +256,94 @@ pub fun? mk_tmp_dir(prefix: string) <string> {
 }
 
 // The entries of one directory (not recursive), with `.` and `..` left out,
-// in `readdir`'s order.
+// in the directory's order.
 //
 // There is no pointer arithmetic in this library -- a `&char` does not add
-// an integer and does not index -- so `readdir`'s dirent pointer is copied
-// whole through `fs_memcpy` into a `[char]` buffer and read back there. The
-// Linux x86-64 glibc dirent layout is what makes byte offsets possible at
-// all: `d_reclen` is bytes 16..17 (little-endian, so it also bounds the
-// entry) and the NUL-terminated name starts at byte 19. Both reads go
-// through that fixed layout, and a `d_reclen` outside the window this walk
-// was compiled for refuses loudly rather than guessing.
+// an integer and does not index -- so the records are read out of a `[char]`
+// buffer filled by `getdirentries64`. That one libc symbol exists unchanged
+// on Linux and on macOS and carries the 64-bit-inode records on both, which
+// is why this walk does not go through `readdir`: the plain `readdir` symbol
+// names the legacy 32-bit-inode ABI on darwin x86_64 and the 64-bit one on
+// darwin arm64, so records read through a fixed layout would break on one
+// of the two. The name's byte offset still has to come off the record, and
+// that differs per platform: glibc (Linux) keeps `d_reclen` at bytes 16..17
+// and the NUL-terminated name at 19, where byte 19 is the name's first
+// character (never NUL); the darwin 64-bit record keeps the same `d_reclen`
+// at 16..17, `d_namlen` at 18..19 -- byte 19 is 0 whenever the name fits in
+// the 255 characters NAME_MAX allows -- and the name at 21. `d_reclen` sits
+// at the same offset on both, so the window blame is read before the branch,
+// and a `d_reclen` outside it refuses loudly rather than guessing.
 #[export]
 pub fun walk_dir(path: string) <[string]> {
     let nothing <[string]> = new [string, 0]{};
     if (path == null) { return nothing; }
-    let dir <&void> = fs_opendir(path);
-    if (dir == null) { return nothing; }
-
-    let raw <[char]> = new [char, 320]{};
+    let raw <[char]> = new [char, 4096]{};
+    let seek <[long]> = new [long, 1]{};
 
     // Pass one counts the entries this answer will hold.
+    let fd <int> = fs_open(path, 0);
+    if (fd < 0) { delete raw; delete seek; return nothing; }
+    let filled <long> = fs_getd64(fd, &raw[0], cast<ulong>(4096), &seek[0]);
+    let at <int> = 0;
     let count <int> = 0;
     while (true) {
-        let ent <string> = fs_readdir(dir);
-        if (ent == null) { break; }
-        let head <&char> = fs_memcpy(&raw[0], ent, cast<ulong>(18));
-        let reclen <int> = cast<int>(raw[16]) + cast<int>(raw[17]) * 256;
+        if (at >= filled) {
+            filled = fs_getd64(fd, &raw[0], cast<ulong>(4096), &seek[0]);
+            at = 0;
+            if (filled <= 0) { break; }
+        }
+        let reclen <int> = cast<int>(raw[at + 16]) + cast<int>(raw[at + 17]) * 256;
         blame reclen >= 21 && reclen < 320, "dirent d_reclen outside the layout walk_dir reads";
-        let body <&char> = fs_memcpy(&raw[0], ent, cast<ulong>(reclen));
-        if (raw[19] == cast<char>(46) && (raw[20] == cast<char>(0) || (raw[20] == cast<char>(46) && raw[21] == cast<char>(0)))) {
+        let name_start <int> = 19;
+        if (raw[at + 19] == cast<char>(0)) { name_start = 21; }
+        let name_end <int> = name_start;
+        while (name_end < reclen && raw[at + name_end] != cast<char>(0)) {
+            name_end = name_end + 1;
+        }
+        blame name_end < reclen, "dirent name is not NUL terminated inside its record";
+        if (raw[at + name_start] == cast<char>(46) && (raw[at + name_start + 1] == cast<char>(0) || (raw[at + name_start + 1] == cast<char>(46) && raw[at + name_start + 2] == cast<char>(0)))) {
+            at = at + reclen;
             continue;
         }
         count = count + 1;
+        at = at + reclen;
     }
+    fs_close(fd);
 
     // Pass two spells each name out of the same buffer.
-    fs_rewinddir(dir);
+    fd = fs_open(path, 0);
+    if (fd < 0) { delete raw; delete seek; return nothing; }
+    filled = fs_getd64(fd, &raw[0], cast<ulong>(4096), &seek[0]);
+    at = 0;
     let out <[string]> = new [string, count]{};
     let fill <int> = 0;
     while (fill < count) {
-        let ent <string> = fs_readdir(dir);
-        if (ent == null) { break; }
-        let head <&char> = fs_memcpy(&raw[0], ent, cast<ulong>(18));
-        let reclen <int> = cast<int>(raw[16]) + cast<int>(raw[17]) * 256;
-        blame reclen >= 21 && reclen < 320, "dirent d_reclen outside the layout walk_dir reads";
-        let body <&char> = fs_memcpy(&raw[0], ent, cast<ulong>(reclen));
-        if (raw[19] == cast<char>(46) && (raw[20] == cast<char>(0) || (raw[20] == cast<char>(46) && raw[21] == cast<char>(0)))) {
-            continue;
+        if (at >= filled) {
+            filled = fs_getd64(fd, &raw[0], cast<ulong>(4096), &seek[0]);
+            at = 0;
+            if (filled <= 0) { break; }
         }
-        let name_end <int> = 19;
-        while (name_end < reclen && raw[name_end] != cast<char>(0)) {
+        let reclen <int> = cast<int>(raw[at + 16]) + cast<int>(raw[at + 17]) * 256;
+        blame reclen >= 21 && reclen < 320, "dirent d_reclen outside the layout walk_dir reads";
+        let name_start <int> = 19;
+        if (raw[at + 19] == cast<char>(0)) { name_start = 21; }
+        let name_end <int> = name_start;
+        while (name_end < reclen && raw[at + name_end] != cast<char>(0)) {
             name_end = name_end + 1;
         }
-        out[fill] = from_chars(raw, 19, name_end - 19);
+        blame name_end < reclen, "dirent name is not NUL terminated inside its record";
+        if (raw[at + name_start] == cast<char>(46) && (raw[at + name_start + 1] == cast<char>(0) || (raw[at + name_start + 1] == cast<char>(46) && raw[at + name_start + 2] == cast<char>(0)))) {
+            at = at + reclen;
+            continue;
+        }
+        out[fill] = from_chars(raw, at + name_start, name_end - name_start);
         fill = fill + 1;
+        at = at + reclen;
     }
+    fs_close(fd);
 
     delete raw;
-    fs_closedir(dir);
+    delete seek;
     return out;
 }
 
