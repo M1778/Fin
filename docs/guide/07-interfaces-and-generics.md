@@ -56,7 +56,7 @@ fun main() <noret> {
 
 `@implements Type::member = expression;` is another member-attachment form.
 Its syntax is distinct from a special-function call `@implements(type, interface)`.
-Enum implementations have runtime limits because enum payloads themselves do.
+An `implements` block on an enum is refused in codegen today.
 
 ## Bounds and specialization
 

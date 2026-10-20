@@ -141,6 +141,7 @@ file — a bad flag, a file that could not be read. Check for null; do not print
 ```
 -o <path>              Build an executable at this path (or name the object with -c)
 -c                     Emit an object file without linking
+-g, --debug-symbols    Emit DWARF debug info in the object file (default off)
 -O0, -O1, -O2, -O3     Optimisation level for '-o' and '-c' builds (default -O0)
 -I, --include <path>   Add a module search path
 --target <triple>      Target triple, host by default; non-host triples are refused

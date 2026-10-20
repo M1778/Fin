@@ -13,7 +13,7 @@ include complete programs you can copy into a `.fin` file.
 | [5. Functions](05-functions.md) | Parameters, callbacks, lambdas, defaults, foreign functions |
 | [6. Structs and classes](06-structs-and-classes.md) | Fields, methods, construction, cleanup, inheritance |
 | [7. Interfaces and generics](07-interfaces-and-generics.md) | Bounds, implementations, runtime interface references |
-| [8. Enums](08-enums-and-pattern-data.md) | Tags, payload syntax, runtime limits |
+| [8. Enums](08-enums-and-pattern-data.md) | Tags, payload syntax, member naming |
 | [9. Arrays and pointers](09-arrays-and-pointers.md) | Buffers, prototypes, allocation, ownership |
 | [10. Modules](10-modules-and-imports.md) | Imports, names, paths, multi-file limits |
 | [11. Macros and preprocessing](11-macros-and-preprocessor.md) | Quotes, `format!`, attributes, compiler components |

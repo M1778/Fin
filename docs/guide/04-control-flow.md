@@ -210,7 +210,7 @@ fun main() <noret> {
 
 A nested function is visible from its declaration to the end of its containing
 scope. It can recurse and can be used as a function value. It cannot capture the
-enclosing function's locals; pass those values as arguments. The same restriction
-applies to lambdas.
+enclosing function's locals; pass those values as arguments. A lambda does close
+over its scope; see [functions](05-functions.md).
 
 Next: [functions](05-functions.md).

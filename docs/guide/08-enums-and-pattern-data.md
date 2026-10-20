@@ -43,9 +43,10 @@ fun main() <noret> {
 }
 ```
 
-The backend refuses generic enums and enums with payloads. Their syntax is useful
-for understanding library declarations, but a successful type-check does not
-make `Result`, `IOResult`, or their methods runnable.
+The backend refuses a **generic** payload enum — which is what the example above
+is — so type-checking alone does not make `Result`, `IOResult`, or their methods
+runnable. A non-generic payload enum does build and run as a tagged union
+([ADR 0041](../adr/0041-enums-are-tagged-unions.md)).
 
 Payload member access uses `.0`, `.1`, and so on. The number selects a payload
 slot of the current member, not a member of the enum. If members disagree about
@@ -88,9 +89,11 @@ must preserve the relationship between status and fields.
 Fin has no `match` statement. Use `if` and plain-enum comparisons for executable
 branches. `enums::std` declares `getkeyid(value)` and `keyidof(member)`; `keyidof`
 expects the `$enum_member` meta-type. A bare alias to the member can type-check
-where a qualified expression resolves as a constructor or value instead.
+where a qualified expression resolves as a constructor or value instead. The
+builtin macro `enum_from!(value)` answers a value's member name
+([ADR 0059](../adr/0059-enum-from-answers-the-member-name.md)).
 
-The library's enum reflection declarations and attached `Result` methods are
-not evidence that payload dispatch executes. See [the library reference](12-standard-library-tour.md).
+Payload enum methods such as `Result`'s still do not dispatch at runtime; the
+enum helpers above do run on real values. See [the library reference](12-standard-library-tour.md).
 
 Next: [arrays and pointers](09-arrays-and-pointers.md).

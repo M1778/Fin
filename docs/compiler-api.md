@@ -4,7 +4,10 @@ For current application guidance, read [the agent guide](agent-guide.md) and
 [the compiler-component status](guide/11-macros-and-preprocessor.md#special-functions-and-compiler-components).
 The substrate measurements below describe the design's original baseline, not a
 live support matrix. Component names and grants now have semantic checking;
-that does not imply the full execution design has been implemented.
+that does not imply the full execution design has been implemented, and the
+`compiler.*` component operations remain resolve-only. What does evaluate today
+is the narrow reflect surface of ADR 0057–0059 and the wave-5 protocols and
+providers (the [!NOTE]s below mark each landing).
 
 Design of the compile-time compiler API: the **compiler component** surface and the **event**
 system. Ratified before implementation, per the project owner's mandate that this be "a strong
@@ -51,6 +54,22 @@ wiring job.
 > - **Enum payloads & member types**: Enums support payloads and lower as tagged unions `{ i32, [MaxPayload x i8] }` per ADR 0041.
 > - **Meta-types (`$type`, `$struct`, `$interface`, `$enum_member`)**: Registered and resolved as distinct semantic meta-types per ADR 0035 and ADR 0042.
 > - **`const` parameters**: Parsed and enforced in semantic analysis.
+> - **Quote analysis inverted inside handlers** (wave-4 step 19): inside a handler for a
+>   known event a quote's block is not analysed at the declaration; outside handlers it
+>   still walks as code.
+> - **Reflect builtins** (`@type_name`, `@type_size`, `@field_count`, `@field_offset`):
+>   evaluate at the call site from the compiler's own facts (ADR 0057); `fields_of` waits
+>   on a runtime owner for the field-name string; `derive_hash` (ADR 0058) and
+>   `enum_from!` (ADR 0059) build on the same model. The component-route evaluation these
+>   stand in for (§2.2's projection principle applied through `compiler.*`) has not started.
+> - **Quote analysis inverted inside handlers** (wave-4 step 19): inside a handler for a
+>   known event a quote's block is not analysed at the declaration; outside handlers it
+>   still walks as code.
+> - **Reflect builtins** (`@type_name`, `@type_size`, `@field_count`, `@field_offset`):
+>   evaluate at the call site from the compiler's own facts (ADR 0057); `fields_of` waits
+>   on a runtime owner for the field-name string; `derive_hash` (ADR 0058) and
+>   `enum_from!` (ADR 0059) build on the same model. The component-route evaluation these
+>   stand in for (§2.2's projection principle applied through `compiler.*`) has not started.
 
 | Thing the design needs | Measured state |
 | --- | --- |
@@ -77,7 +96,8 @@ wave 4**, and it is the largest single item in it. See Q7 for where layout truth
 **`quote` is currently analysed as live code.** `Analyzer_Expr.cpp:541` walks a quote's block with
 the ordinary analyzer, so `quote { f($v); }` reports `Undefined function or type 'f'` at the
 *definition* site. A quote is data, not code, and this must be inverted before any handler can
-return one.
+return one. *Status:* inverted inside handlers (wave-4 step 19); outside them the block still
+walks as code.
 
 **A constant must live with the component that consumes it.** ADR 0012 makes `#[use(...)]` cover the
 whole operations layer, constants included. I had proposed exempting constants; that is **withdrawn**
@@ -517,7 +537,7 @@ interface.
 | `has_field` | `(s: $struct, name: string) <bool>` | read-only | — | The check that makes `select_field`'s denullify safe. |
 | `field_count` | `(s: $struct) <int>` | read-only | — | |
 | `field_type` | `(s: $struct, name: string) <?$type>` | read-only | — | |
-| `field_visibility` | `(s: $struct, name: string) <int>` | read-only | — | Valued from `compiler.structs.Vis*` (§2.1b). Must distinguish `pub`, `priv` and `readonly` — and `readonly` **does not exist in the compiler** (§0.2). |
+| `field_visibility` | `(s: $struct, name: string) <int>` | read-only | — | Valued from `compiler.structs.Vis*` (§2.1b). Must distinguish `pub`, `priv` and `readonly` — all three are tracked on `FieldInfo` today (§0.2's update). |
 | `fields_quote` | `(s: $struct) <quote>` | read-only | `P` | Projection: every field as an array literal of `{name, typeid, offset}`. This is what a reflection library emits. |
 | `method_count` / `has_method` / `method_type` | | read-only | — | `MetaType.methods`. |
 | `has_destructor` | `(s: $struct) <bool>` | read-only | — | Already on `StructType.hpp:32`. A collector must know whether scope exit already runs one. |

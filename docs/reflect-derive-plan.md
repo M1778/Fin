@@ -1,9 +1,9 @@
 # Plan: `reflect.fin` + `derive.fin` (issue #53, Scopes A–B)
 
-Status: **proposed, awaiting owner sign-off** — not a ruling. Each numbered Ruling below
-becomes its own ADR when ratified; this file is the plan those split out of. Scope C
-(the `M1778/fin-sdk` repo) is deliberately out of this plan and stays a separate owner
-decision.
+Status: **partly shipped** — the ADRs §6 names are ratified, and the live state is
+§6's, not this plan's. The numbered Rulings below are what shipped out of; R1 and
+R3 stay open owner decisions. Scope C (the `M1778/fin-sdk` repo) is deliberately
+out of this plan and stays a separate owner decision.
 
 Design context: `docs/compiler-api.md` §2.2 — "the interesting work is at run time, not
 compile time. Every list-valued operation ships as a **projection**: the compiler performs
