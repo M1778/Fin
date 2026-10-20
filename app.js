@@ -387,6 +387,70 @@
         "url": "stdlib.html#module-hashmap"
     },
     {
+        "id": "module-btreemap",
+        "title": "std::btreemap - Ordered Map",
+        "category": "Standard Library",
+        "tags": [
+            "btreemap",
+            "map",
+            "ordered",
+            "sorted",
+            "insert",
+            "remove",
+            "find",
+            "key_at",
+            "value_at"
+        ],
+        "snippet": "BTreeMap<K, V>: parallel arrays kept sorted under the caller's comparator, so index order IS sorted order in every compiler at every opt level.",
+        "url": "stdlib.html#module-btreemap"
+    },
+    {
+        "id": "module-reflect",
+        "title": "std::reflect - Reflection That Runs",
+        "category": "Standard Library",
+        "tags": [
+            "reflect",
+            "reflection",
+            "type_name",
+            "type_size",
+            "field_count",
+            "field_offset",
+            "layout",
+            "offset"
+        ],
+        "snippet": "Reflection that runs: the compiler folds a type's name, size, field count and field offsets into constants from the facts it already lowers with.",
+        "url": "stdlib.html#module-reflect"
+    },
+    {
+        "id": "module-derive",
+        "title": "std::derive - The Explicit Derive",
+        "category": "Standard Library",
+        "tags": [
+            "derive",
+            "derive_hash",
+            "hash",
+            "fnv",
+            "struct",
+            "layout"
+        ],
+        "snippet": "Explicit derive that runs: derive_hash mixes a struct value's fields in declaration order with FNV-1a 64 -- field values, never object bytes.",
+        "url": "stdlib.html#module-derive"
+    },
+    {
+        "id": "module-intern",
+        "title": "std::intern - String Interner",
+        "category": "Standard Library",
+        "tags": [
+            "intern",
+            "interner",
+            "interning",
+            "resolve",
+            "size"
+        ],
+        "snippet": "The string interner: same text, same id, answered by content comparison rather than a pointer word or a hash; ids are stable array indices.",
+        "url": "stdlib.html#module-intern"
+    },
+    {
         "id": "module-env",
         "title": "std::env - Environment Variables & Process",
         "category": "Standard Library",
@@ -520,10 +584,12 @@
             "EnumType",
             "getkeyid",
             "keyidof",
+            "enum_from",
             "reflection",
-            "discriminant"
+            "discriminant",
+            "member name"
         ],
-        "snippet": "Reflection and inspection of Fin enum values, runtime discriminants, and compile-time member identifiers.",
+        "snippet": "Reflection and inspection of Fin enum values: getkeyid answers the tag, keyidof reads a spelling's id, and enum_from!(v) names an active value's member -- fold for a spelling, runtime dispatch for a variable, payloaded tags included.",
         "url": "stdlib.html#module-enums"
     },
     {

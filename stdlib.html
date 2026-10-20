@@ -66,12 +66,14 @@
       <p class="stdlib-filter-empty" id="stdlib-filter-empty" hidden>No modules match. Try another name.</p>
       <div class="stdlib-category-group"><div class="stdlib-category-title">Core &amp; I/O</div><ul class="stdlib-module-list">
 <li><a href="#module-stdio" class="stdlib-module-link"><span>stdio</span><span class="stdlib-module-count">10</span></a></li>
-<li><a href="#module-fs" class="stdlib-module-link"><span>fs</span><span class="stdlib-module-count">7</span></a></li>
+<li><a href="#module-fs" class="stdlib-module-link"><span>fs</span><span class="stdlib-module-count">16</span></a></li>
 <li><a href="#module-path" class="stdlib-module-link"><span>path</span><span class="stdlib-module-count">7</span></a></li>
 </ul></div>
 <div class="stdlib-category-group"><div class="stdlib-category-title">Collections</div><ul class="stdlib-module-list">
 <li><a href="#module-collection" class="stdlib-module-link"><span>collection</span><span class="stdlib-module-count">17</span></a></li>
 <li><a href="#module-hashmap" class="stdlib-module-link"><span>hashmap</span><span class="stdlib-module-count">7</span></a></li>
+<li><a href="#module-btreemap" class="stdlib-module-link"><span>btreemap</span><span class="stdlib-module-count">8</span></a></li>
+<li><a href="#module-intern" class="stdlib-module-link"><span>intern</span><span class="stdlib-module-count">5</span></a></li>
 </ul></div>
 <div class="stdlib-category-group"><div class="stdlib-category-title">System &amp; Runtime</div><ul class="stdlib-module-list">
 <li><a href="#module-env" class="stdlib-module-link"><span>env</span><span class="stdlib-module-count">6</span></a></li>
@@ -85,7 +87,9 @@
 <div class="stdlib-category-group"><div class="stdlib-category-title">Types &amp; Semantics</div><ul class="stdlib-module-list">
 <li><a href="#module-types" class="stdlib-module-link"><span>types</span><span class="stdlib-module-count">6</span></a></li>
 <li><a href="#module-typing" class="stdlib-module-link"><span>typing</span><span class="stdlib-module-count">2</span></a></li>
-<li><a href="#module-enums" class="stdlib-module-link"><span>enums</span><span class="stdlib-module-count">4</span></a></li>
+<li><a href="#module-reflect" class="stdlib-module-link"><span>reflect</span><span class="stdlib-module-count">4</span></a></li>
+<li><a href="#module-derive" class="stdlib-module-link"><span>derive</span><span class="stdlib-module-count">1</span></a></li>
+<li><a href="#module-enums" class="stdlib-module-link"><span>enums</span><span class="stdlib-module-count">5</span></a></li>
 <li><a href="#module-error" class="stdlib-module-link"><span>error</span><span class="stdlib-module-count">2</span></a></li>
 <li><a href="#module-operators" class="stdlib-module-link"><span>operators</span><span class="stdlib-module-count">6</span></a></li>
 </ul></div>
@@ -126,9 +130,9 @@
         <span class="stdlib-card-name">fs</span>
         <span class="stdlib-card-badge">Core &amp; I/O</span>
       </div>
-      <p class="stdlib-card-desc">Direct filesystem interaction: checking file existence, querying file sizes, reading entire files into memory strings, writing, appending, and removing files.</p>
+      <p class="stdlib-card-desc">Direct filesystem interaction: file existence, sizes, whole-file reads, writes and appends, copies, directory creation and walks (mkdir -p, readdir entries), and mkdtemp scratch dirs.</p>
       <div class="stdlib-card-items">
-        <span class="stdlib-card-item-tag">file_exists</span><span class="stdlib-card-item-tag">remove_file</span><span class="stdlib-card-item-tag">file_size</span><span class="stdlib-card-item-tag">read_to_string</span>
+        <span class="stdlib-card-item-tag">read_to_string</span><span class="stdlib-card-item-tag">write_string</span><span class="stdlib-card-item-tag">mkdir_p</span><span class="stdlib-card-item-tag">walk_dir</span>
       </div>
     </a>
     
@@ -162,9 +166,33 @@
         <span class="stdlib-card-name">hashmap</span>
         <span class="stdlib-card-badge">Collections</span>
       </div>
-      <p class="stdlib-card-desc">Associative key-value map HashMap&lt;K, V&gt; using open addressing with linear probing and a 0.75 load factor threshold for automatic rehashing.</p>
+      <p class="stdlib-card-desc">Associative key-value map HashMap&lt;K, V&gt; using open addressing with linear probing and a 0.75 load factor threshold for automatic rehashing. Iteration order is bucket order and unspecified -- btreemap is the deterministic-walk answer.</p>
       <div class="stdlib-card-items">
         <span class="stdlib-card-item-tag">put</span><span class="stdlib-card-item-tag">get</span><span class="stdlib-card-item-tag">remove</span><span class="stdlib-card-item-tag">contains_key</span>
+      </div>
+    </a>
+    
+
+    <a href="#module-btreemap" class="stdlib-card" data-category="Collections">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">btreemap</span>
+        <span class="stdlib-card-badge">Collections</span>
+      </div>
+      <p class="stdlib-card-desc">The ordered map BTreeMap&lt;K, V&gt;: parallel arrays kept sorted under the caller's comparator, so index order IS sorted order in every compiler at every opt level. Ordering is a function field, not a bound; O(n) insert is honest v0.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">new_btree_map</span><span class="stdlib-card-item-tag">insert</span><span class="stdlib-card-item-tag">find</span><span class="stdlib-card-item-tag">key_at</span>
+      </div>
+    </a>
+    
+
+    <a href="#module-intern" class="stdlib-card" data-category="Collections">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">intern</span>
+        <span class="stdlib-card-badge">Collections</span>
+      </div>
+      <p class="stdlib-card-desc">The string interner: same text, same id, answered by a content comparison rather than a pointer word or a hash, so computed copies land on the stored id. Ids are array indices, stable for the interner's lifetime.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">new_interner</span><span class="stdlib-card-item-tag">intern</span><span class="stdlib-card-item-tag">resolve</span><span class="stdlib-card-item-tag">free_interner</span>
       </div>
     </a>
     
@@ -240,6 +268,28 @@
       </div>
     </a>
     
+    <a href="#module-reflect" class="stdlib-card" data-category="Types &amp; Semantics">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">reflect</span>
+        <span class="stdlib-card-badge">Types &amp; Semantics</span>
+      </div>
+      <p class="stdlib-card-desc">Reflection that runs: the compiler folds a type's name, size, field count and field offsets into constants from the facts it already lowers with. No runtime walk, no metadata blob -- a name is a string literal, a measure an integer constant.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">@type_name</span><span class="stdlib-card-item-tag">@type_size</span><span class="stdlib-card-item-tag">@field_count</span><span class="stdlib-card-item-tag">@field_offset</span>
+      </div>
+    </a>
+
+    <a href="#module-derive" class="stdlib-card" data-category="Types &amp; Semantics">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">derive</span>
+        <span class="stdlib-card-badge">Types &amp; Semantics</span>
+      </div>
+      <p class="stdlib-card-desc">Explicit derive that runs: derive_hash turns a struct value into a number by mixing its fields in declaration order with FNV-1a 64. Field VALUES, never object bytes -- padding never enters the mix, so the two backends answer the same number though they lay objects out differently.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">derive_hash</span>
+      </div>
+    </a>
+   
 
     <a href="#module-typing" class="stdlib-card" data-category="Types &amp; Semantics">
       <div class="stdlib-card-header">
@@ -456,8 +506,8 @@ fun main() &lt;noret&gt; {
         <span class="module-import-path">fs::std</span>
         <span class="badge-tag">Core &amp; I/O</span>
       </div>
-      <p class="module-description">Direct filesystem interaction: checking file existence, querying file sizes, reading entire files into memory strings, writing, appending, and removing files.</p>
-      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Reaches standard C runtime file I/O primitives (fopen, fclose, fseek, ftell, fread, fwrite, remove).</div>
+      <p class="module-description">Direct filesystem interaction: file existence, sizes, whole-file reads, writes and appends, copies, directory creation and walks, and mkdtemp scratch dirs.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Reaches standard C runtime file I/O and directory primitives (fopen, fclose, fseek, ftell, fread, fwrite, fputs, remove, mkdir, rmdir, rename, opendir, readdir, closedir, rewinddir, memcpy, mkdtemp). walk_dir copies each dirent through memcpy and reads the name at the Linux x86-64 glibc offsets (name at byte 19, d_reclen at 16..17) -- the library has no pointer arithmetic.</div>
 
       <div class="code-block module-import-box">
         <div class="code-header">
@@ -467,7 +517,7 @@ fun main() &lt;noret&gt; {
             <span>Copy</span>
           </button>
         </div>
-        <pre><code class="language-fin">import { file_exists, remove_file, file_size, read_to_string, write_string, append_string, free_file_content } from fs::std;</code></pre>
+        <pre><code class="language-fin">import { file_exists, remove_file, file_size, read_to_string, write_string, append_string, free_file_content, copy_file, create_dir, remove_dir, rename_path, is_dir, is_file, mk_tmp_dir, mkdir_p, walk_dir } from fs::std;</code></pre>
       </div>
 
       <h3 class="api-section-title">
@@ -533,12 +583,75 @@ fun main() &lt;noret&gt; {
           <td>Frees the heap buffer returned by read_to_string.</td>
         </tr>
         
+
+        <tr>
+          <td class="api-name"><code>copy_file(src: string, dst: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Copies a whole file byte for byte. A missing source reads null and answers false.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>create_dir(path: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Makes one directory (mode 0755). True on success.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>remove_dir(path: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Removes one empty directory (rmdir). True on success.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>rename_path(old_path: string, new_path: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Moves or renames a file. True on success.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>is_dir(path: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>True when opendir opens the path as a directory.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>is_file(path: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>True when the path opens for reading and is not a directory.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>mk_tmp_dir(prefix: string) &lt;string?&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>A fresh uniquely-named directory under /tmp: prefix plus the six characters mkdtemp overwrites. The name is fresh memory; release with free_str.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>mkdir_p(path: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>mkdir -p: every missing directory on the way to path. Prefixes that already exist are not failures.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>walk_dir(path: string) &lt;[string]&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>The entries of one directory with the dots left out, in readdir's order. delete the array and free_str each entry.</td>
+        </tr>
+        
           </tbody>
         </table>
       </div>
 
       <div class="ownership-box">
-        <strong>Memory &amp; Safety Semantics:</strong> Strings returned by read_to_string are heap-allocated via calloc. The caller owns the string and must release it with free_file_content(s).
+        <strong>Memory &amp; Safety Semantics:</strong> Strings returned by read_to_string are heap-allocated via calloc. The caller owns the string and must release it with free_file_content(s). Paths from concat, mk_tmp_dir's name, and each walk_dir entry are also caller-owned: free_str each and delete the walk_dir array. A missing file is routine, never a fault: read_to_string answers null, file_size answers -1, walk_dir answers an empty array.
       </div>
 
       <h3 class="api-section-title">
@@ -1026,6 +1139,361 @@ fun main() &lt;noret&gt; {
     </section>
     
 
+    <section id="module-btreemap" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">btreemap</h2>
+        <span class="module-import-path">btreemap::std</span>
+        <span class="badge-tag">Collections</span>
+      </div>
+      <p class="module-description">The ordered map BTreeMap&lt;K, V&gt;: two parallel arrays kept sorted under the caller's comparator. Index order is sorted order, in every compiler at every opt level -- the determinism contract codegen iteration needs.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Key ordering is the caller's `less &lt;fn(K, K) -&gt; bool&gt;` comparator (a function field, not a bound -- the reasoning HashMap's header records); "equal" is the two-sided idiom `!f(a, b) &amp;&amp; !f(b, a)`. This is spine search, not a balanced tree: insert is O(n) and the module says so honestly. Ownership: the map stores the key/value words as they arrived; free_btree_map frees the arrays, never the stored words. Spell the instantiation on the receiver (`&lt;BTreeMap&lt;string, int&gt;&gt;`), an `&lt;auto&gt;` receiver is refused by the stage checkers.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { BTreeMap } from btreemap::std;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>new_btree_map(by: fn(K, K) -&gt; bool) &lt;Self&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Static</span></td>
+          <td>Creates an empty map holding the comparator; the first allocation happens at birth and ensure_room doubles after that.</td>
+        </tr>
+        
+        <tr>
+          <td class="api-name"><code>len() &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>How many pairs the map holds.</td>
+        </tr>
+        
+        <tr>
+          <td class="api-name"><code>insert(key: K, value: V) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Adds the pair, or replaces the value of a key that compares equal: true when the key is new, false when it replaced. O(n) worst case.</td>
+        </tr>
+        
+        <tr>
+          <td class="api-name"><code>remove(key: K) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Removes the pair whose key compares equal. True when something was removed, false when the key was not there.</td>
+        </tr>
+        
+        <tr>
+          <td class="api-name"><code>find(key: K) &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>The index the sorted pair sits at, or -1 when the key is absent.</td>
+        </tr>
+        
+        <tr>
+          <td class="api-name"><code>key_at(i: int) &lt;K&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>The key at sorted position i. Index order is sorted order -- the determinism contract of the module. Blames when i is outside the filled range.</td>
+        </tr>
+        
+        <tr>
+          <td class="api-name"><code>value_at(i: int) &lt;V&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>The value at sorted position i. Blames when i is outside the filled range.</td>
+        </tr>
+        
+        <tr>
+          <td class="api-name"><code>free_btree_map() &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Frees the two arrays. Stored key/value words are the caller's and are not touched.</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">Example</span>
+          <button type="button" class="copy-btn" aria-label="Copy example">
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { BTreeMap } from btreemap::std;
+import { compare } from strings::std;
+
+fun main() &lt;noret&gt; {
+    let scores &lt;BTreeMap&lt;string, int&gt;&gt; =
+        BTreeMap::&lt;string, int&gt;::new_btree_map((a: string, b: string) &lt;bool&gt; =&gt; compare(a, b) &lt; 0);
+    scores.insert(&quot;Charlie&quot;, 92);
+    scores.insert(&quot;Alice&quot;, 98);
+    scores.insert(&quot;Bob&quot;, 85);
+
+    blame scores.len() == 3;
+    blame scores.key_at(0) == &quot;Alice&quot;;
+    blame scores.value_at(1) == 85;
+    blame scores.find(&quot;Charlie&quot;) == 2;
+    scores.free_btree_map();
+}</code></pre>
+      </div>
+    </section>
+    
+
+    <section id="module-intern" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">intern</h2>
+        <span class="module-import-path">intern::std</span>
+        <span class="badge-tag">Collections</span>
+      </div>
+      <p class="module-description">The string interner: same text, same id. Every scanner and the compiler's name tables want a stable id per text, answered without depending on a pointer word or a hash algorithm's history.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> v0 answers `intern` with one linear `compare(text, stored)` sweep (O(n), honestly documented): equality is strings::std's own content comparison, so a computed copy of a stored text lands on the stored id. Ids are the array index, stable for the interner's lifetime (the array only appends). Ownership: `intern` stores its own `clone` (a caller may free the string it interned); `resolve` answers the interned string, not a copy -- release everything with `free_interner`, never with `free_str`.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { Interner } from intern::std;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>new_interner() &lt;Self&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Static</span></td>
+          <td>Creates an empty interner with its first array; ensure_room doubles after that.</td>
+        </tr>
+        
+        <tr>
+          <td class="api-name"><code>intern(text: string) &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>The id of text: an existing id when an equal text is stored (content comparison), or a fresh one appended. Stores its own copy.</td>
+        </tr>
+        
+        <tr>
+          <td class="api-name"><code>resolve(id: int) &lt;string&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>The text an id answers. Not a copy: the string belongs to the interner and is freed only by free_interner. Blames when id is outside the filled range.</td>
+        </tr>
+        
+        <tr>
+          <td class="api-name"><code>size() &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>How many distinct texts the interner holds.</td>
+        </tr>
+        
+        <tr>
+          <td class="api-name"><code>free_interner() &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Frees each stored copy and the array. Resolved strings are dead after this.</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">Example</span>
+          <button type="button" class="copy-btn" aria-label="Copy example">
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { Interner } from intern::std;
+import { equals } from strings::std;
+
+fun main() &lt;noret&gt; {
+    let names &lt;Interner&gt; = Interner::new_interner();
+    let a &lt;int&gt; = names.intern(&quot;alpha&quot;);
+    let again &lt;int&gt; = names.intern(&quot;alpha&quot;);
+    blame again == a;
+    let b &lt;int&gt; = names.intern(&quot;beta&quot;);
+    blame b != a;
+    blame equals(names.resolve(a), &quot;alpha&quot;);
+    names.free_interner();
+}</code></pre>
+      </div>
+    </section>
+    
+    <section id="module-reflect" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">reflect</h2>
+        <span class="module-import-path">reflect::std</span>
+        <span class="badge-tag">Types &amp; Semantics</span>
+      </div>
+      <p class="module-description">Reflection that runs (issue #53 Scope A): the module home of the four reflected intrinsics the compiler evaluates directly. Answers are folded from the facts the backend already lowers with -- a name compiles to an ordinary string literal, a measure to an ordinary integer constant -- so nothing is declared here yet and no import is needed: the builtins are the surface.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> The argument is a type&rsquo;s name written where a type belongs (the same contextual reading <code>@implements</code> gets for its struct argument). <code>@field_offset</code> takes the field LITERAL -- only the backend fold can read a name at compile time -- which is also why <code>fields_of</code> is not shipped until a runtime <code>FieldInfo</code> has an owner for its name string. A payloaded enum refuses all four (it carries members, not fields; they come with <code>enum_from!</code>); an interface refuses (a fat value with no owning layout); a type parameter folds at the call&rsquo;s turbofish on the C++ side and refuses on the stage side (one erased body). ADR 0057.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">// The reflected intrinsics are ambient beyond the module: no import.
+// lib/std/reflect.fin documents the surface and its boundaries.</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>@type_name(T) &lt;string&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Intrinsic</span></td>
+          <td>The declared name of the type the argument names; a scalar answers the spelling written (which is its name).</td>
+        </tr>
+        
+        <tr>
+          <td class="api-name"><code>@type_size(T) &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Intrinsic</span></td>
+          <td>The DataLayout allocation size of the named type. A measure, an int -- not a layout width, so this deliberately did not copy the component API&rsquo;s <code>uint</code>.</td>
+        </tr>
+        
+        <tr>
+          <td class="api-name"><code>@field_count(T) &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Intrinsic</span></td>
+          <td>The declared field count; zero for anything fieldless, including a payloadless enum (it is the int its tag is).</td>
+        </tr>
+        
+        <tr>
+          <td class="api-name"><code>@field_offset(T, &quot;f&quot;) &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Intrinsic</span></td>
+          <td>The offset of the named field in declaration order. The field name must be the LITERAL: a run-time string cannot name a field at compile time.</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">Example</span>
+          <button type="button" class="copy-btn" aria-label="Copy example">
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">struct Point { pub x &lt;int&gt;, pub y &lt;long&gt; }
+
+fun main() &lt;noret&gt; {
+    printf(&quot;%s\n&quot;, @type_name(Point));
+    printf(&quot;%d %d\n&quot;, @type_size(Point), @field_count(Point));
+    printf(&quot;%d\n&quot;, @field_offset(Point, &quot;y&quot;));
+}</code></pre>
+      </div>
+    </section>
+    
+    <section id="module-derive" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">derive</h2>
+        <span class="module-import-path">derive::std</span>
+        <span class="badge-tag">Types &amp; Semantics</span>
+      </div>
+      <p class="module-description">Explicit derive that runs (issue #53 Scope B): the module home of <code>derive_hash</code>, the derive that turns a struct value into a number the two backends agree on. The walk mixes the fields in declaration order with FNV-1a 64 -- field VALUES, never object bytes: padding never enters the mix and a layout-model change shows up in the number, exactly as such a change should.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> A field&rsquo;s width comes from its own written type: integers ride their two&rsquo;s-complement bytes zero-extended (<code>int</code> 4, <code>long</code> 8, <code>bool</code>/<code>char</code> 1), float and double their IEEE bit patterns, a nested struct recurses, an empty struct stays the basis alone, and a payloadless enum&rsquo;s tag mixes as the <code>int</code> it is. <code>Type</code> binds from the value argument -- <code>derive_hash(p)</code> with <code>p</code> a Point needs no turbofish. Every kind the walk does not lower refuses naming the field and the kind -- a <code>string</code> field, an array, a pointer, a nullable, an interface reference, an <code>any</code> box, a union value, a fn-typed field, a payloaded enum, a struct nested more than sixteen deep -- never silently skipping: a skipped field would still answer a number. ADR 0058.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { derive_hash } from derive::std;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>derive_hash(x: Type) &lt;ulong&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Derive</span></td>
+          <td>FNV-1a 64 over the struct value&rsquo;s fields in declaration order; per byte, least-significant first, <code>h = (h ^ byte) * 1099511628211</code> from <code>14695981039346656037</code>. <code>Type</code> binds from the value argument&rsquo;s spelling, so the call site names no turbofish.</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">Example</span>
+          <button type="button" class="copy-btn" aria-label="Copy example">
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">struct Point { pub x &lt;int&gt;, pub y &lt;long&gt; }
+
+fun main() &lt;noret&gt; {
+    let p &lt;Point&gt;;
+    p.x = 3;
+    p.y = -5;
+    // 7192506404828969274 -- x's four bytes, then y's eight.
+    printf(&quot;%lu\n&quot;, derive_hash(p));
+}</code></pre>
+      </div>
+    </section>
+    
     <section id="module-env" class="module-doc-section">
       <div class="module-header-row">
         <h2 class="module-name-title">env</h2>
@@ -1859,8 +2327,8 @@ fun main() &lt;noret&gt; {
         <span class="module-import-path">enums::std</span>
         <span class="badge-tag">Types &amp; Semantics</span>
       </div>
-      <p class="module-description">Reflection and inspection of Fin enum values, runtime discriminants, and compile-time member identifiers.</p>
-      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Enums lower to standard C ABI discriminants.</div>
+      <p class="module-description">Reflection and inspection of Fin enum values: runtime discriminants, compile-time member identifiers, and the member-name op that answers an active value's member.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Enums lower to standard C ABI discriminants; <code>enum_from!</code> names the active member from that same discriminant.</div>
 
       <div class="code-block module-import-box">
         <div class="code-header">
@@ -1892,6 +2360,13 @@ fun main() &lt;noret&gt; {
           <td class="api-name"><code>enum EnumType</code></td>
           <td class="api-type"><span class="badge-tag">Enum</span></td>
           <td>Discriminant category: Fieldless or Tagged.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>enum_from!(value) &lt;string&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Builtin Macro</span></td>
+          <td>Answers a value's member name at run: <code>enum_from!(Fruit::Plum)</code> folds to <code>&quot;Plum&quot;</code>, a runtime variable dispatches (a re-assigned variable answers both names), a payloaded <code>R::Ok(5)</code> answers <code>&quot;Ok&quot;</code>. Compiler-implemented like <code>format!</code> (ADR 0059) — resolves with no import because a builtin is in no scope; a raw <code>int</code> refuses where <code>getkeyid</code> passes one through, since a name has no member to name without an enum.</td>
         </tr>
         
 
@@ -1935,19 +2410,19 @@ fun main() &lt;noret&gt; {
             <span>Copy</span>
           </button>
         </div>
-        <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
-import { EnumType, getkeyid, keyidof } from enums::std;
+        <pre><code class="language-fin">import { Enum, EnumType, getkeyid, keyidof } from enums::std;
 
-enum Mode {
-    Debug = 0,
-    Release = 1,
-    Profile = 2
-}
+enum Fruit { Apple, Pear, Plum }
 
 fun main() &lt;noret&gt; {
-    let m &lt;Mode&gt; = Mode::Release;
-    blame cast&lt;int&gt;(m) == 1;
-    printf(&quot;Mode discriminant: %d\n&quot;, cast&lt;int&gt;(m));
+    // The member-name op — no import of its own, it is a builtin.
+    printf(&quot;%s\n&quot;, enum_from!(Fruit::Plum));
+
+    // Runtime values dispatch; a fold could not answer both.
+    let f &lt;Fruit&gt; = Fruit::Pear;
+    printf(&quot;%s\n&quot;, enum_from!(f));
+    f = Fruit::Plum;
+    printf(&quot;%s\n&quot;, enum_from!(f));
 }</code></pre>
       </div>
     </section>
