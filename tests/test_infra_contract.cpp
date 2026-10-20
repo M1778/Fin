@@ -216,7 +216,12 @@ std::vector<CorpusCase> corpusCases() {
     if (fs::exists(root)) {
         for (const auto& e : fs::directory_iterator(root)) {
             if (e.is_directory()) {
-                out.push_back({e.path().string(), e.path().filename().string()});
+                // generic_string (the Corpus.cpp convention): a case dir that
+                // keeps native separators on Windows gets JSON-escaped into
+                // `\\` in the output, and the @DIR@ substitution below would
+                // never match the needle. One separator family, both sides.
+                out.push_back({e.path().generic_string(),
+                               e.path().filename().string()});
             }
         }
     }
