@@ -2,8 +2,10 @@
 // Filesystem operations: reading, writing, appending, query, and removal.
 //
 // Reaches standard C library I/O facilities (fopen, fclose, fseek, ftell,
-// fread, fwrite, fputs, remove) and the directory walks of dirent (opendir,
-// readdir, closedir, rewinddir, mkdtemp) copied through `memcpy`.
+// fread, fwrite, fputs, remove, open, close, mkdir, rmdir, rename, mkdtemp)
+// and the directory walk through `getdirentries` (`readdir`'s record layout
+// is not one thing across darwin x86_64 and arm64; `walk_dir` spells that
+// page out below).
 //
 // OWNERSHIP: every string returned by `read_to_string` and by `walk_dir`'s
 // entries is dynamically allocated and caller-owned. `free_file_content`
@@ -170,7 +172,7 @@ pub fun copy_file(src: string, dst: string) <bool> {
 #[llvm_name="close"]
 @define fs_close(fd: int) <int>;
 
-#[llvm_name="getdirentries64"]
+#[llvm_name="getdirentries"]
 @define fs_getd64(fd: int, buf: &char, count: ulong, base: &long) <long>;
 
 #[llvm_name="mkdtemp"]
@@ -260,8 +262,9 @@ pub fun? mk_tmp_dir(prefix: string) <string> {
 //
 // There is no pointer arithmetic in this library -- a `&char` does not add
 // an integer and does not index -- so the records are read out of a `[char]`
-// buffer filled by `getdirentries64`. That one libc symbol exists unchanged
-// on Linux and on macOS and carries the 64-bit-inode records on both, which
+// buffer filled by `getdirentries`. That one libc symbol exists unchanged
+// on Linux and on macOS and carries the 64-bit-inode records on both (LP64:
+// `off_t` is 64-bit everywhere `getdirentries` is declared), which
 // is why this walk does not go through `readdir`: the plain `readdir` symbol
 // names the legacy 32-bit-inode ABI on darwin x86_64 and the 64-bit one on
 // darwin arm64, so records read through a fixed layout would break on one
