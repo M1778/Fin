@@ -648,7 +648,14 @@ TEST(Census, EverySampleIsAnnotatedAndClassified) {
     // value's field values in declaration order, lib/std/derive.fin), the
     // hash pin pure number against drifted constants, equal values hash
     // equal, through the generic wrapper binding on all three compilers.
-    EXPECT_EQ(t.samples, 74)
+    // 74 -> 75 on 2026-10-20: tests/samples/stdlib/enums_from.fin arrives
+    // for issue #53 Scope B: the enum module's shipped surface -- the two
+    // tag intrinsics pinned on real values for the first time, plus
+    // `enum_from!(v) <string>` (ADR 0059) answering a value's member name
+    // through a compiler-implemented `!` helper, runtime and folded call
+    // shapes, a payloaded enum on both members, under the agreement harness
+    // on all three compilers.
+    EXPECT_EQ(t.samples, 75)
         << "the corpus is 51 samples. Sample code changes only by a ratified "
            "language decision (ADR 0008), so a different count is either such a "
            "decision — update this — or a file globbed in by accident";

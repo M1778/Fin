@@ -584,10 +584,12 @@
             "EnumType",
             "getkeyid",
             "keyidof",
+            "enum_from",
             "reflection",
-            "discriminant"
+            "discriminant",
+            "member name"
         ],
-        "snippet": "Reflection and inspection of Fin enum values, runtime discriminants, and compile-time member identifiers.",
+        "snippet": "Reflection and inspection of Fin enum values: getkeyid answers the tag, keyidof reads a spelling's id, and enum_from!(v) names an active value's member -- fold for a spelling, runtime dispatch for a variable, payloaded tags included.",
         "url": "stdlib.html#module-enums"
     },
     {

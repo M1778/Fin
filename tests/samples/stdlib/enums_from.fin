@@ -1,0 +1,56 @@
+//@ normative
+//@ ok
+// Enum reflection that runs (issue #53 Scope B): the tag intrinsics the
+// module already owned, plus `enum_from!(v) <string>` -- the member-name op
+// the reflect refusals promised ("the member ops come with enum_from"); now
+// shipped as a compiler-implemented `!` helper (ADR 0059).
+//
+// WHAT THE EXAMPLE PINS.
+//
+//   * The draft pair, on real values now that the module compiles:
+//     `getkeyid(Fruit::Plum)` is the tag 2 (a payloadless enum's value IS
+//     its tag, ADR 0041), and `keyidof(Pear)` read a member spelling as 1.
+//   * `enum_from!` names a value's member: the spelling `Fruit::Plum`
+//     answers Plum through the same dispatch a variable does, and a
+//     runtime variable re-assigned between two prints answers Pear then
+//     Plum -- a fold could not answer both twice differently. This is the
+//     leg the tag intrinsics do not cover: neither names a member.
+//   * Payloaded enums answer their tag's name: `R::Ok(5)` and `R::Err(17)`
+//     are Ok and Err. The tag is element 0 (the getkeyid shape); the
+//     payload stays out of view.
+//
+// THE RANGE NOT SWEPT: kinds without an enum behind them refuse by name --
+// an `int` gets no member names (getkeyid passes a raw id through; a name
+// cannot) and a string, a struct or a genuinely boxed `EnumType` refuse the
+// same way `getkeyid` refuses `'getkeyid' on a struct` today (Soundness
+// EnumFrom). The boxed lookup is the one gap the two families still share.
+//
+// The helper is a builtin macro: like `format!` it resolves with no import
+// at all, and lib/std/enums.fin declares its signature the way stdio.fin
+// declares `format!`'s. getkeyid and keyidof ride the module import like
+// any other library function.
+
+import { getkeyid, keyidof } from enums::std;
+
+enum Fruit { Apple, Pear, Plum }
+enum R { Ok(int), Err(int) }
+
+fun main() <noret> {
+    // The tags the draft pinned: value as tag, spelling as id.
+    printf("%d\n", getkeyid(Fruit::Plum));
+    printf("%d\n", keyidof(Pear));
+
+    // The member-name op: a spelling, then a runtime variable twice.
+    printf("%s\n", enum_from!(Fruit::Plum));
+
+    let f <Fruit> = Fruit::Pear;
+    printf("%s\n", enum_from!(f));
+    f = Fruit::Plum;
+    printf("%s\n", enum_from!(f));
+
+    // A payloaded enum: tag to name, payload untouched.
+    let a <R> = R::Ok(5);
+    let b <R> = R::Err(17);
+    printf("%s\n", enum_from!(a));
+    printf("%s\n", enum_from!(b));
+}

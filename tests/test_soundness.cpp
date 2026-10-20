@@ -16568,3 +16568,139 @@ TEST(Soundness_Derive, ArityIsChecked) {
     EXPECT_NE(stripAnsi(r2.err).find("expects 1 arguments"), std::string::npos)
         << stripAnsi(r2.err);
 }
+
+// ---------------------------------------------------------------------------
+// Soundness_EnumFrom -- issue #53 Scope B, ADR 0059. `enum_from!(v)` answers
+// the member name of an enum value as a `string`: the leg the tag intrinsics
+// do not cover (getkeyid answers the tag, keyidof reads a spelling's id --
+// neither names a member). It is a compiler-implemented `!` helper like
+// `format!` because a registered macro cannot do it: the expansion depends on
+// the enum's members, which the expander (no types, no scope) never sees.
+//
+// Dispatch, not a fold: a runtime variable's tag selects among the member
+// names, the low level of a `match`'s own arm machinery. Payloaded enums
+// answer their tag's name (extractvalue 0, the getkeyid shape); the
+// payload itself is out of view. An `int` is refused rather than passed
+// through -- getkeyid reads a raw id, but a name needs an enum to name a
+// member OF -- and any other kind refuses by its display ("'enum_from' on a
+// X"), the getkeyid text shape so the two stay one family of answers.
+//
+// No inline source imports anything: like `format!`, the builtin resolves
+// with no import at all. Lib/std/enums.fin declares the signature
+// (`@define enum_from!(value: EnumType) <string>;`) the way stdio.fin
+// declares `format!`, and the corpus sample carries the imported pins.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const char* const kEnumFrom =
+    "@define printf(fmt: string, ...) <noret>;\n"
+    "enum Fruit { Apple, Pear, Plum }\n"
+    "enum R { Ok(int), Err(int) }\n";
+
+}  // namespace
+
+TEST(Soundness_EnumFrom, TheValueAnswersItsMemberName) {
+    // Runtime dispatch: the same call in one body answers Apple then Plum as
+    // the variable's member changes between the two prints. A compile-time
+    // fold would answer the first name -- or the LAST -- twice; it cannot
+    // answer both.
+#ifdef FIN_TESTS_HAVE_BACKEND
+    const CompiledRun run = compileAndRun(std::string(kEnumFrom) +
+        "fun main() <int> {\n"
+        "    let f <Fruit> = Fruit::Pear;\n"
+        "    printf(\"%s\\n\", enum_from!(f));\n"
+        "    f = Fruit::Plum;\n"
+        "    printf(\"%s\\n\", enum_from!(f));\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_EQ(run.compileExit, 0) << stripAnsi(run.compileErr);
+    EXPECT_EQ(run.out, "Pear\nPlum\n") << run.out;
+#endif
+}
+
+TEST(Soundness_EnumFrom, AMemberSpellingAnswersItsName) {
+    // The spelling IS the value, so the name answers through the same
+    // dispatch, not a side door: `Fruit::Apple` emits as a Fruit rvalue and
+    // its tag lands on its own name.
+#ifdef FIN_TESTS_HAVE_BACKEND
+    const CompiledRun run = compileAndRun(std::string(kEnumFrom) +
+        "fun main() <int> {\n"
+        "    printf(\"%s\\n\", enum_from!(Fruit::Apple));\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_EQ(run.compileExit, 0) << stripAnsi(run.compileErr);
+    EXPECT_EQ(run.out, "Apple\n") << run.out;
+#endif
+}
+
+TEST(Soundness_EnumFrom, APayloadedEnumAnswersItsTag) {
+    // The tag is element 0 of the tagged union; the payload stays where it
+    // is. Both members pin declaration order (first the first, second the
+    // second) the way the derive suite pins field order.
+#ifdef FIN_TESTS_HAVE_BACKEND
+    const CompiledRun run = compileAndRun(std::string(kEnumFrom) +
+        "fun main() <int> {\n"
+        "    let a <R> = R::Ok(5);\n"
+        "    let b <R> = R::Err(17);\n"
+        "    printf(\"%s\\n\", enum_from!(a));\n"
+        "    printf(\"%s\\n\", enum_from!(b));\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_EQ(run.compileExit, 0) << stripAnsi(run.compileErr);
+    EXPECT_EQ(run.out, "Ok\nErr\n") << run.out;
+#endif
+}
+
+TEST(Soundness_EnumFrom, AnIntIsNotAnEnumRefuses) {
+    // getkeyid passes an int through (a raw id is a tag), but a name cannot
+    // name a member without an enum. This is the one place the two intrinsic
+    // families honestly part ways -- refused here, not guessed.
+#ifdef FIN_TESTS_HAVE_BACKEND
+    const CompiledRun run = compileAndRun(std::string(kEnumFrom) +
+        "fun main() <int> {\n"
+        "    printf(\"%s\\n\", enum_from!(5));\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_NE(run.compileExit, 0);
+    const std::string err = stripAnsi(run.compileErr);
+    EXPECT_EQ(errorCount(err), 1u) << err;
+    EXPECT_NE(err.find("'enum_from' on a int"), std::string::npos) << err;
+#endif
+}
+
+TEST(Soundness_EnumFrom, AStringIsNotAnEnumRefuses) {
+#ifdef FIN_TESTS_HAVE_BACKEND
+    const CompiledRun run = compileAndRun(std::string(kEnumFrom) +
+        "fun main() <int> {\n"
+        "    printf(\"%s\\n\", enum_from!(\"Ok\"));\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_NE(run.compileExit, 0);
+    const std::string err = stripAnsi(run.compileErr);
+    EXPECT_EQ(errorCount(err), 1u) << err;
+    EXPECT_NE(err.find("'enum_from' on a string"), std::string::npos) << err;
+#endif
+}
+
+TEST(Soundness_EnumFrom, ArityIsChecked) {
+    // One value, from the builtin table's signature (non-variadic): the
+    // analyzer check that `format!`'s variadic tail skips is this row's whole
+    // story, so 0 and 2 both report before codegen sees anything.
+    const FincRun r1 = compile(std::string(kEnumFrom) +
+        "fun main() <int> {\n"
+        "    let f <Fruit> = Fruit::Pear;\n"
+        "    const s <string> = enum_from!(f, f);\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r1.err).find("expects exactly 1 argument, got 2"), std::string::npos)
+        << stripAnsi(r1.err);
+
+    const FincRun r2 = compile(std::string(kEnumFrom) +
+        "fun main() <int> {\n"
+        "    const s <string> = enum_from!();\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r2.err).find("expects exactly 1 argument, got 0"), std::string::npos)
+        << stripAnsi(r2.err);
+}

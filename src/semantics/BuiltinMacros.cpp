@@ -22,6 +22,18 @@ std::vector<Builtin> build() {
     // returns nothing, and it is a symbol rather than a macro (`lib/std/stdio.fin:109`).
     bs.push_back(Builtin{"format", {Param{"fmt", "string"}}, true, "string"});
 
+    // --- enum_from!(value) <string> ---
+    //
+    // The member-name op the reflection refusals promise ("the member ops come
+    // with enum_from", ADR 0057): answers an enum value's member name, the leg
+    // `getkeyid`/`keyidof` do not (neither names a member). It is a builtin and
+    // not a library macro for the reason `format!` is: the expansion depends on
+    // facts the expander does not have -- the enum's member list -- so a
+    // registered macro cannot construct it, and the analyzer/codegen passes
+    // implement the call instead. lib/std/enums.fin declares the signature, the
+    // way stdio.fin declares `format!`'s. ADR 0059.
+    bs.push_back(Builtin{"enum_from", {Param{"value", "EnumType"}}, false, "string"});
+
     return bs;
 }
 

@@ -89,7 +89,7 @@
 <li><a href="#module-typing" class="stdlib-module-link"><span>typing</span><span class="stdlib-module-count">2</span></a></li>
 <li><a href="#module-reflect" class="stdlib-module-link"><span>reflect</span><span class="stdlib-module-count">4</span></a></li>
 <li><a href="#module-derive" class="stdlib-module-link"><span>derive</span><span class="stdlib-module-count">1</span></a></li>
-<li><a href="#module-enums" class="stdlib-module-link"><span>enums</span><span class="stdlib-module-count">4</span></a></li>
+<li><a href="#module-enums" class="stdlib-module-link"><span>enums</span><span class="stdlib-module-count">5</span></a></li>
 <li><a href="#module-error" class="stdlib-module-link"><span>error</span><span class="stdlib-module-count">2</span></a></li>
 <li><a href="#module-operators" class="stdlib-module-link"><span>operators</span><span class="stdlib-module-count">6</span></a></li>
 </ul></div>
@@ -2327,8 +2327,8 @@ fun main() &lt;noret&gt; {
         <span class="module-import-path">enums::std</span>
         <span class="badge-tag">Types &amp; Semantics</span>
       </div>
-      <p class="module-description">Reflection and inspection of Fin enum values, runtime discriminants, and compile-time member identifiers.</p>
-      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Enums lower to standard C ABI discriminants.</div>
+      <p class="module-description">Reflection and inspection of Fin enum values: runtime discriminants, compile-time member identifiers, and the member-name op that answers an active value's member.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Enums lower to standard C ABI discriminants; <code>enum_from!</code> names the active member from that same discriminant.</div>
 
       <div class="code-block module-import-box">
         <div class="code-header">
@@ -2360,6 +2360,13 @@ fun main() &lt;noret&gt; {
           <td class="api-name"><code>enum EnumType</code></td>
           <td class="api-type"><span class="badge-tag">Enum</span></td>
           <td>Discriminant category: Fieldless or Tagged.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>enum_from!(value) &lt;string&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Builtin Macro</span></td>
+          <td>Answers a value's member name at run: <code>enum_from!(Fruit::Plum)</code> folds to <code>&quot;Plum&quot;</code>, a runtime variable dispatches (a re-assigned variable answers both names), a payloaded <code>R::Ok(5)</code> answers <code>&quot;Ok&quot;</code>. Compiler-implemented like <code>format!</code> (ADR 0059) — resolves with no import because a builtin is in no scope; a raw <code>int</code> refuses where <code>getkeyid</code> passes one through, since a name has no member to name without an enum.</td>
         </tr>
         
 
@@ -2403,19 +2410,19 @@ fun main() &lt;noret&gt; {
             <span>Copy</span>
           </button>
         </div>
-        <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
-import { EnumType, getkeyid, keyidof } from enums::std;
+        <pre><code class="language-fin">import { Enum, EnumType, getkeyid, keyidof } from enums::std;
 
-enum Mode {
-    Debug = 0,
-    Release = 1,
-    Profile = 2
-}
+enum Fruit { Apple, Pear, Plum }
 
 fun main() &lt;noret&gt; {
-    let m &lt;Mode&gt; = Mode::Release;
-    blame cast&lt;int&gt;(m) == 1;
-    printf(&quot;Mode discriminant: %d\n&quot;, cast&lt;int&gt;(m));
+    // The member-name op — no import of its own, it is a builtin.
+    printf(&quot;%s\n&quot;, enum_from!(Fruit::Plum));
+
+    // Runtime values dispatch; a fold could not answer both.
+    let f &lt;Fruit&gt; = Fruit::Pear;
+    printf(&quot;%s\n&quot;, enum_from!(f));
+    f = Fruit::Plum;
+    printf(&quot;%s\n&quot;, enum_from!(f));
 }</code></pre>
       </div>
     </section>

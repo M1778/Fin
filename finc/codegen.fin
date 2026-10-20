@@ -10,7 +10,8 @@ import {
       ast_binary_expr, ast_unary_expr, ast_call_expr,
       ast_index_expr, ast_member_access,
       ast_ident, ast_literal_int, ast_literal_string, ast_literal_bool,
-      ast_enum_decl, ast_interface_decl, ast_prototype_literal, ast_quote_expr
+      ast_enum_decl, ast_interface_decl, ast_prototype_literal, ast_quote_expr,
+      ast_macro_invocation
 } from ast::std;
 
 import {
@@ -11979,6 +11980,119 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         llvm_position_builder(ctx.builder, m_end);
         if (m_void) { return null; }
         return llvm_build_load2(ctx.builder, m_ty, m_slot, "match.res");
+    }
+    // `enum_from!(v) <string>` (ADR 0059): the member-name op the reflect
+    // refusals promise. The compiler implements it like `format!` is: a
+    // `@define` names the signature in lib/std/enums.fin, the expander rides
+    // the invocation through, and this lane answers. A member spelling folds
+    // to its name through the registry `keyidof` already reads; a local's
+    // annotation names the enum and its tag selects among the members in
+    // declaration order (a payloaded enum reads its tag at element 0, the
+    // getkeyid shape). Kinds without an enum refuse as the C++ displays
+    // them ("on a int", "on a string"). The select chain degrades a
+    // non-constructible tag to the empty name; the C++ switch makes that
+    // state unreachable instead.
+    if (n.kind == ast_macro_invocation() && n.name != null && cg_str_eq(n.name, "enum_from")) {
+        let ef_count <int> = 0;
+        let ef_w <&AstNode> = n.left;
+        while (ef_w != null) {
+            ef_count = ef_count + 1;
+            ef_w = ef_w.right;
+        }
+        if (ef_count != 1) {
+            cg_dprintf(2, "finc codegen refusal: an 'enum_from!' that is not one value\n");
+            refuse_and_poison(ctx);
+            llvm_build_unreachable(ctx.builder);
+            return null;
+        }
+        let ef_a <&AstNode> = n.left.left;
+        if (ef_a == null) { ef_a = n.left; }
+        // A member spelling folds before a value is asked for (the C++
+        // folding reads its post-emit int kind through the same two
+        // tables): a bare name through the registry `keyidof` reads --
+        // whatever local shadows it emitting first changes none of that
+        // -- and a `Fruit::Plum` spelling through its own qualifier. The
+        // member's name is the whole answer.
+        if (ef_a.kind == ast_ident()) {
+            let ef_m <&EnumMemberInfo> = find_enum_member_global(ctx, ef_a.name);
+            if (ef_m != null) {
+                return llvm_build_global_string_ptr(ctx.builder, ef_m.name, ".str");
+            }
+        }
+        if (ef_a.kind == ast_member_access() && ef_a.left != null &&
+          ef_a.left.kind == ast_ident()) {
+            let ef_qe <&EnumInfo> = find_enum(ctx, ef_a.left.name);
+            if (ef_qe != null) {
+                let ef_j <int> = 0;
+                while (ef_j < ef_qe.member_count) {
+                    let ef_m3 <&EnumMemberInfo> = ef_qe.members[ef_j];
+                    if (ef_m3 != null && cg_str_eq(ef_m3.name, ef_a.name)) {
+                        return llvm_build_global_string_ptr(ctx.builder, ef_m3.name, ".str");
+                    }
+                    ef_j = ef_j + 1;
+                }
+            }
+          }
+        let ef_a_val <&LLVMValue> = lower_expr(ctx, ef_a);
+        if (ctx.poisoned) { return null; }
+        if (ef_a_val == null) {
+            cg_dprintf(2, "finc codegen refusal: this 'enum_from!' argument\n");
+            refuse_and_poison(ctx);
+            llvm_build_unreachable(ctx.builder);
+            return null;
+        }
+        let ef_e <&EnumInfo> = find_enum_by_llvm_type(ctx, llvm_type_of(ef_a_val));
+        let ef_tag <&LLVMValue> = null;
+        if (ef_e != null) {
+            // A payloaded enum's value: tag at element 0.
+            ef_tag = llvm_build_extract_value(ctx.builder, ef_a_val, 0, "tag");
+        } else if (ef_a.kind == ast_ident()) {
+            let ef_lv <&LocalVar> = fn_ctx_find_var(ctx, ef_a.name);
+            if (ef_lv != null) {
+                ef_e = find_enum(ctx, ef_lv.type_annotation);
+                if (ef_e != null) {
+                    // A fieldless enum rides i32 exactly as getkeyid does.
+                    ef_tag = ef_a_val;
+                }
+            }
+        }
+        if (ef_tag == null) {
+            // No enum behind the value: refuse naming the kind the way the
+            // C++ displays its own. int/string are the two kinds the corpus
+            // spells; anything else is a pointer here, which is as much of
+            // the display word as this side keeps.
+            let ef_aty <&LLVMType> = llvm_type_of(ef_a_val);
+            let ef_word <string> = "string";
+            if (ef_aty == ctx.i32_ty) { ef_word = "int"; }
+            if (ef_aty == ctx.i1_ty) { ef_word = "bool"; }
+            let pb2 <Buffer> = new_buffer(64);
+            pb2.write_string("'enum_from' on a ");
+            pb2.write_string(ef_word);
+            pb2.write_string(" is not lowered yet");
+            cg_dprintf(2, "finc codegen refusal: %s\n", pb2.to_string());
+            free_buffer(pb2);
+            refuse_and_poison(ctx);
+            llvm_build_unreachable(ctx.builder);
+            return null;
+        }
+        // The dispatch: compare the tag against each member's and select
+        // the name global, chained (the phi join the C++ switch arms
+        // answer, in the select-chain shape this side's two-limb
+        // machinery holds). A tag outside the member set is not
+        // constructible -- the language makes a value only out of a
+        // member -- and the chain degrades it to the empty name instead
+        // of branching; the C++ switch makes the same state unreachable.
+        let ef_sel <&LLVMValue> = llvm_build_global_string_ptr(ctx.builder, "", ".str");
+        let ef_i <int> = ef_e.member_count - 1;
+        while (ef_i >= 0) {
+            let ef_m2 <&EnumMemberInfo> = ef_e.members[ef_i];
+            let ef_nm <&LLVMValue> = llvm_build_global_string_ptr(ctx.builder, ef_m2.name, ".str");
+            let ef_eq <&LLVMValue> = llvm_build_icmp(ctx.builder, llvm_int_eq(), ef_tag,
+              llvm_const_int(ctx.i32_ty, ef_m2.tag, 0), "tag.eq");
+            ef_sel = llvm_build_select(ctx.builder, ef_eq, ef_nm, ef_sel, "member.name");
+            ef_i = ef_i - 1;
+        }
+        return ef_sel;
     }
     // Macro invocations and quote expressions have no LLVM lowering: the
     // expander owns them, and by codegen they must already be gone. Refuse

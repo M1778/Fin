@@ -31,4 +31,16 @@ pub fun getkeyid(value: EnumType) <int>;
 #[llvm_name="enums_keyidof"]
 pub fun keyidof(enum_member: $enum_member) <int>;
 
+// `enum_from!(v)` answers a VALUE's member name as a `string` ("Ok" for
+// `R::Ok(5)`), the leg the two tag intrinsics do not cover: neither names a
+// member, and the reflect refusals deferred exactly this to it ("the member ops
+// come with enum_from", ADR 0057). It is implemented by the compiler -- the
+// expansion depends on the enum's member list, which a registered macro cannot
+// construct (the expander sees no types) -- so this is the `format!` shape: a
+// bodiless `@define` declares the signature `stdio.fin:127` declares its own
+// with, and the analyzer/codegen passes implement the call (ADR 0059).
+// Like `format!` it resolves with no import; tests/samples/stdlib/enums_from.fin
+// is the specification for it and the two intrinsics above.
+@define enum_from!(value: EnumType) <string>;
+
 }

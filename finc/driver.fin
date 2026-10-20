@@ -1849,7 +1849,7 @@ priv struct Mx {
             self.mx_skip_define_span();
             return true;
         }
-        if (!drv_str_eq(dname, "format")) {
+        if (!drv_str_eq(dname, "format") && !drv_str_eq(dname, "enum_from")) {
             self.line = dline;
             let msg <string> = concat(concat("The compiler implements no macro named '", dname), "!'");
             return self.mx_fail(msg);
@@ -2255,6 +2255,26 @@ priv struct Mx {
                     return self.mx_fail("first argument of 'format!' must be a string");
                 }
                 return self.mx_expand_format(start, start_line, inner, nargs, end);
+            }
+            if (mx_dot_pos(name) < 0 && drv_str_eq(name, "enum_from")) {
+                // enum_from! never expands (ADR 0059): its answer needs the
+                // enum's members, which an expander without types cannot
+                // see. The invocation rides through verbatim and the
+                // backend answers it -- a call to lower, a bracket shape
+                // for the by-name refusal either way. The one value the
+                // signature declares is checked here, where the count is
+                // already known, because the analyzer pass this is the
+                // checktype of sees no macro invocation on this side;
+                // the wording is the analyzer's own answer.
+                if (open == '(' && nargs != 1) {
+                    self.line = start_line;
+                    let am <string> = concat(concat("Macro 'enum_from!' expects exactly 1 argument, got ", drv_itoa(nargs)), "");
+                    return self.mx_fail(am);
+                }
+                self.pos = start;
+                self.line = start_line;
+                self.mx_copy_to(end);
+                return true;
             }
             self.line = start_line;
             let um <string> = concat(concat("Undefined macro '", name), "!'");

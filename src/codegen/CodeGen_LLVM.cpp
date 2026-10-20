@@ -13891,6 +13891,7 @@ private:
         // would build a string for a macro that promised something else -- so the
         // dispatch is explicit and the unimplemented row refuses by its own name.
         if (builtin->name == "format") { emitFormatMacro(node); return; }
+        if (builtin->name == "enum_from") { emitEnumFromMacro(node); return; }
         unsupported(node, fmt::format("the compiler-implemented macro '{}!'", node.name));
     }
     void visit(QuoteExpression& node) override { unsupported(node, "a quote"); }
@@ -14984,6 +14985,102 @@ private:
         builder_.CreateCall(write, fill);
 
         value_ = CgVal{buffer, *types_.byName("string")};
+    }
+
+    // `enum_from!(v) <string>` -- the member-name op lib/std/enums.fin declares,
+    // the leg the tag intrinsics do not cover (issue #53 Scope B, ADR 0057's
+    // "the member ops come with enum_from"). The analyzer checked the table's
+    // signature (one value, `<string>`), so what reaches here is the lowering:
+    // the value's tag selects among the enum's member names, the dispatch a
+    // match's own arms run (a payloaded enum's tags live at element 0, the
+    // getkeyid shape), and a kind with no enum behind it refuses the way
+    // getkeyid refuses its own -- with the one honest difference that getkeyid
+    // passes an int through (a raw id is a tag) while a name has no member to
+    // name without an enum, so an int is refused instead of guessed.
+    void emitEnumFromMacro(MacroInvocation& node) {
+        if (!currentFn_) { unsupported(node, "an 'enum_from!' outside a function"); return; }
+        if (node.args.size() != 1 || !node.args[0]) {
+            unsupported(node, "an 'enum_from!' that is not one value");
+            return;
+        }
+        CgVal arg = emit(*node.args[0]);
+        if (failed_) return;
+        if (!arg.ok()) { unsupported(node, "this 'enum_from!' argument"); return; }
+        llvm::Value* tag = arg.value;
+        if (arg.type.isPayloadedEnum()) {
+            tag = builder_.CreateExtractValue(arg.value, {0}, "tag");
+        } else if (arg.type.isFieldlessEnum()) {
+            // A fieldless enum rides the Int kind with its enumInfo attached
+            // (cgDisplay's own split): value = tag, the same i32 the walk
+            // below names for it.
+        } else if (arg.type.kind == CgType::Kind::Int) {
+            // A member's spelling folds to a constant int before an enum type
+            // survives it -- `Plum` and `Fruit::Plum` lower through the same
+            // `enumConstant` (extern_as.fin:44-45 writes the two one apart) --
+            // so the spelling in the argument is what carries the enum, and
+            // the tables the whole file's spellings already resolve through
+            // tell the member: a `Type::member` spelling reads `enums_`, a
+            // bare name reads `enumMembers_`, which a local shadows by the
+            // scope the analyzer resolved it in (Soundness_Codegen). The fold
+            // answers its name directly; the switch below is what remains for
+            // everything else. What the int cannot say (a literal 5, a
+            // runtime `int`) refuses: a name has no member to name without an
+            // enum, the one place the two intrinsic families part ways.
+            if (auto* ma = dynamic_cast<MemberAccess*>(node.args[0].get())) {
+                if (auto* id = dynamic_cast<Identifier*>(ma->object.get())) {
+                    auto e = enums_.find(id->name);
+                    if (e != enums_.end() && e->second.valueByName.count(ma->member)) {
+                        value_ = CgVal{internedString(ma->member), *types_.byName("string")};
+                        return;
+                    }
+                }
+            } else if (auto* id = dynamic_cast<Identifier*>(node.args[0].get())) {
+                if (enumMembers_.count(id->name)) {
+                    value_ = CgVal{internedString(id->name), *types_.byName("string")};
+                    return;
+                }
+            }
+            unsupported(node, fmt::format("'enum_from' on a {}", cgDisplay(arg.type)));
+            return;
+        } else {
+            unsupported(node, fmt::format("'enum_from' on a {}", cgDisplay(arg.type)));
+            return;
+        }
+        if (tag->getType() != builder_.getInt32Ty()) {
+            tag = builder_.CreateIntCast(tag, builder_.getInt32Ty(),
+                                         /*isSigned=*/true);
+        }
+        // One global per member name (`internedString`), selected by a switch
+        // over the member values. The default is unreachable, and that is not
+        // an omission: the language constructs a value only out of a member,
+        // so there is no tag outside the member set to name, and a phi with
+        // no fallback is itself the fact -- names do not have a default
+        // member to fall back to.
+        const EnumInfo& eInfo = *arg.type.enumInfo;
+        llvm::BasicBlock* cur = builder_.GetInsertBlock();
+        llvm::Function* fn = cur->getParent();
+        llvm::BasicBlock* wrong = llvm::BasicBlock::Create(ctx_, "wrong.tag", fn);
+        llvm::BasicBlock* join = llvm::BasicBlock::Create(ctx_, "names.join", fn);
+        llvm::SwitchInst* sw = builder_.CreateSwitch(
+            tag, wrong, static_cast<unsigned>(eInfo.members.size()));
+        builder_.SetInsertPoint(join);
+        llvm::PHINode* name =
+            builder_.CreatePHI(llvm::PointerType::getUnqual(ctx_),
+                               static_cast<unsigned>(eInfo.members.size()),
+                               "member.name");
+        for (const auto& member : eInfo.members) {
+            llvm::BasicBlock* arm = llvm::BasicBlock::Create(ctx_, "arm.name", fn);
+            builder_.SetInsertPoint(arm);
+            name->addIncoming(internedString(member.first), arm);
+            builder_.CreateBr(join);
+            sw->addCase(llvm::ConstantInt::get(
+                llvm::Type::getInt32Ty(ctx_),
+                static_cast<uint64_t>(member.second)), arm);
+        }
+        builder_.SetInsertPoint(wrong);
+        builder_.CreateUnreachable();
+        builder_.SetInsertPoint(join);
+        value_ = CgVal{name, *types_.byName("string")};
     }
 
     // `p.get()`, and `q.get()` where q is a `&Point`.
