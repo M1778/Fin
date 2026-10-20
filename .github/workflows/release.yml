@@ -237,6 +237,13 @@ jobs:
 
       - name: Windows installer
         if: runner.os == 'Windows'
+        env:
+          # `run:` on a Windows runner is Git Bash, and Git Bash rewrites any
+          # argument that begins with `/` into a Windows path before calling a
+          # native .exe. Inno Setup's switches would all arrive rewritten, so
+          # ISCC counted several "script filenames" and quit instantly with
+          # "You may not specify more than one script filename."
+          MSYS2_ARG_CONV_EXCL: "*"
         run: |
           # Inno Setup wraps the portable zip's bytes -- the same stage/ tree,
           # plus an optional PATH entry. No custom installer code; the script

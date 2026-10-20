@@ -24,5 +24,8 @@ work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 root="$work/finc-$version-$target"
 mkdir -p "$root"
 cp -R "$stage/bin" "$stage/lib" "$root/"
-hdiutil create -volname "finc $version" -srcfolder "$root" -ov -format UDZO "$out"
+# `-srcfolder` copies the named directory's *contents* into the volume root,
+# so pass the wrapper's parent: the volume must carry the named folder, not
+# that folder's bin/lib tree laid flat.
+hdiutil create -volname "finc $version" -srcfolder "$work" -ov -format UDZO "$out"
 echo "wrote $out ($(du -h "$out" | cut -f1))"
