@@ -1614,7 +1614,13 @@ TEST(Soundness_Json, TheScalarsRoundTripByteExact) {
     // decode that reads it back. The float leg re-encodes the decoded value:
     // byte-identical output is the %.17g round-trip guarantee made visible
     // (and it is what the stage-agreement harness holds the sample to).
-    EXPECT_EQ(buildBundledAndRun(R"jsonp(
+    //
+    // The literals are locals, not inline macro arguments: MSVC's default
+    // preprocessor does not tokenize raw string literals, and `\"` inside
+    // the argument breaks it when EXPECT_EQ stringizes (C2017, C3688
+    // suffix 'b'). Catch2 documents the same limitation; the workaround is
+    // passing an identifier.
+    const std::string scalars_src = R"jsonp(
 import { json_encode_int, json_decode_int, json_encode_str, json_decode_str,
          json_encode_bool, json_decode_bool, json_encode_float, json_decode_float } from json::std;
 import { equals, free_str } from strings::std;
@@ -1640,13 +1646,14 @@ fun main() <noret> {
     printf("str %s same=%d\n", s, equals(rs.unwrap_or("###"), "a\"b\\c\n\t"));
     free_str(s);
 }
-)jsonp"),
-        R"jsonp(int 42 42
+)jsonp";
+    const std::string scalars_want = R"jsonp(int 42 42
 neg -7 -7
 bool true 1
 float 2.5 eq=2.5
 str "a\"b\\c\n\t" same=1
-)jsonp")
+)jsonp";
+    EXPECT_EQ(buildBundledAndRun(scalars_src), scalars_want)
         << "the scalar spellings drifted from the module header's grammar";
 }
 
@@ -1655,7 +1662,9 @@ TEST(Soundness_Json, TheArraysAndPrototypeMapsRoundTripByteExact) {
     // encode sorts keys (`{"a":1,"b":2}` from a map built in the other
     // order -- the determinism contract), and the `{string, string}` map
     // whose values escape and unescape. Reading back is by key, by index.
-    EXPECT_EQ(buildBundledAndRun(R"jsonp(
+    // (Raw literals as locals, for the same MSVC preprocessor reason as
+    // TheScalarsRoundTripByteExact.)
+    const std::string maps_src = R"jsonp(
 import { json_encode_int_array, json_decode_int_array, json_encode_intmap, json_decode_intmap,
          json_encode_strmap, json_decode_strmap } from json::std;
 import { equals, free_str } from strings::std;
@@ -1690,11 +1699,12 @@ fun main() <noret> {
     printf("smap %s eq=%d\n", ts, equals(got, "value with \"quote\""));
     free_str(ts);
 }
-)jsonp"),
-        R"jsonp(arr [1,2,3] len=3 v0=1 v2=3
+)jsonp";
+    const std::string maps_want = R"jsonp(arr [1,2,3] len=3 v0=1 v2=3
 map {"a":1,"b":2} ok=1 a=1 b=2
 smap {"key":"value with \"quote\""} eq=1
-)jsonp")
+)jsonp";
+    EXPECT_EQ(buildBundledAndRun(maps_src), maps_want)
         << "the structural spellings or the sorted key order changed";
 }
 
@@ -1705,7 +1715,9 @@ TEST(Soundness_Json, ABadDocumentRefusesWithTheKindNamed) {
     // number interrupted by a period -- every one named, none a blame. The
     // pinned wording is the caller-facing surface; a message rewrite is a
     // deliberate change to it.
-    EXPECT_EQ(buildBundledAndRun(R"jsonp(
+    // (Raw literals as locals, for the same MSVC preprocessor reason as
+    // TheScalarsRoundTripByteExact.)
+    const std::string bads_src = R"jsonp(
 import { json_decode_int, json_decode_str, json_decode_float, json_decode_int_array } from json::std;
 fun main() <noret> {
     blame json_decode_int("01").is_err() && json_decode_int("4x").is_err(),
@@ -1718,14 +1730,15 @@ fun main() <noret> {
     let e6 <auto> = json_decode_float("1.2.3");
     printf("%s\n%s\n%s\n%s\n%s\n%s\n", e1.message, e2.message, e3.message, e4.message, e5.message, e6.message);
 }
-)jsonp"),
-        R"jsonp(json_decode_int: a JSON integer has no leading zeros
+)jsonp";
+    const std::string bads_want = R"jsonp(json_decode_int: a JSON integer has no leading zeros
 json_decode_int: trailing data after the value
 json_decode_str: a string never closed
 json_decode_str: a \u escape outside ASCII (v0 utf is a gap)
 json_decode_int_array: expected an integer near the end
 json_decode_float: trailing data after the value
-)jsonp")
+)jsonp";
+    EXPECT_EQ(buildBundledAndRun(bads_src), bads_want)
         << "refusal kinds or wording changed";
 }
 
