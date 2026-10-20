@@ -51,7 +51,14 @@ namespace {
 // directly (same shape as test_opt_agreement.cpp's, for the same reason:
 // `runProcess` folds every signal into -1, and SIGABRT -- `blame` -- is a
 // fate two of these pins assert on).
+//
+// POSIX only, like LoopbackPeer below: the tests use it under
+// `#ifdef _WIN32 ... GTEST_SKIP ... #else ... #endif` fences, so Windows
+// compiles neither the helpers nor their call sites (fork/execvp/waitpid
+// have no Windows spelling).
 // ---------------------------------------------------------------------------
+
+#ifndef _WIN32
 
 struct Proc {
     bool exited = false;
@@ -132,6 +139,8 @@ Proc buildRun(const std::string& source, const std::string& prefix) {
     fs::remove(exe, ec);
     return p;
 }
+
+#endif  // !_WIN32
 
 // ---------------------------------------------------------------------------
 // A loopback peer, POSIX only (Windows never reaches these tests). Set up is
