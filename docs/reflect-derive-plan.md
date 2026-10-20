@@ -112,3 +112,20 @@ Cost estimate: Phase A1 is the real work (analyzer const-fold layer ≈ one
 `Analyzer_Expr`-side builtin family + one codegen blob emitter, plus regression tests);
 A2 is a productization day like #63/#54/#55; Phase B's `derive_hash` reuses A1's
 metadata.
+
+## 6. Status (recorded as of #53's close)
+
+- **Shipped:** A1/A2 as `@type_name`/`@type_size`/`@field_count`/`@field_offset`
+  (ADR 0057 — the zero-arg-generic wrapper spellings `type_of::<T>()` cannot
+  monomorphize on the stage, so the builtins are the v0 surface; R4's rename is
+  therefore moot for now); `derive_hash` (ADR 0058, commit `300458f`);
+  `enum_from!` (ADR 0059, commit `cdc9331`).
+- **Blocked:** `fields_of` + `FieldInfo` — needs a runtime owner for the field
+  name string (ADR 0057 note; `lib/std/reflect.fin` header records it).
+- **Un-owned decisions still open:** R1 untouched; R3 remains the gate for
+  `derive_eq`/`derive_encode` (explicit derives beyond `derive_hash`); Route B
+  never started.
+- **Scope C:** `M1778/fin-sdk` scaffolded (contract-3 snapshot + template +
+  Linf first-rules proof); full linter and `fin fmt`'s Fin-native first pass
+  stay owned by `#50`.
+
