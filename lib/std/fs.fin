@@ -7,12 +7,8 @@
 // dirent symbol set musl, glibc and macOS all export; `readdir`'s record
 // shape differs per platform, and `walk_dir` spells that page out below).
 //
-// WINDOWS is namedly unimplemented the way sync.fin spells it: a child that
-// imports fs::std refuses at the Windows link on this module's `mkdtemp` and
-// `opendir`/`readdir`/`closedir`/`rewinddir` externs (ucrt ships none of the
-// dirent family), so the soundness tests for those paths skip there instead
-// of showing a red link. The directory facts this walk needs wait on a
-// FindFirstFile-shaped spine; nothing here silently degrades in the meantime.
+// Windows uses UCRT file I/O and Win32 directory APIs. Its narrow paths use
+// the same system code page as fopen; these APIs do not promise UTF-8 paths.
 //
 // OWNERSHIP: every string returned by `read_to_string` and by `walk_dir`'s
 // entries is dynamically allocated and caller-owned. `free_file_content`
@@ -30,10 +26,18 @@ namespace std {
 #[llvm_name="fclose"]
 @define fs_fclose(stream: &void) <int>;
 
+#c_ifdef FIN_TARGET_WINDOWS
+#[llvm_name="_fseeki64"]
+#c_else
 #[llvm_name="fseek"]
+#c_endif
 @define fs_fseek(stream: &void, offset: long, whence: int) <int>;
 
+#c_ifdef FIN_TARGET_WINDOWS
+#[llvm_name="_ftelli64"]
+#c_else
 #[llvm_name="ftell"]
+#c_endif
 @define fs_ftell(stream: &void) <long>;
 
 #[llvm_name="fread"]
@@ -91,8 +95,8 @@ pub fun file_size(path: string) <long> {
     return sz;
 }
 
-#[export]
-pub fun? read_to_string(path: string) <string> {
+priv fun? fs_read_content(path: string, size: &ulong) <string> {
+    *size = cast<ulong>(0);
     if (path == null) { return null; }
     let fp <&void> = fs_fopen(path, "rb");
     if (fp == null) { return null; }
@@ -107,7 +111,10 @@ pub fun? read_to_string(path: string) <string> {
         fs_fclose(fp);
         return null;
     }
-    fs_fseek(fp, cast<long>(0), 0);
+    if (fs_fseek(fp, cast<long>(0), 0) != 0) {
+        fs_fclose(fp);
+        return null;
+    }
 
     let u_sz <ulong> = cast<ulong>(sz);
     let buf <string> = fs_calloc(u_sz + cast<ulong>(1), cast<ulong>(1));
@@ -117,9 +124,21 @@ pub fun? read_to_string(path: string) <string> {
     }
     if (u_sz > cast<ulong>(0)) {
         let n_read <ulong> = fs_fread(buf, cast<ulong>(1), u_sz, fp);
+        if (n_read != u_sz) {
+            fs_free(buf);
+            fs_fclose(fp);
+            return null;
+        }
     }
     fs_fclose(fp);
+    *size = u_sz;
     return buf;
+}
+
+#[export]
+pub fun? read_to_string(path: string) <string> {
+    let size <ulong> = cast<ulong>(0);
+    return fs_read_content(path, &size);
 }
 
 #[export]
@@ -144,29 +163,86 @@ pub fun append_string(path: string, content: string) <bool> {
     return written >= 0;
 }
 
-// Copies a whole file byte for byte. Reads the source through `read_to_string`
-// and writes it with `write_string`, so a missing source reads as null and
-// reports `false` rather than creating an empty destination.
+// Copies a whole file byte for byte, including embedded NUL bytes. Reading
+// finishes before opening the destination, so a same-path copy preserves it.
 #[export]
 pub fun copy_file(src: string, dst: string) <bool> {
     if (src == null) { return false; }
     if (dst == null) { return false; }
-    let content? <string> = read_to_string(src);
+    let size <ulong> = cast<ulong>(0);
+    let content? <string> = fs_read_content(src, &size);
     if (content == null) { return false; }
-    let ok <bool> = write_string(dst, content?);
+    let fp <&void> = fs_fopen(dst, "wb");
+    if (fp == null) {
+        free_file_content(content);
+        return false;
+    }
+    let written <ulong> = fs_fwrite(content?, cast<ulong>(1), size, fp);
+    let closed <int> = fs_fclose(fp);
     free_file_content(content);
-    return ok;
+    return written == size && closed == 0;
 }
 
+#c_ifdef FIN_TARGET_WINDOWS
+#[llvm_name="_mkdir"]
+@define fs_mkdir(path: string) <int>;
+
+#[llvm_name="_rmdir"]
+#c_else
 #[llvm_name="mkdir"]
 @define fs_mkdir(path: string, mode: int) <int>;
 
 #[llvm_name="rmdir"]
+#c_endif
 @define fs_rmdir(path: string) <int>;
 
 #[llvm_name="rename"]
 @define fs_rename(old_path: string, new_path: string) <int>;
 
+#c_ifdef FIN_TARGET_WINDOWS
+#[llvm_name="GetFileAttributesA"]
+@define fs_file_attributes(path: string) <uint>;
+
+#[llvm_name="GetTempPathA"]
+@define fs_temp_path(size: uint, buffer: &char) <uint>;
+
+#[llvm_name="CreateDirectoryA"]
+@define fs_create_directory(path: string, security: &void) <int>;
+
+#[llvm_name="GetLastError"]
+@define fs_last_error() <uint>;
+
+#[llvm_name="IsDBCSLeadByteEx"]
+@define fs_is_dbcs_lead(code_page: uint, value: char) <int>;
+
+#[llvm_name="rand_s"]
+@define fs_rand_s(value: &uint) <int>;
+
+#[llvm_name="FindFirstFileA"]
+@define fs_find_first(pattern: string, data: &char) <&void>;
+
+#[llvm_name="FindNextFileA"]
+@define fs_find_next(handle: &void, data: &char) <int>;
+
+#[llvm_name="FindClose"]
+@define fs_find_close(handle: &void) <int>;
+
+#[llvm_name="memcmp"]
+@define fs_compare_handle(handle: &&void, bits: &long, count: ulong) <int>;
+
+priv fun fs_invalid_handle(handle: &void) <bool> {
+    let bits <long> = cast<long>(-1);
+    return fs_compare_handle(&handle, &bits, cast<ulong>(8)) == 0;
+}
+
+priv fun fs_next_path_char(chars: [char], index: int) <int> {
+    let next <int> = index + 1;
+    if (next < chars.length - 1 && cast<uint>(chars[index]) >= cast<uint>(128) && fs_is_dbcs_lead(cast<uint>(0), chars[index]) != 0) {
+        return next + 1;
+    }
+    return next;
+}
+#c_else
 #[llvm_name="opendir"]
 @define fs_opendir(name: string) <&void>;
 
@@ -184,12 +260,17 @@ pub fun copy_file(src: string, dst: string) <bool> {
 
 #[llvm_name="mkdtemp"]
 @define fs_mkdtemp(template: &char) <string>;
+#c_endif
 
 #[export]
 pub fun create_dir(path: string) <bool> {
     if (path == null) { return false; }
+    #c_ifdef FIN_TARGET_WINDOWS
+    return fs_mkdir(path) == 0;
+    #c_else
     // 0755 octal = 493 decimal
     return fs_mkdir(path, 493) == 0;
+    #c_endif
 }
 
 // `mkdir -p`: every missing directory on the way to `path` is created, each
@@ -200,18 +281,40 @@ pub fun create_dir(path: string) <bool> {
 pub fun mkdir_p(path: string) <bool> {
     if (path == null || len(path) == 0) { return false; }
     let chars <[char]> = to_chars(path);
-    let n <int> = chars.length;
+    let n <int> = chars.length - 1;
     let made <bool> = true;
     let i <int> = 0;
+    #c_ifdef FIN_TARGET_WINDOWS
+    if (n >= 2 && chars[1] == ':') {
+        i = 2;
+        if (i < n && (chars[i] == '/' || chars[i] == '\\')) { i = i + 1; }
+    } else if (n >= 2 && (chars[0] == '/' || chars[0] == '\\') && (chars[1] == '/' || chars[1] == '\\')) {
+        i = 2;
+        while (i < n && chars[i] != '/' && chars[i] != '\\') { i = fs_next_path_char(chars, i); }
+        if (i < n) { i = i + 1; }
+        while (i < n && chars[i] != '/' && chars[i] != '\\') { i = fs_next_path_char(chars, i); }
+    }
+    #c_endif
     while (made && i <= n) {
-        if (i == n || chars[i] == cast<char>(47)) {
+        let separator <bool> = i == n;
+        if (i < n) {
+            separator = chars[i] == '/';
+            #c_ifdef FIN_TARGET_WINDOWS
+            separator = separator || chars[i] == '\\';
+            #c_endif
+        }
+        if (separator) {
             let prefix <string> = substr(path, 0, i);
             if (len(prefix) > 0 && !is_dir(prefix)) {
                 made = create_dir(prefix);
             }
             free_str(prefix);
         }
+        #c_ifdef FIN_TARGET_WINDOWS
+        i = fs_next_path_char(chars, i);
+        #c_else
         i = i + 1;
+        #c_endif
     }
     delete chars;
     return made;
@@ -232,10 +335,15 @@ pub fun rename_path(old_path: string, new_path: string) <bool> {
 #[export]
 pub fun is_dir(path: string) <bool> {
     if (path == null) { return false; }
+    #c_ifdef FIN_TARGET_WINDOWS
+    let attrs <uint> = fs_file_attributes(path);
+    return attrs != cast<uint>(4294967295) && attrs / cast<uint>(16) % cast<uint>(2) == cast<uint>(1);
+    #c_else
     let dir <&void> = fs_opendir(path);
     if (dir == null) { return false; }
     fs_closedir(dir);
     return true;
+    #c_endif
 }
 
 #[export]
@@ -244,7 +352,8 @@ pub fun is_file(path: string) <bool> {
     return file_exists(path) && !is_dir(path);
 }
 
-// A fresh uniquely-named directory under /tmp: `mk_tmp_dir("finfs")` spellings
+// A fresh uniquely-named directory under the platform's temporary directory.
+// On POSIX, `mk_tmp_dir("finfs")` spellings
 // build `/tmp/finfs` followed by the six characters `mkdtemp` overwrites, so
 // no call ever touches a fixed path and the caller's cwd stays clean. The
 // template must live in writable memory, so it is spelled through a `[char]`
@@ -254,7 +363,58 @@ pub fun is_file(path: string) <bool> {
 #[export]
 pub fun? mk_tmp_dir(prefix: string) <string> {
     if (prefix == null) { return null; }
-    let base <string> = concat(concat("/tmp/", prefix), "XXXXXX");
+    #c_ifdef FIN_TARGET_WINDOWS
+    let temp_chars <[char]> = new [char, 261]{};
+    let temp_len <uint> = fs_temp_path(cast<uint>(261), &temp_chars[0]);
+    if (temp_len == cast<uint>(0) || temp_len >= cast<uint>(261)) {
+        delete temp_chars;
+        return null;
+    }
+    let temp <string> = from_chars(temp_chars, 0, cast<int>(temp_len));
+    delete temp_chars;
+    let base <string> = concat(temp, prefix);
+    free_str(temp);
+    let suffix <[char]> = new [char, 17]{};
+    let attempt <int> = 0;
+    while (attempt < 128) {
+        let random <uint> = cast<uint>(0);
+        let i <int> = 0;
+        while (i < 16) {
+            if (i % 8 == 0 && fs_rand_s(&random) != 0) {
+                delete suffix;
+                free_str(base);
+                return null;
+            }
+            let digit <int> = cast<int>(random % cast<uint>(16));
+            if (digit < 10) { suffix[i] = cast<char>(cast<int>('0') + digit); }
+            else { suffix[i] = cast<char>(cast<int>('a') + digit - 10); }
+            random = random / cast<uint>(16);
+            i = i + 1;
+        }
+        let tail <string> = from_chars(suffix, 0, 16);
+        let candidate <string> = concat(base, tail);
+        free_str(tail);
+        if (fs_create_directory(candidate, null) != 0) {
+            delete suffix;
+            free_str(base);
+            return candidate;
+        }
+        let err <uint> = fs_last_error();
+        free_str(candidate);
+        if (err != cast<uint>(183) && err != cast<uint>(80)) {
+            delete suffix;
+            free_str(base);
+            return null;
+        }
+        attempt = attempt + 1;
+    }
+    delete suffix;
+    free_str(base);
+    return null;
+    #c_else
+    let start <string> = concat("/tmp/", prefix);
+    let base <string> = concat(start, "XXXXXX");
+    free_str(start);
     let chars <[char]> = to_chars(base);
     free_str(base);
     let made <string> = fs_mkdtemp(&chars[0]);
@@ -262,100 +422,128 @@ pub fun? mk_tmp_dir(prefix: string) <string> {
     let fresh <string> = clone(made);
     delete chars;
     return fresh;
+    #c_endif
 }
 
+priv fun fs_dot_entry(raw: [char], start: int) <bool> {
+    return raw[start] == '.' && (raw[start + 1] == cast<char>(0) || (raw[start + 1] == '.' && raw[start + 2] == cast<char>(0)));
+}
+
+#c_ifdef FIN_TARGET_WINDOWS
+#c_else
+#c_ifdef FIN_TARGET_DARWIN
+#c_ifdef FIN_TARGET_X86_64
+#cdef FS_DIRENT_NAME 8
+#cdef FS_DIRENT_RECLEN 4
+#c_else
+#cdef FS_DIRENT_NAME 21
+#cdef FS_DIRENT_RECLEN 16
+#c_endif
+#c_else
+#cdef FS_DIRENT_NAME 19
+#cdef FS_DIRENT_RECLEN 16
+#c_endif
+
+priv fun fs_read_dirent(raw: [char], ent: string) <int> {
+    fs_memcpy(&raw[0], ent, cast<ulong>(FS_DIRENT_NAME));
+    let reclen <int> = (cast<int>(raw[FS_DIRENT_RECLEN]) & 255) + (cast<int>(raw[FS_DIRENT_RECLEN + 1]) & 255) * 256;
+    blame reclen > FS_DIRENT_NAME && reclen <= 1048, "dirent d_reclen outside the target record layout walk_dir reads";
+    fs_memcpy(&raw[0], ent, cast<ulong>(reclen));
+    return reclen;
+}
+#c_endif
+
 // The entries of one directory (not recursive), with `.` and `..` left out,
-// in the directory's order.
-//
-// There is no pointer arithmetic in this library -- a `&char` does not add
-// an integer and does not index -- so `readdir`'s dirent pointer is copied
-// whole through `fs_memcpy` into a `[char]` buffer and read back there.
-// `opendir`/`readdir`/`closedir` is the one dirent symbol set musl, glibc
-// and macOS all export (musl ships no `getdirentries` at all, which is why
-// the walk leaves that path), and it is also why the record shape cannot be
-// fixed at build time: the same `readdir` call hands back three shapes --
-// the legacy 32-bit-inode record on darwin x86_64 (`d_reclen` at 4..5,
-// `d_namlen` at 7, name at 8), glibc/musl's 64-bit-inode record (`d_reclen`
-// at 16..17, `d_type` at 18, name at 19), and darwin arm64's identical head
-// with `d_namlen` at 18..19, so its name lands at 21. Each shape is told
-// apart per record: byte 7 is `d_namlen` (at least 1) on the legacy kind and
-// the top byte of `d_ino` (0 in practice) on the 64-bit kind; byte 19 is a
-// name character on glibc/musl and the high byte of `d_namlen` (0) on
-// darwin arm64. Each shape windows its own `d_reclen` before the name is
-// read, and anything outside the window refuses loudly rather than guessing.
+// in the directory's order. POSIX record offsets follow the selected target
+// ABI, never inode or filename bytes. Windows reads WIN32_FIND_DATAA's name
+// at byte 44 in its 320-byte record. Both passes close their directory handles.
 #[export]
 pub fun walk_dir(path: string) <[string]> {
     let nothing <[string]> = new [string, 0]{};
-    if (path == null) { return nothing; }
+    if (path == null || len(path) == 0) { return nothing; }
+    #c_ifdef FIN_TARGET_WINDOWS
+    let chars <[char]> = to_chars(path);
+    let suffix <string> = "/*";
+    let last <int> = 0;
+    let i <int> = 0;
+    while (i < chars.length - 1) {
+        last = i;
+        i = fs_next_path_char(chars, i);
+    }
+    if (chars[last] == '/' || chars[last] == '\\' || (chars.length == 3 && chars[1] == ':')) { suffix = "*"; }
+    delete chars;
+    let pattern <string> = concat(path, suffix);
+    let raw <[char]> = new [char, 320]{};
+    let dir <&void> = fs_find_first(pattern, &raw[0]);
+    if (fs_invalid_handle(dir)) {
+        free_str(pattern);
+        delete raw;
+        return nothing;
+    }
+    let count <int> = 0;
+    let more <int> = 1;
+    while (more != 0) {
+        if (!fs_dot_entry(raw, 44)) { count = count + 1; }
+        more = fs_find_next(dir, &raw[0]);
+    }
+    fs_find_close(dir);
+    let out <[string]> = new [string, count]{};
+    if (count == 0) {
+        free_str(pattern);
+        delete raw;
+        return out;
+    }
+    dir = fs_find_first(pattern, &raw[0]);
+    free_str(pattern);
+    if (fs_invalid_handle(dir)) {
+        delete raw;
+        return out;
+    }
+    let fill <int> = 0;
+    more = 1;
+    while (fill < count && more != 0) {
+        if (!fs_dot_entry(raw, 44)) {
+            let end <int> = 44;
+            while (end < 304 && raw[end] != cast<char>(0)) { end = end + 1; }
+            blame end < 304, "WIN32_FIND_DATAA name is not NUL terminated inside its record";
+            out[fill] = from_chars(raw, 44, end - 44);
+            fill = fill + 1;
+        }
+        more = fs_find_next(dir, &raw[0]);
+    }
+    fs_find_close(dir);
+    delete raw;
+    return out;
+    #c_else
     let dir <&void> = fs_opendir(path);
     if (dir == null) { return nothing; }
-
-    let raw <[char]> = new [char, 320]{};
-
-    // Pass one counts the entries this answer will hold.
+    let raw <[char]> = new [char, 1048]{};
     let count <int> = 0;
     while (true) {
         let ent <string> = fs_readdir(dir);
         if (ent == null) { break; }
-        // Three record shapes share this buffer (see walk_dir's header):
-        // byte 7 picks the legacy kind from the 64-bit kind, byte 19 splits
-        // the two 64-bit shapes, each branch windows its own reclen.
-        let head <&char> = fs_memcpy(&raw[0], ent, cast<ulong>(24));
-        let reclen <int> = 0;
-        let name_start <int> = 0;
-        if (raw[7] == cast<char>(0)) {
-            reclen = cast<int>(raw[16]) + cast<int>(raw[17]) * 256;
-            blame reclen >= 21 && reclen < 320, "dirent d_reclen outside the 64-bit-record layout walk_dir reads";
-            name_start = 19;
-            if (raw[19] == cast<char>(0)) { name_start = 21; }
-        } else {
-            reclen = cast<int>(raw[4]) + cast<int>(raw[5]) * 256;
-            blame reclen >= 12 && reclen < 320, "dirent d_reclen outside the legacy record layout walk_dir reads";
-            name_start = 8;
-        }
-        let body <&char> = fs_memcpy(&raw[0], ent, cast<ulong>(reclen));
-        if (raw[name_start] == cast<char>(46) && (raw[name_start + 1] == cast<char>(0) || (raw[name_start + 1] == cast<char>(46) && raw[name_start + 2] == cast<char>(0)))) {
-            continue;
-        }
+        fs_read_dirent(raw, ent);
+        if (fs_dot_entry(raw, FS_DIRENT_NAME)) { continue; }
         count = count + 1;
     }
-
-    // Pass two spells each name out of the same buffer.
     fs_rewinddir(dir);
     let out <[string]> = new [string, count]{};
     let fill <int> = 0;
     while (fill < count) {
         let ent <string> = fs_readdir(dir);
         if (ent == null) { break; }
-        let head <&char> = fs_memcpy(&raw[0], ent, cast<ulong>(24));
-        let reclen <int> = 0;
-        let name_start <int> = 0;
-        if (raw[7] == cast<char>(0)) {
-            reclen = cast<int>(raw[16]) + cast<int>(raw[17]) * 256;
-            blame reclen >= 21 && reclen < 320, "dirent d_reclen outside the 64-bit-record layout walk_dir reads";
-            name_start = 19;
-            if (raw[19] == cast<char>(0)) { name_start = 21; }
-        } else {
-            reclen = cast<int>(raw[4]) + cast<int>(raw[5]) * 256;
-            blame reclen >= 12 && reclen < 320, "dirent d_reclen outside the legacy record layout walk_dir reads";
-            name_start = 8;
-        }
-        let body <&char> = fs_memcpy(&raw[0], ent, cast<ulong>(reclen));
-        if (raw[name_start] == cast<char>(46) && (raw[name_start + 1] == cast<char>(0) || (raw[name_start + 1] == cast<char>(46) && raw[name_start + 2] == cast<char>(0)))) {
-            continue;
-        }
-        let name_end <int> = name_start;
-        while (name_end < reclen && raw[name_end] != cast<char>(0)) {
-            name_end = name_end + 1;
-        }
-        blame name_end < reclen, "dirent name is not NUL terminated inside its record";
-        out[fill] = from_chars(raw, name_start, name_end - name_start);
+        let reclen <int> = fs_read_dirent(raw, ent);
+        if (fs_dot_entry(raw, FS_DIRENT_NAME)) { continue; }
+        let end <int> = FS_DIRENT_NAME;
+        while (end < reclen && raw[end] != cast<char>(0)) { end = end + 1; }
+        blame end < reclen, "dirent name is not NUL terminated inside its record";
+        out[fill] = from_chars(raw, FS_DIRENT_NAME, end - FS_DIRENT_NAME);
         fill = fill + 1;
     }
-
     delete raw;
     fs_closedir(dir);
     return out;
+    #c_endif
 }
 
 }

@@ -134,8 +134,20 @@ namespace std {
 // yet`, and `stdio.io_fflush(null)` gives the qualified form of the same refusal. An extern
 // is no better off than a Fin function here. What `#[global]` buys is the prototype splice
 // (ADR 0021), the one mechanism that puts a declaration into the program the backend walks.
+#c_ifdef FIN_TARGET_WINDOWS
+#[llvm_name="__acrt_iob_func"]
+@define io_iob(index: uint) <&void>;
+
+#[llvm_name="fprintf"]
+@define io_dprintf(handle: &void, fmt: string, ...) <int>;
+
+priv fun io_stderr() <&void> { return io_iob(cast<uint>(2)); }
+#c_else
 #[llvm_name="dprintf"]
 @define io_dprintf(fd: int, fmt: string, ...) <int>;
+
+priv fun io_stderr() <int> { return 2; }
+#c_endif
 
 #[llvm_name="fflush"]
 @define io_fflush(handle: &void) <int>;
@@ -152,13 +164,25 @@ namespace std {
 #[llvm_name="fwrite"]
 @define io_fwrite(buffer: string, size: ulong, count: ulong, handle: &void) <ulong>;
 
+#c_ifdef FIN_TARGET_WINDOWS
+#[llvm_name="_fseeki64"]
+#c_else
 #[llvm_name="fseek"]
+#c_endif
 @define io_fseek(handle: &void, offset: long, whence: int) <int>;
 
+#c_ifdef FIN_TARGET_WINDOWS
+#[llvm_name="_ftelli64"]
+#c_else
 #[llvm_name="ftell"]
+#c_endif
 @define io_ftell(handle: &void) <long>;
 
+#c_ifdef FIN_TARGET_WINDOWS
+#[llvm_name="_access"]
+#c_else
 #[llvm_name="access"]
+#c_endif
 @define io_access(path: string, mode: int) <int>;
 
 #[llvm_name="remove"]
@@ -173,7 +197,7 @@ pub interface Printable {
 
 #[export]
 pub fun print<X: Printable>(object: X) <noret> {
-    printf(object.format_str());
+    printf("%s", object.format_str());
 }
 
 #[export]
@@ -186,12 +210,12 @@ pub fun println<X: Printable>(object: X) <noret> {
 // stderr and not stdout wearing the name.
 #[export]
 pub fun eprint<X: Printable>(object: X) <noret> {
-    let written <int> = io_dprintf(2, "%s", object.format_str());
+    let written <int> = io_dprintf(io_stderr(), "%s", object.format_str());
 }
 
 #[export]
 pub fun eprintln<X: Printable>(object: X) <noret> {
-    let written <int> = io_dprintf(2, "%s\n", object.format_str());
+    let written <int> = io_dprintf(io_stderr(), "%s\n", object.format_str());
 }
 
 // The un-`Printable` forms, for the values that have no `format_str` and never will. A
@@ -206,12 +230,12 @@ pub fun println_str(text: string) <noret> { printf("%s\n", text); }
 
 #[export]
 pub fun eprint_str(text: string) <noret> {
-    let written <int> = io_dprintf(2, "%s", text);
+    let written <int> = io_dprintf(io_stderr(), "%s", text);
 }
 
 #[export]
 pub fun eprintln_str(text: string) <noret> {
-    let written <int> = io_dprintf(2, "%s\n", text);
+    let written <int> = io_dprintf(io_stderr(), "%s\n", text);
 }
 
 #[export]
@@ -231,23 +255,23 @@ pub fun println_bool(value: bool) <noret> { printf("%d\n", value); }
 
 #[export]
 pub fun eprint_bool(value: bool) <noret> {
-    let written <int> = io_dprintf(2, "%d", value);
+    let written <int> = io_dprintf(io_stderr(), "%d", value);
 }
 
 #[export]
 pub fun eprintln_bool(value: bool) <noret> {
-    let written <int> = io_dprintf(2, "%d\n", value);
+    let written <int> = io_dprintf(io_stderr(), "%d\n", value);
 }
 
 // The stderr half `print_int` never got. Same rendering, the other stream.
 #[export]
 pub fun eprint_int(value: int) <noret> {
-    let written <int> = io_dprintf(2, "%d", value);
+    let written <int> = io_dprintf(io_stderr(), "%d", value);
 }
 
 #[export]
 pub fun eprintln_int(value: int) <noret> {
-    let written <int> = io_dprintf(2, "%d\n", value);
+    let written <int> = io_dprintf(io_stderr(), "%d\n", value);
 }
 
 // The floating-point half. `%g` gives the shortest round-tripping spelling --
@@ -260,12 +284,12 @@ pub fun println_double(value: double) <noret> { printf("%g\n", value); }
 
 #[export]
 pub fun eprint_double(value: double) <noret> {
-    let written <int> = io_dprintf(2, "%g", value);
+    let written <int> = io_dprintf(io_stderr(), "%g", value);
 }
 
 #[export]
 pub fun eprintln_double(value: double) <noret> {
-    let written <int> = io_dprintf(2, "%g\n", value);
+    let written <int> = io_dprintf(io_stderr(), "%g\n", value);
 }
 
 // `fflush(null)` flushes every open stream, which is what C specifies for a null argument.
@@ -359,6 +383,7 @@ pub interface IStream {
       fun write(data: [char], count: int) <int>;
       fun expand(nbytes: int) <noret>;
       fun capacity() <int>;
+      fun free_stream() <noret>;
 }
 
 // An in-memory byte stream. `stream_length` is how much content it holds and
@@ -379,6 +404,14 @@ pub struct Stream : <IStream> {
       fun remaining(self: &Self) <int> { return self.stream_length - self.pointer; }
 
       fun rewind(self: &Self) <noret> { self.pointer = 0; }
+
+      fun free_stream(self: &Self) <noret> {
+        if (self.stream != null) { delete self.stream; }
+        let empty <[char]>;
+        self.stream = empty;
+        self.stream_length = 0;
+        self.pointer = 0;
+      }
 
       // Seeking to exactly `stream_length` is allowed and leaves the stream at its end,
       // which is where a sequence of full reads finishes. A negative offset is not: it
@@ -418,6 +451,8 @@ pub struct Stream : <IStream> {
       // only grow a buffer nothing could fill.
       fun write(self: &Self, data: [char], count: int) <int> {
         blame count >= 0, "a write count cannot be negative";
+        blame count <= data.length, "a write count exceeds its input";
+        blame count <= 2147483647 - self.pointer, "stream length exceeds the int limit";
         let room <int> = self.stream.length - self.pointer;
         if (count > room) { self.expand(count - room); }
         for (let i <int> = 0; i < count; i++) {
@@ -433,6 +468,7 @@ pub struct Stream : <IStream> {
       // version this replaces got wrong when it added `nbytes` to `stream_length`.
       fun expand(self: &Self, nbytes: int) <noret> {
         blame nbytes >= 0, "cannot expand by a negative amount";
+        blame nbytes <= 2147483647 - self.stream.length, "stream capacity exceeds the int limit";
         let bigger <[char]> = new [char, self.stream.length + nbytes]{};
         for (let i <int> = 0; i < self.stream_length; i++) {
             bigger[i] = self.stream[i];
@@ -442,6 +478,7 @@ pub struct Stream : <IStream> {
       }
 
       Stream(data: [char], length: int) {
+        blame length >= 0 && length <= data.length, "stream length exceeds its storage";
         self.stream = data;
         self.stream_length = length;
         self.pointer = 0;
@@ -492,6 +529,7 @@ pub struct File : <FileIO> {
         let sought <int> = io_fseek(handle, cast<long>(0), 2);
         let at <long> = io_ftell(handle);
         let closed <int> = io_fclose(handle);
+        if (sought != 0 || closed != 0 || at < 0 || at > 2147483647) { return -1; }
         return cast<int>(at);
       }
 
@@ -504,13 +542,23 @@ pub struct File : <FileIO> {
       // (`Invalid cast from '[char]' to '&char'`), and taking the address of the first
       // element does what the cast was for.
       static fun read_all(path: string) <[char]> {
-        let extent <int> = File::size(path);
-        blame extent >= 0, "cannot read a file that does not open";
         let handle <&void> = io_fopen(path, "rb");
         blame handle != null, "cannot open the file for reading";
+        let sought <int> = io_fseek(handle, cast<long>(0), 2);
+        let measured <long> = io_ftell(handle);
+        let rewound <int> = io_fseek(handle, cast<long>(0), 0);
+        if (sought != 0 || rewound != 0 || measured < 0 || measured >= 2147483647) {
+            io_fclose(handle);
+            blame false, "cannot measure the file within the stream size limit";
+        }
+        let extent <int> = cast<int>(measured);
         let buffer <[char]> = new [char, extent + 1]{};
         let got <ulong> = io_fread(&buffer[0], cast<ulong>(1), cast<ulong>(extent), handle);
         let closed <int> = io_fclose(handle);
+        if (got != cast<ulong>(extent) || closed != 0) {
+            delete buffer;
+            blame false, "cannot read the complete file";
+        }
         buffer[extent] = cast<char>(0);
         return buffer;
       }
@@ -526,7 +574,7 @@ pub struct File : <FileIO> {
         if (handle == null) { return false; }
         let wrote <ulong> = io_fwrite(text, cast<ulong>(1), cast<ulong>(count), handle);
         let closed <int> = io_fclose(handle);
-        return cast<int>(wrote) == count;
+        return cast<int>(wrote) == count && closed == 0;
       }
 
       // Appends instead of truncating. Same shape, `"ab"` instead of `"wb"`, and it is a
@@ -538,7 +586,7 @@ pub struct File : <FileIO> {
         if (handle == null) { return false; }
         let wrote <ulong> = io_fwrite(text, cast<ulong>(1), cast<ulong>(count), handle);
         let closed <int> = io_fclose(handle);
-        return cast<int>(wrote) == count;
+        return cast<int>(wrote) == count && closed == 0;
       }
 
       static fun remove(path: string) <bool> {
