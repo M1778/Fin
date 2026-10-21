@@ -74,7 +74,13 @@ std::vector<std::string> defaultLinkLibs() {
     // would break the link rather than help it. Winsock is not in the CRT,
     // though: a program that uses the socket API needs ws2_32.lib, and the
     // linker says so by name when it is missing.
-    return {"ws2_32.lib"};
+    //
+    // The library is named with -l, not by bare file name: clang passes a
+    // bare `ws2_32.lib` to the linker as an input file path, and the linker
+    // then looks for it in the working directory instead of in the SDK's
+    // library directories. With -l, the driver resolves the name through
+    // the library search path the environment provides.
+    return {"-lws2_32"};
 #else
     return {"-Wl,--as-needed", llvmLib, "-lm"};
 #endif
