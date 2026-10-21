@@ -65,7 +65,7 @@ begin
     if (OrigPath <> '') and (OrigPath[Length(OrigPath)] <> ';') then
       OrigPath := OrigPath + ';';
     OrigPath := OrigPath + ExpandConstant('{app}\bin') + ';';
-    RegWriteExpandszValue(HKCU, EnvironmentKey, 'Path', OrigPath);
+    RegWriteExpandStringValue(HKCU, EnvironmentKey, 'Path', OrigPath);
   end;
 end;
 
@@ -86,7 +86,7 @@ begin
       break;
     P := Pos(Removed, OrigPath);
   end;
-  RegWriteExpandszValue(HKCU, EnvironmentKey, 'Path', OrigPath);
+  RegWriteExpandStringValue(HKCU, EnvironmentKey, 'Path', OrigPath);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
