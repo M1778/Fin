@@ -121,6 +121,13 @@ jobs:
           fi
           echo "lib/std contains $(find lib/std -name '*.fin' | wc -l) .fin files"
 
+      - name: Check the Windows installer script
+        run: |
+          # The .iss can only be compiled by ISCC on a Windows runner, so a
+          # typo in its [Code] section otherwise costs a whole Windows rebuild
+          # to discover.  Here it costs a second, on Linux.
+          python3 .github/scripts/check_installer.py tools/packaging/finc.iss
+
   build:
     name: ${{ matrix.target }}
     needs: preflight
@@ -251,6 +258,9 @@ jobs:
           iscc="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
           if [ ! -x "$iscc" ]; then choco install innosetup -y --no-progress; fi
           [ -x "$iscc" ] || { echo "::error::ISCC.exe not found after install"; exit 1; }
+          # Same check preflight runs on Linux; repeated here so this job does
+          # not depend on another job having run it.
+          uv run --no-project python .github/scripts/check_installer.py tools/packaging/finc.iss
           case "$FIN_TARGET" in
             aarch64*) fin_arch=arm64 ;;
             *) fin_arch=x64compatible ;;
