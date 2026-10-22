@@ -316,7 +316,11 @@ pub struct Channel<T> {
         sync_mutex_lock(&self.m[0]);
         while (self.c == 0) {
             sync_mutex_unlock(&self.m[0]);
+            #c_ifdef FIN_TARGET_WINDOWS
+            sync_sleep(50);
+            #c_else
             sync_usleep(50);
+            #c_endif
             sync_mutex_lock(&self.m[0]);
         }
         let first <T> = self.a[0];
@@ -337,7 +341,15 @@ pub struct Channel<T> {
 // initializer and this file says so by passing it.
 fun init_lock() <[long]> {
     let m <[long]> = new [long, 8]{};
+    #c_ifdef FIN_TARGET_WINDOWS
+    // An SRW lock needs no initialization beyond being zeroed, and the
+    // InitializeSRWLock call does that.
+    sync_mutex_init(&m[0]);
+    #c_else
+    // `pthread_mutex_init` default-attributes. `null` attributes is the
+    // default initializer and this file says so by passing it.
     sync_mutex_init(&m[0], null);
+    #c_endif
     return m;
 }
 
