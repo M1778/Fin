@@ -14,6 +14,8 @@ struct MacroDef {
 
 class Preprocessor {
 public:
+    Preprocessor();
+
     // Takes raw source, returns processed source (with #cdefs resolved)
     std::string process(const std::string& source);
 

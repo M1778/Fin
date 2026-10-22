@@ -7,9 +7,37 @@
 namespace std {
 
 #[export]
+#c_ifdef FIN_TARGET_WINDOWS
+#[llvm_name="_time64"]
+#c_else
 #[llvm_name="time"]
+#c_endif
 @define time(t: &void) <long>;
 
+#c_ifdef FIN_TARGET_WINDOWS
+#[llvm_name="Sleep"]
+@define time_sleep(ms: uint) <noret>;
+
+#[export]
+pub fun sleep(secs: uint) <uint> {
+    while (secs > cast<uint>(4294967)) {
+        time_sleep(cast<uint>(4294967000));
+        secs = secs - cast<uint>(4294967);
+    }
+    time_sleep(secs * cast<uint>(1000));
+    return cast<uint>(0);
+}
+
+#[export]
+pub fun usleep(usecs: uint) <int> {
+    let ms <uint> = usecs / cast<uint>(1000);
+    if (usecs % cast<uint>(1000) != cast<uint>(0)) {
+        ms = ms + cast<uint>(1);
+    }
+    time_sleep(ms);
+    return 0;
+}
+#c_else
 #[export]
 #[llvm_name="sleep"]
 @define sleep(secs: uint) <uint>;
@@ -17,6 +45,7 @@ namespace std {
 #[export]
 #[llvm_name="usleep"]
 @define usleep(usecs: uint) <int>;
+#c_endif
 
 #[export]
 pub fun now() <long> {
@@ -30,7 +59,19 @@ pub fun sleep_sec(secs: uint) <noret> {
 
 #[export]
 pub fun sleep_ms(ms: uint) <noret> {
-    usleep(ms * cast<uint>(1000));
+    #c_ifdef FIN_TARGET_WINDOWS
+    if (ms == cast<uint>(4294967295)) {
+        time_sleep(ms - cast<uint>(1));
+        time_sleep(cast<uint>(1));
+    } else {
+        time_sleep(ms);
+    }
+    #c_else
+    if (ms >= cast<uint>(1000)) {
+        sleep(ms / cast<uint>(1000));
+    }
+    usleep((ms % cast<uint>(1000)) * cast<uint>(1000));
+    #c_endif
 }
 
 #[export]
@@ -40,18 +81,52 @@ pub fun diff_sec(start: long, end: long) <long> {
 
 // Nanosecond clocks, durations, and RFC3339 timestamps, through libc.
 //
-// Precision: `Instant::now` reads CLOCK_MONOTONIC (id 1 on Linux, 6 on macOS;
-// Linux is tried first), so it never jumps with the wall clock but says nothing
+// Precision: `Instant::now` reads CLOCK_MONOTONIC (id 1 on Linux, 6 on macOS)
+// or QueryPerformanceCounter on Windows, so it never jumps with the wall clock but says nothing
 // about wall time. `format_rfc3339` renders a wall-clock epoch instead, and the
 // two clocks cannot be compared with each other yet. Inside a VM either clock
 // can jump when the host suspends or migrates the guest; a negative `elapsed`
 // after such a jump is reported, not hidden.
-// Windows is unimplemented: it has no libc `clock_gettime`, so the blame in
-// `Instant::now` names the platform rather than failing the link silently.
 
+#c_ifdef FIN_TARGET_WINDOWS
+#[llvm_name="QueryPerformanceCounter"]
+@define time_counter(out: &long) <int>;
+
+#[llvm_name="QueryPerformanceFrequency"]
+@define time_frequency(out: &long) <int>;
+
+priv fun time_counter_fraction(ticks: long, frequency: long) <long> {
+    if (frequency <= 9223372036) {
+        return ticks * 1000000000 / frequency;
+    }
+    let result <long> = 0;
+    let remainder <long> = 0;
+    let bit <long> = 536870912;
+    while (bit > 0) {
+        result = result * 2;
+        if (remainder >= frequency - remainder) {
+            remainder = remainder - (frequency - remainder);
+            result++;
+        } else {
+            remainder = remainder * 2;
+        }
+        if ((1000000000 / bit) % 2 != 0) {
+            if (remainder >= frequency - ticks) {
+                remainder = remainder - (frequency - ticks);
+                result++;
+            } else {
+                remainder = remainder + ticks;
+            }
+        }
+        bit = bit / 2;
+    }
+    return result;
+}
+#c_else
 #[export]
 #[llvm_name="clock_gettime"]
 @define time_clock_gettime(clk_id: int, tp: &long) <int>;
+#c_endif
 
 #[llvm_name="calloc"]
 @define time_calloc(count: ulong, size: ulong) <string>;
@@ -99,18 +174,31 @@ pub struct Instant {
 
     pub:
       static fun now() <Instant> {
+        #c_ifdef FIN_TARGET_WINDOWS
+        let ticks <long> = 0;
+        let frequency <long> = 0;
+        blame time_frequency(&frequency) != 0 && frequency > 0, "QueryPerformanceFrequency failed";
+        blame time_counter(&ticks) != 0 && ticks >= 0, "QueryPerformanceCounter failed";
+        let secs <long> = ticks / frequency;
+        let fraction <long> = time_counter_fraction(ticks % frequency, frequency);
+        blame secs <= (9223372036854775807 - fraction) / 1000000000,
+          "QueryPerformanceCounter exceeds the Instant nanosecond range";
+        return Instant{nanos: secs * 1000000000 + fraction};
+        #c_else
         // `timespec` is two consecutive longs (sec, nsec) on Linux and macOS,
         // so it is a `[long, 2]` rather than a declared struct: an extern
         // cannot take a Fin struct, per networking.fin.
         let ts <[long]> = new [long, 2]{};
+        #c_ifdef FIN_TARGET_DARWIN
+        let rc <int> = time_clock_gettime(6, &ts[0]);
+        #c_else
         let rc <int> = time_clock_gettime(1, &ts[0]);
-        if (rc != 0) {
-            rc = time_clock_gettime(6, &ts[0]);
-        }
-        blame rc == 0, "clock_gettime(MONOTONIC) failed: unimplemented on this platform (Windows has no libc clock_gettime)";
+        #c_endif
+        blame rc == 0, "clock_gettime(MONOTONIC) failed";
         let ns <long> = ts[0] * 1000000000 + ts[1];
         delete ts;
         return Instant{nanos: ns};
+        #c_endif
       }
 
       static fun deadline_after_ms(ms: long) <Instant> {

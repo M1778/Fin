@@ -131,6 +131,29 @@ A trailing backslash continues a preprocessor line.
 
 `#c_ifndef` is not implemented as an inverse test; use `#c_ifdef` with `#c_else`.
 
+Each source file and imported module starts with definitions for the compiler's
+native target. Use these presence-only names with `#c_ifdef`:
+
+| Selection | Defined name |
+| --- | --- |
+| Operating system | One of `FIN_TARGET_WINDOWS`, `FIN_TARGET_DARWIN`, `FIN_TARGET_LINUX` |
+| Architecture | One of `FIN_TARGET_X86_64`, `FIN_TARGET_ARM64` |
+
+They let a library select the declarations and layouts its target ABI requires:
+
+```fin fragment
+#c_ifdef FIN_TARGET_WINDOWS
+@define _putenv_s(name: string, value: string) <int>;
+#c_else
+@define setenv(name: string, value: string, overwrite: int) <int>;
+#c_endif
+```
+
+These definitions describe the native compilation target; they do not read the
+environment or other runtime host facts. Foreign `--target` builds remain
+refused, and the flag does not change preprocessing (ADR 0051). Compile-time
+branching on values read from the host remains prohibited (ADR 0017).
+
 ## Attributes and grouped declarations
 
 An attribute precedes its declaration: `#[name]`, `#[name(args)]`, or a supported

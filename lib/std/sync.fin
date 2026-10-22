@@ -90,6 +90,65 @@ import { Outcome } from outcome::std;
 
 namespace std {
 
+#c_ifdef FIN_TARGET_WINDOWS
+// Windows has no pthreads. A thread is a `_beginthreadex` handle, a lock is
+// an exclusive SRW lock, and the poll sleep is Sleep.
+#[llvm_name="_beginthreadex"]
+@define sync_begin_thread(attr: &void, stack: uint, body: fn(&void) => uint, arg: &void, flags: uint, id: &uint) <ulong>;
+
+// A thread handle is a pointer-sized value and the struct field is a
+// pointer, so the bits are moved across.
+#[llvm_name="memcpy"]
+@define sync_handle_copy(dst: &void, src: &void, count: ulong) <&void>;
+
+#[llvm_name="WaitForSingleObject"]
+@define sync_wait_thread(h: &void, timeout: uint) <uint>;
+
+#[llvm_name="CloseHandle"]
+@define sync_close_thread(h: &void) <int>;
+
+#[llvm_name="InitializeSRWLock"]
+@define sync_mutex_init(m: &void) <noret>;
+
+#[llvm_name="AcquireSRWLockExclusive"]
+@define sync_mutex_lock(m: &void) <noret>;
+
+#[llvm_name="ReleaseSRWLockExclusive"]
+@define sync_mutex_unlock(m: &void) <noret>;
+
+#[llvm_name="Sleep"]
+@define sync_sleep(milliseconds: uint) <noret>;
+
+// The Fin body is carried in heap storage, because the native start routine
+// has a different signature. The carrier is released by `join`, not by the
+// thread: the body it holds is the closure that is still running, and freeing
+// it there would free running code.
+struct ThreadBody {
+    body <fn() => noret>,
+};
+
+// The native start routine. A named function with a C name, because a lambda
+// in a call argument is a runtime value and the compiler does not lower a
+// runtime function value as a C callback.
+//
+// The Windows routine returns a uint and the POSIX one returns a pointer, so
+// there is one per platform.
+#[llvm_name="fin_sync_run_body"]
+pub fun sync_run_body(arg: &void) <&void> {
+    let carried <&ThreadBody> = cast<&ThreadBody>(arg);
+    let callback <fn() => noret> = carried.body;
+    callback();
+    return null;
+}
+
+#[llvm_name="fin_sync_run_body_win"]
+pub fun sync_run_body_win(arg: &void) <uint> {
+    let carried <&ThreadBody> = cast<&ThreadBody>(arg);
+    let callback <fn() => noret> = carried.body;
+    callback();
+    return cast<uint>(0);
+}
+#c_else
 #[export]
 #[llvm_name="pthread_create"]
 @define sync_thread_create(out: &void, attr: &void, body: fn() => noret, arg: &void) <int>;
@@ -113,6 +172,7 @@ namespace std {
 #[export]
 #[llvm_name="usleep"]
 @define sync_usleep(usecs: uint) <int>;
+#c_endif
 
 // One OS thread, identified by the handle `pthread_create` wrote into the
 // slot at spawn. The struct is a value; copies of it name the same thread,
@@ -122,25 +182,53 @@ namespace std {
 #[export]
 pub struct Thread {
     h <&void>,
+      #c_ifdef FIN_TARGET_WINDOWS
+    // The heap carrier for the Fin body, released by `join`.
+    state <&void>,
+      #c_endif
 
-      // Launches `body` on a new OS thread and blames instead of returning a
-      // broken handle if pthread refuses. The body is carried as the
-      // start routine itself with no argument: state it needs arrives
-      // through a capture (reference compiler, snapshot semantics) or
-      // through shared storage of the caller's own arranging.
-      static fun spawn(body: fn() => noret) <Thread> {
+    // Launches `body` on a new OS thread and blames instead of returning a
+    // broken handle if pthread refuses. The body is carried as the
+    // start routine itself with no argument: state it needs arrives
+    // through a capture (reference compiler, snapshot semantics) or
+    // through shared storage of the caller's own arranging.
+    static fun spawn(body: fn() => noret) <Thread> {
+        #c_ifdef FIN_TARGET_WINDOWS
+        let state <&void> = null;
+        let carrier <&ThreadBody> = new ThreadBody{body: body};
+        let handle <ulong> = sync_begin_thread(null, cast<uint>(0), sync_run_body_win, carrier, cast<uint>(0), null);
+        if (handle == cast<ulong>(0)) {
+            delete carrier;
+            blame false, "cannot spawn a thread";
+        }
+        let pointer <&void> = null;
+        sync_handle_copy(&pointer, &handle, cast<ulong>(8));
+        return Thread{h: pointer, state: carrier};
+        #c_else
         let h <&void> = null;
         let rc <int> = sync_thread_create(&h, null, body, null);
         blame rc == 0, "cannot spawn a thread";
         return Thread{h: h};
-      }
+        #c_endif
+    }
 
     // Blocks until the thread's body has returned. No result is taken: the
     // language has no out-parameter, so a body that produces a value sends
     // it through shared storage (a channel, a mutex-guarded variable) and
     // `join` only closes the timing hole after it.
     fun join(self: &Thread) <noret> {
+        #c_ifdef FIN_TARGET_WINDOWS
+        let rc <uint> = sync_wait_thread(self.h, cast<uint>(-1));
+        blame rc == cast<uint>(0), "cannot join a thread";
+        blame sync_close_thread(self.h) != 0, "cannot close a thread handle";
+        // The carrier outlives the thread it held, so it is released here.
+        if (self.state != null) {
+            delete self.state;
+            self.state = null;
+        }
+        #c_else
         sync_thread_join(self.h, null);
+        #c_endif
     }
 }
 
@@ -228,7 +316,11 @@ pub struct Channel<T> {
         sync_mutex_lock(&self.m[0]);
         while (self.c == 0) {
             sync_mutex_unlock(&self.m[0]);
+            #c_ifdef FIN_TARGET_WINDOWS
+            sync_sleep(50);
+            #c_else
             sync_usleep(50);
+            #c_endif
             sync_mutex_lock(&self.m[0]);
         }
         let first <T> = self.a[0];
@@ -249,7 +341,15 @@ pub struct Channel<T> {
 // initializer and this file says so by passing it.
 fun init_lock() <[long]> {
     let m <[long]> = new [long, 8]{};
+    #c_ifdef FIN_TARGET_WINDOWS
+    // An SRW lock needs no initialization beyond being zeroed, and the
+    // InitializeSRWLock call does that.
+    sync_mutex_init(&m[0]);
+    #c_else
+    // `pthread_mutex_init` default-attributes. `null` attributes is the
+    // default initializer and this file says so by passing it.
     sync_mutex_init(&m[0], null);
+    #c_endif
     return m;
 }
 

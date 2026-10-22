@@ -76,3 +76,25 @@ decision to emit happens in `generateObject`, not in argument parsing.
 - Whether `--target` with the exact host triple should warn (it currently does not — it is
   accepted silently, the same as omitting the flag). This was the smallest change that
   satisfies the "no silent host binary" guarantee.
+
+## Addendum — native ABI selectors (2026-10-20)
+
+Every source file, including an imported module, starts preprocessing with the
+definitions for the compiler's native target. On the supported platforms exactly
+one of `FIN_TARGET_WINDOWS`, `FIN_TARGET_DARWIN`, and `FIN_TARGET_LINUX` is defined,
+along with exactly one of `FIN_TARGET_X86_64` and `FIN_TARGET_ARM64`. These are
+presence-only definitions for the existing `#c_ifdef` facility, not numeric
+values or a new compiler component.
+
+The C++ preprocessor seeds them from the target used to build the compiler. The
+self-host driver compiles the same selections into its own preprocessing step,
+so subsequent stages and imported modules select the same declarations. Library
+code can use these names to select linker symbols and ABI layouts without
+probing the running machine or guessing a record layout at run time.
+
+This preserves the native-target pin: `--target` does not change these selections
+and foreign code generation still refuses. The selectors describe the target ABI,
+not available memory, environment variables, or other host values. ADR 0017's
+prohibition on compile-time branching on host values remains unchanged. Future
+cross compilation must derive these definitions from the explicitly selected
+target together with the backend target machine.

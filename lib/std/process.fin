@@ -11,11 +11,19 @@ namespace std {
 @define proc_system(command: string) <int>;
 
 #[export]
+#c_ifdef FIN_TARGET_WINDOWS
+#[llvm_name="_popen"]
+#c_else
 #[llvm_name="popen"]
+#c_endif
 @define proc_popen(command: string, mode: string) <&void>;
 
 #[export]
+#c_ifdef FIN_TARGET_WINDOWS
+#[llvm_name="_pclose"]
+#c_else
 #[llvm_name="pclose"]
+#c_endif
 @define proc_pclose(stream: &void) <int>;
 
 #[export]

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Networking: TCP over IPv4, through the C library's socket calls.
+// Networking: TCP over IPv4, through POSIX sockets or Winsock 2.
 //
 // The file this replaces was empty on purpose, and the empty file's argument is
 // recorded here because the module that now stands under it was built by
@@ -30,14 +30,14 @@
 //   * Blocking: blocking, like `File`'s reads. Non-blocking I/O is a state
 //     machine the corpus has no sample for; this module does not invent one.
 //   * A connection is a `Socket`: a struct wrapping the descriptor, so the
-//     type system can tell a listener from an int. The descriptor is `.0`,
-//     and a closed socket is a `Socket` whose `.0` is negative, the same way
-//     a closed `FILE*` handle is null behind `stdio.fin`'s functions.
+//     type system can tell a listener from an int. Its `.fd` holds the
+//     native handle; a successful close invalidates it. Each Windows socket
+//     holds one Winsock startup reference, released when that socket closes.
 //
 // The wire details are filled by hand rather than through a declared struct:
 // an extern cannot take or return a Fin struct (declareFunction refuses the
 // aggregate on the ABI question), so `sockaddr_in` is its sixteen bytes in a
-// `[char, 16]`, family first, port and address in network order. The
+// `[int, 4]`, family first, port and address in network order. The
 // arithmetic writes them the way `htons` and `inet_addr` already ordered
 // them, big-endian, high byte first.
 //
@@ -65,45 +65,90 @@
 //     received, which `read_all`-style callers await a growing-buffer API.
 namespace std {
 
+#c_ifdef FIN_TARGET_WINDOWS
+type SocketHandle = ulong;
+type SocketSize = int;
+type SocketCount = int;
+type AddressLength = int;
+
+#[llvm_name="WSAStartup"]
+@define net_startup(version: ushort, data: &void) <int>;
+
+#[llvm_name="WSACleanup"]
+@define net_cleanup() <int>;
+#c_else
+type SocketHandle = int;
+type SocketSize = ulong;
+type SocketCount = long;
+type AddressLength = uint;
+#c_endif
+
 #[export]
 #[llvm_name="socket"]
-@define c_socket(domain: int, kind: int, protocol: int) <int>;
+@define c_socket(domain: int, kind: int, protocol: int) <SocketHandle>;
 
 #[export]
 #[llvm_name="connect"]
-@define c_connect(fd: int, addr: &int, len: int) <int>;
+@define c_connect(fd: SocketHandle, addr: &int, len: AddressLength) <int>;
 
 #[export]
 #[llvm_name="bind"]
-@define c_bind(fd: int, addr: &int, len: int) <int>;
+@define c_bind(fd: SocketHandle, addr: &int, len: AddressLength) <int>;
 
 #[export]
 #[llvm_name="listen"]
-@define c_listen(fd: int, backlog: int) <int>;
+@define c_listen(fd: SocketHandle, backlog: int) <int>;
 
 #[export]
 #[llvm_name="accept"]
-@define c_accept(fd: int, addr: &int, len: &int) <int>;
+#c_ifdef FIN_TARGET_WINDOWS
+@define c_accept(fd: SocketHandle, addr: &int, len: &int) <SocketHandle>;
+#c_else
+@define c_accept(fd: SocketHandle, addr: &int, len: &uint) <SocketHandle>;
+#c_endif
 
 #[export]
 #[llvm_name="getsockname"]
-@define c_getsockname(fd: int, addr: &int, len: &int) <int>;
+#c_ifdef FIN_TARGET_WINDOWS
+@define c_getsockname(fd: SocketHandle, addr: &int, len: &int) <int>;
+#c_else
+@define c_getsockname(fd: SocketHandle, addr: &int, len: &uint) <int>;
+#c_endif
 
 #[export]
 #[llvm_name="send"]
-@define c_send(fd: int, buf: string, len: int, flags: int) <int>;
+@define c_send(fd: SocketHandle, buf: string, len: SocketSize, flags: int) <SocketCount>;
 
 #[export]
 #[llvm_name="recv"]
-@define c_recv(fd: int, buf: &char, len: int, flags: int) <int>;
+@define c_recv(fd: SocketHandle, buf: &char, len: SocketSize, flags: int) <SocketCount>;
 
 #[export]
+#c_ifdef FIN_TARGET_WINDOWS
+#[llvm_name="closesocket"]
+#c_else
 #[llvm_name="close"]
-@define c_close(fd: int) <int>;
+#c_endif
+@define c_close(fd: SocketHandle) <int>;
 
 #[export]
 #[llvm_name="inet_addr"]
-@define c_inet_addr(cp: string) <int>;
+@define c_inet_addr(cp: string) <uint>;
+
+fun net_acquire() <noret> {
+    #c_ifdef FIN_TARGET_WINDOWS
+    let data <[long]> = new [long, 51]{};
+    let status <int> = net_startup(cast<ushort>(514), &data[0]);
+    delete data;
+    blame status == 0, "cannot initialize Winsock";
+    #c_endif
+}
+
+fun net_release() <noret> {
+    #c_ifdef FIN_TARGET_WINDOWS
+    blame net_cleanup() == 0, "cannot release Winsock";
+    #c_endif
+}
 
 // The pieces `http_get` composes with are not externs of this module's own:
 // a second `#[llvm_name="strcpy"]` in the crate is a link question the
@@ -112,7 +157,7 @@ namespace std {
 // stringified through strings::std's `concat`/`from_chars`, and only the
 // length of a `read` answer is measured here, by the terminator
 // `recv_bytes` wrote.
-import { concat, from_chars, len } from strings::std;
+import { concat, from_chars, len, free_str } from strings::std;
 
 // The length of a `read` answer. `recv_bytes` writes the terminator at the
 // count it received, so the scan stops there; that terminator is the length
@@ -135,24 +180,30 @@ priv fun blen(b: [char]) <int> {
 // platform writes it the same way C does. The port is packed through a `long`
 // so that the high byte's term does not overflow an `int` on the way in.
 pub struct Socket {
-    fd <int>,
+    fd <SocketHandle>,
 
       // Dials `host`:`port` and blocks until the connection is established.
       // The `sockaddr_in` is built before the socket, so a malformed address
       // blames before anything is opened.
       static fun dial(host: string, port: int) <Socket> {
         blame port > 0, "a port is positive";
-        let a <int> = c_inet_addr(host);
-        blame a != -1, "cannot parse the address as a dotted quad";
+        net_acquire();
+        let a <uint> = c_inet_addr(host);
+        blame a != cast<uint>(-1), "cannot parse the address as a dotted quad";
         let addr <[int]> = new [int, 4]{};
         addr[0] = cast<int>(2 + cast<long>(port / 256) * 65536 +
           cast<long>(port % 256) * 16777216);
-        addr[1] = a;
-        let fd <int> = c_socket(2, 1, 0);   // AF_INET, SOCK_STREAM
-        blame fd >= 0, "cannot open a socket";
-        let err <int> = c_connect(fd, &addr[0], 16);
+        #c_ifdef FIN_TARGET_DARWIN
+        addr[0] = addr[0] + 526;
+        #c_endif
+        addr[1] = cast<int>(a);
+        let fd <SocketHandle> = c_socket(2, 1, 0);   // AF_INET, SOCK_STREAM
+        blame fd != cast<SocketHandle>(-1), "cannot open a socket";
+        let err <int> = c_connect(fd, &addr[0], cast<AddressLength>(16));
+        delete addr;
         if (err != 0) {
             c_close(fd);
+            net_release();
             blame err == 0, "cannot connect";
         }
         return Socket{fd: fd};
@@ -165,20 +216,27 @@ pub struct Socket {
     static fun serve(port: int, backlog: int) <Socket> {
         blame port >= 0, "a port cannot be negative";
         blame backlog > 0, "a backlog is positive";
+        net_acquire();
         let addr <[int]> = new [int, 4]{};
         addr[0] = cast<int>(2 + cast<long>(port / 256) * 65536 +
           cast<long>(port % 256) * 16777216);
+        #c_ifdef FIN_TARGET_DARWIN
+        addr[0] = addr[0] + 526;
+        #c_endif
         addr[1] = 0;                  // INADDR_ANY
-        let fd <int> = c_socket(2, 1, 0);
-        blame fd >= 0, "cannot open a socket";
-        let bound <int> = c_bind(fd, &addr[0], 16);
+        let fd <SocketHandle> = c_socket(2, 1, 0);
+        blame fd != cast<SocketHandle>(-1), "cannot open a socket";
+        let bound <int> = c_bind(fd, &addr[0], cast<AddressLength>(16));
+        delete addr;
         if (bound != 0) {
             c_close(fd);
+            net_release();
             blame bound == 0, "cannot bind";
         }
         let err <int> = c_listen(fd, backlog);
         if (err != 0) {
             c_close(fd);
+            net_release();
             blame err == 0, "cannot listen";
         }
         return Socket{fd: fd};
@@ -189,9 +247,11 @@ pub struct Socket {
     // zeroed `sockaddr_in` storage is what `accept` writes into on this call.
     fun accept_conn(self: &Socket) <Socket> {
         let peer <[int]> = new [int, 4]{};
-        let peerlen <int> = 16;
-        let fd <int> = c_accept(self.fd, &peer[0], &peerlen);
-        blame fd >= 0, "cannot accept a connection";
+        let peerlen <AddressLength> = cast<AddressLength>(16);
+        net_acquire();
+        let fd <SocketHandle> = c_accept(self.fd, &peer[0], &peerlen);
+        delete peer;
+        blame fd != cast<SocketHandle>(-1), "cannot accept a connection";
         return Socket{fd: fd};
     }
 
@@ -201,7 +261,7 @@ pub struct Socket {
     // that is a `blame`, which is why this one answers instead of raising.
     fun send_text(self: &Socket, text: string, count: int) <bool> {
         blame count >= 0, "a send count cannot be negative";
-        let sent <int> = c_send(self.fd, text, count, 0);
+        let sent <int> = cast<int>(c_send(self.fd, text, cast<SocketSize>(count), 0));
         return sent == count;
     }
 
@@ -211,8 +271,11 @@ pub struct Socket {
     fun recv_bytes(self: &Socket, cap: int) <[char]> {
         blame cap > 0, "a receive capacity is positive";
         let buffer <[char]> = new [char, cap]{};
-        let got <int> = c_recv(self.fd, &buffer[0], cap, 0);
-        blame got >= 0, "cannot receive";
+        let got <int> = cast<int>(c_recv(self.fd, &buffer[0], cast<SocketSize>(cap), 0));
+        if (got < 0) {
+            delete buffer;
+            blame false, "cannot receive";
+        }
         if (got == 0) {
             return buffer;
         }
@@ -223,6 +286,7 @@ pub struct Socket {
             i = i + 1;
         }
         out[got] = cast<char>(0);
+        delete buffer;
         return out;
     }
 
@@ -237,22 +301,28 @@ pub struct Socket {
     // answer with the wrong bytes.
     fun local_port(self: &Socket) <int> {
         let got <[int]> = new [int, 4]{};
-        let glen <int> = 16;
+        let glen <AddressLength> = cast<AddressLength>(16);
         let r <int> = c_getsockname(self.fd, &got[0], &glen);
         blame r == 0, "cannot read the local address";
         let u <uint> = cast<uint>(got[0]);
+        delete got;
         let hi <uint> = (u / cast<uint>(65536)) % cast<uint>(256);
         let lo <uint> = (u / cast<uint>(16777216)) % cast<uint>(256);
         return cast<int>(hi * cast<uint>(256) + lo);
     }
 
-    // Closes. The second close of one descriptor is refused by the platform,
-    // and the refusal says so here rather than being left to `close(2)`.
+    // Closes and invalidates this handle. A repeated close answers false.
     fun shutdown(self: &Socket) <bool> {
-        if (self.fd < 0) {
+        if (self.fd == cast<SocketHandle>(-1)) {
             return false;
         }
-        return c_close(self.fd) == 0;
+        let status <int> = c_close(self.fd);
+        if (status != 0) {
+            return false;
+        }
+        self.fd = cast<SocketHandle>(-1);
+        net_release();
+        return true;
     }
 }
 
@@ -277,7 +347,7 @@ pub struct TcpStream {
     // compares instead of guessing.
     fun write(self: &TcpStream, text: string, count: int) <int> {
         blame count >= 0, "a write count cannot be negative";
-        return c_send(self.s.fd, text, count, 0);
+        return cast<int>(c_send(self.s.fd, text, cast<SocketSize>(count), 0));
     }
 
     // Reads up to `cap` bytes into a fresh buffer and answers what arrived;
@@ -287,8 +357,7 @@ pub struct TcpStream {
         return self.s.recv_bytes(cap);
     }
 
-    // Closes. Answers whether the descriptor went; the negative-fd
-    // convention `Socket` established stays.
+    // Closes. Answers whether the native socket was released.
     fun close(self: &TcpStream) <bool> {
         return self.s.shutdown();
     }
@@ -326,15 +395,21 @@ pub struct TcpListener {
 // The stretch demo: one blocking HTTP/1.0 GET over this surface, bytes
 // capped at 4096 because the module has no growing-buffer API yet to offer
 // an uncapped answer. `host` is a dotted quad (the refusal above is why);
-// there is no TLS. The returned `string` is caller-owned heap; the scratch
-// arrays inside are abandoned to process exit, the same trade
-// `Socket::dial`'s `sockaddr` storage makes.
+// there is no TLS. The returned `string` is caller-owned heap (`free_str`);
+// request strings and receive buffers are released before returning.
 #[export]
 pub fun http_get(host: string, port: int, path: string) <string> {
     let srv <TcpStream> = TcpStream::connect(host, port);
-    let req <string> = concat(concat(concat(concat("GET ", path), " HTTP/1.0\r\nHost: "), host), "\r\n\r\n");
+    let target <string> = concat("GET ", path);
+    let line <string> = concat(target, " HTTP/1.0\r\nHost: ");
+    free_str(target);
+    let headers <string> = concat(line, host);
+    free_str(line);
+    let req <string> = concat(headers, "\r\n\r\n");
+    free_str(headers);
     let nreq <int> = len(req);
     let wrote <int> = srv.write(req, nreq);
+    free_str(req);
     blame wrote == nreq, "cannot send the request whole";
     let resp <[char]> = new [char, 4097]{};
     let total <int> = 0;
@@ -349,6 +424,7 @@ pub fun http_get(host: string, port: int, path: string) <string> {
             resp[total + i] = got[i];
             i = i + 1;
         }
+        delete got;
         total = total + rlen;
         if (rlen == 0) {
             // The peer's half-close, unchanged from `recv_bytes`' answer.
@@ -357,7 +433,9 @@ pub fun http_get(host: string, port: int, path: string) <string> {
     }
     srv.close();
     resp[total] = cast<char>(0);
-    return from_chars(resp, 0, total);
+    let result <string> = from_chars(resp, 0, total);
+    delete resp;
+    return result;
 }
 
 }

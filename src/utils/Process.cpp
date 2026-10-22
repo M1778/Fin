@@ -70,14 +70,17 @@ std::vector<std::string> defaultLinkLibs() {
     if (!keg.empty()) return {"-L" + keg, "-lLLVM", "-lm"};
     return {"-lLLVM", "-lm"};
 #elif defined(_WIN32)
-    // Nothing: the clang/MSVC driver links the CRT itself, so GNU
-    // `-l`/`-Wl,` flags would break the link rather than help it, and a
-    // plain Fin object references no LLVM symbols (proven by
-    // MachineContract.DashOProducesTheNamedExecutable passing on Windows).
-    // A self-host object that does call the LLVM C API fails here with
-    // unresolved symbols, which Driver::runLinker reports by name with the
-    // FIN_CC/FIN_LDFLAGS pointer -- there is no silent default to guess.
-    return {};
+    // The clang/MSVC driver links the CRT itself, so GNU `-l`/`-Wl,` flags
+    // would break the link rather than help it. Winsock is not in the CRT,
+    // though: a program that uses the socket API needs ws2_32.lib, and the
+    // linker says so by name when it is missing.
+    //
+    // The library is named with -l, not by bare file name: clang passes a
+    // bare `ws2_32.lib` to the linker as an input file path, and the linker
+    // then looks for it in the working directory instead of in the SDK's
+    // library directories. With -l, the driver resolves the name through
+    // the library search path the environment provides.
+    return {"-lws2_32"};
 #else
     return {"-Wl,--as-needed", llvmLib, "-lm"};
 #endif
