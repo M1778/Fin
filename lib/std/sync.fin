@@ -130,12 +130,23 @@ struct ThreadBody {
 // The native start routine. A named function with a C name, because a lambda
 // in a call argument is a runtime value and the compiler does not lower a
 // runtime function value as a C callback.
+//
+// The Windows routine returns a uint and the POSIX one returns a pointer, so
+// there is one per platform.
 #[llvm_name="fin_sync_run_body"]
 pub fun sync_run_body(arg: &void) <&void> {
     let carried <&ThreadBody> = cast<&ThreadBody>(arg);
     let callback <fn() => noret> = carried.body;
     callback();
     return null;
+}
+
+#[llvm_name="fin_sync_run_body_win"]
+pub fun sync_run_body_win(arg: &void) <uint> {
+    let carried <&ThreadBody> = cast<&ThreadBody>(arg);
+    let callback <fn() => noret> = carried.body;
+    callback();
+    return cast<uint>(0);
 }
 #c_else
 #[export]
@@ -185,7 +196,7 @@ pub struct Thread {
         #c_ifdef FIN_TARGET_WINDOWS
         let state <&void> = null;
         let carrier <&ThreadBody> = new ThreadBody{body: body};
-        let handle <ulong> = sync_begin_thread(null, cast<uint>(0), sync_run_body, carrier, cast<uint>(0), null);
+        let handle <ulong> = sync_begin_thread(null, cast<uint>(0), sync_run_body_win, carrier, cast<uint>(0), null);
         if (handle == cast<ulong>(0)) {
             delete carrier;
             blame false, "cannot spawn a thread";
