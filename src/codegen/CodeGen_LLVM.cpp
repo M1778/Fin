@@ -9383,7 +9383,24 @@ private:
         // every other `fn` value makes, while a direct call keeps calling the
         // function itself. A named function captures nothing by construction,
         // which is why the env is null rather than snapshot.
-        auto fn = functions_.find(node.name);
+        //
+        // The name may name a function the *owning module* declares, and that
+        // one is registered under a module-qualified key rather than the bare
+        // name (see moduleKeyOf). The bare lookup below would miss it, so the
+        // owner is asked first -- the same order the call path uses
+        // (ensureOwnerCallable, then moduleKeyOf), because a value is a callee
+        // and the two paths must agree on which declaration a name names.
+        std::string fnKey = node.name;
+        if (currentOwner_) {
+            const std::string ownerKey = moduleKeyOf(currentOwner_, node.name);
+            if (functions_.count(ownerKey) ||
+                (ensureOwnerCallable(node.name, currentOwner_) &&
+                 functions_.count(ownerKey))) {
+                fnKey = ownerKey;
+            }
+            if (failed_) return;  // ensureOwnerCallable already reported
+        }
+        auto fn = functions_.find(fnKey);
         if (fn != functions_.end()) {
             std::optional<CgType> type = fnValueType(fn->second);
             if (!type) {
@@ -9394,7 +9411,7 @@ private:
                 unsupported(node, fmt::format("the function '{}' used as a value", node.name));
                 return;
             }
-            const std::string wrap = closureWrapForValue(node, node.name, *type);
+            const std::string wrap = closureWrapForValue(node, fnKey, *type);
             if (failed_ || wrap.empty()) return;
             auto wrapped = functions_.find(wrap);
             if (wrapped == functions_.end()) return;  // already reported

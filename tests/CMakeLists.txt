@@ -24,6 +24,7 @@ add_executable(fin_tests
     test_mem.cpp
     test_sync_net.cpp
     test_target_selectors.cpp
+    test_module_callback.cpp
     test_infra_contract.cpp
     Corpus.cpp
     Pipeline.cpp
