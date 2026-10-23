@@ -10,7 +10,7 @@
 # `pkgver` to the tag's version and fill `sha256sums` from the tarball's
 # `.sha256` sidecar on the release page.
 pkgname=finc-bin
-pkgver=0.4.0
+pkgver=1.0.0
 pkgrel=1
 pkgdesc='Fin systems programming language compiler (static binary)'
 arch=('x86_64')

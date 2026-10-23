@@ -56,7 +56,7 @@ priv fun slice_str(chars: [char], start: int, len: int) <string> {
 pub struct Scanner {
     priv:
       _chars <[char]>,
-      _len <int> = 0,
+      _len <int> = -1,
       cursor <int> = 0,
       line <int> = 1,
       col <int> = 1,
@@ -81,9 +81,9 @@ pub struct Scanner {
       }
 
       fun destroy(self: &Self) <noret> {
-        if (self._len > 0) {
+        if (self._len >= 0) {
             delete self._chars;
-            self._len = 0;
+            self._len = -1;
         }
       }
 

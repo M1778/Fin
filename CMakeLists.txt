@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(FinCompiler VERSION 0.4.0 LANGUAGES CXX C)
+project(FinCompiler VERSION 1.0.0 LANGUAGES CXX C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -316,7 +316,7 @@ target_include_directories(fin_core PUBLIC
 #
 # PUBLIC on fin_core, so it reaches finc and fin_tests through the link without
 # either of them naming it.  The macro is a string literal: `FINC_VERSION` is
-# `"0.4.0"`, not `0.4.0`.
+# quoted, so consumers receive a C++ string literal.
 target_compile_definitions(fin_core PUBLIC FINC_VERSION="${PROJECT_VERSION}")
 
 if(MSVC)

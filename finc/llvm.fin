@@ -259,8 +259,26 @@ pub struct LLVMBlockArgs {
 #[llvm_name="LLVMGetInsertBlock"]
 @define llvm_get_insert_block(b: &LLVMBuilder) <&LLVMBasicBlock>;
 
+#[llvm_name="LLVMGetEntryBasicBlock"]
+@define llvm_get_entry_basic_block(fn_val: &LLVMValue) <&LLVMBasicBlock>;
+
+#[llvm_name="LLVMGetFirstInstruction"]
+@define llvm_get_first_instruction(block: &LLVMBasicBlock) <&LLVMValue>;
+
+#[llvm_name="LLVMPositionBuilderBefore"]
+@define llvm_position_builder_before(builder: &LLVMBuilder, instruction: &LLVMValue) <noret>;
+
 #[llvm_name="LLVMGetBasicBlockTerminator"]
 @define llvm_get_basic_block_terminator(bb: &LLVMBasicBlock) <&LLVMValue>;
+
+#[llvm_name="LLVMGetFirstBasicBlock"]
+@define llvm_get_first_basic_block(fn_val: &LLVMValue) <&LLVMBasicBlock>;
+
+#[llvm_name="LLVMGetNextBasicBlock"]
+@define llvm_get_next_basic_block(bb: &LLVMBasicBlock) <&LLVMBasicBlock>;
+
+#[llvm_name="LLVMGetInstructionOpcode"]
+@define llvm_get_instruction_opcode(instruction: &LLVMValue) <int>;
 
 // Constants
 #[llvm_name="LLVMConstInt"]

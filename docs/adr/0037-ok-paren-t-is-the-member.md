@@ -2,7 +2,9 @@
 
 **Status:** Accepted
 
-> 2026-10-20 status: the ruling stands and remains unlowered — enum representation stays unruled; payloads and `Ok(10)` construction still refuse, and `Ok(T)` comparisons still diagnose (full suite 2931/2931).
+> 2026-10-21 status: representation is settled by ADR 0041. Payload construction,
+> generic enum instantiation, and the normative `enums.fin` execution are covered
+> by executable tests.
 
 `enum_ == Ok(T)` asks whether the value holds the `Ok` member: the `T` is the
 payload type as written in the member's declaration -- disambiguation, not a
@@ -12,8 +14,6 @@ no existential reading in which `T` stands for an arbitrary payload.
 
 ## Consequences
 
-Lowering is a discriminant comparison, which waits on enum representation
-(tag width and payload union are still unruled, and payloads refuse today).
-`Ok(10)` construction in the same sample needs the same representation first.
-Until then the diagnostic stands, and it stands for a missing representation
-rather than a missing ruling.
+Lowering is a discriminant comparison over the tagged-union representation in
+ADR 0041. `Ok(10)` constructs a value with that member's tag and payload; `Ok(T)`
+in comparison position tests the member identity.

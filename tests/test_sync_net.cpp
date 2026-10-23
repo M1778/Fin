@@ -12,9 +12,6 @@
 // Each Fin program is compiled with the suite's finc binary (the reference
 // compiler; the captures these programs need are a reference-compiler
 // capability, recorded in lib/std/sync.fin's header) and run as a child.
-// Windows skips everything here by mechanism, not belief: the `sync_*` and
-// the socket externs do not resolve there, and the refusal the linker then
-// names is what the module headers predict.
 
 #include <gtest/gtest.h>
 
@@ -23,23 +20,23 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <thread>
 #include <unistd.h>
 #endif
 
 #include "Corpus.hpp"
 
-#ifndef _WIN32
 #include "utils/Process.hpp"
-#endif
 
 namespace fs = std::filesystem;
 using namespace fin::testing;
@@ -52,13 +49,7 @@ namespace {
 // `runProcess` folds every signal into -1, and SIGABRT -- `blame` -- is a
 // fate two of these pins assert on).
 //
-// POSIX only, like LoopbackPeer below: the tests use it under
-// `#ifdef _WIN32 ... GTEST_SKIP ... #else ... #endif` fences, so Windows
-// compiles neither the helpers nor their call sites (fork/execvp/waitpid
-// have no Windows spelling).
 // ---------------------------------------------------------------------------
-
-#ifndef _WIN32
 
 struct Proc {
     bool exited = false;
@@ -69,13 +60,16 @@ struct Proc {
     std::string err;
 };
 
-// Runs `bin` as a child, capturing fate and streams. POSIX only -- callers
-// skip before reaching it on Windows.
+// Runs `bin` as a child, capturing fate and streams.
 Proc runBinary(const std::string& bin) {
     const fs::path outPath = uniqueTempPath("syncnet_out");
     const fs::path errPath = uniqueTempPath("syncnet_err");
-    const pid_t pid = ::fork();
     Proc p;
+#ifdef _WIN32
+    p.exitCode = fin::runProcess({bin}, outPath.string(), errPath.string());
+    p.exited = p.exitCode != -1;
+#else
+    const pid_t pid = ::fork();
     if (pid < 0) {
         p.err = "fork failed";
         return p;
@@ -107,6 +101,8 @@ Proc runBinary(const std::string& bin) {
         p.signaled = true;
         p.termSig = WTERMSIG(status);
     }
+
+#endif
     p.out = readProcessOutput(outPath.string());
     p.err = stripAnsi(readProcessOutput(errPath.string()));
     std::error_code ec;
@@ -140,10 +136,8 @@ Proc buildRun(const std::string& source, const std::string& prefix) {
     return p;
 }
 
-#endif  // !_WIN32
-
 // ---------------------------------------------------------------------------
-// A loopback peer, POSIX only (Windows never reaches these tests). Set up is
+// A loopback peer. Set up is
 // done on the calling thread -- bind/listen before any child exists, so a
 // client's connect cannot race the listen -- and `serveOne` runs afterwards
 // on a peer thread: read up to `want` request bytes, answer once,
@@ -151,43 +145,79 @@ Proc buildRun(const std::string& source, const std::string& prefix) {
 // cannot hang the test process beyond 15 seconds.
 // ---------------------------------------------------------------------------
 
-#ifndef _WIN32
+#ifdef _WIN32
+using SocketHandle = SOCKET;
+using SocketLength = int;
+constexpr SocketHandle kInvalidSocket = INVALID_SOCKET;
+#else
+using SocketHandle = int;
+using SocketLength = socklen_t;
+constexpr SocketHandle kInvalidSocket = -1;
+#endif
+
+class SocketRuntime {
+public:
+    SocketRuntime() {
+#ifdef _WIN32
+        WSADATA data{};
+        ok_ = WSAStartup(MAKEWORD(2, 2), &data) == 0;
+#endif
+    }
+    ~SocketRuntime() {
+#ifdef _WIN32
+        if (ok_) WSACleanup();
+#endif
+    }
+    bool ok() const { return ok_; }
+private:
+    bool ok_ = true;
+};
+
+void closeSocket(SocketHandle fd) {
+#ifdef _WIN32
+    closesocket(fd);
+#else
+    ::close(fd);
+#endif
+}
+
 class LoopbackPeer {
 public:
     // A real listener on an ephemeral loopback port, open before any child.
     LoopbackPeer() {
+        if (!runtime_.ok()) return;
         fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (fd_ < 0) {
+        if (fd_ == kInvalidSocket) {
             return;
         }
         int one = 1;
-        setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&one), sizeof(one));
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         addr.sin_port = 0;
         if (bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-            ::close(fd_);
-            fd_ = -1;
+            closeSocket(fd_);
+            fd_ = kInvalidSocket;
             return;
         }
-        socklen_t len = sizeof(addr);
+        SocketLength len = sizeof(addr);
         getsockname(fd_, reinterpret_cast<sockaddr*>(&addr), &len);
         port_ = ntohs(addr.sin_port);
         if (listen(fd_, 8) != 0) {
-            ::close(fd_);
-            fd_ = -1;
+            closeSocket(fd_);
+            fd_ = kInvalidSocket;
         }
     }
     ~LoopbackPeer() {
-        if (fd_ >= 0) {
-            ::close(fd_);
+        if (fd_ != kInvalidSocket) {
+            closeSocket(fd_);
         }
     }
     LoopbackPeer(const LoopbackPeer&) = delete;
     LoopbackPeer& operator=(const LoopbackPeer&) = delete;
 
-    bool ok() const { return fd_ >= 0; }
+    bool ok() const { return fd_ != kInvalidSocket; }
     int port() const { return port_; }
 
     // One connection: reads until at least `want` request bytes arrived
@@ -200,38 +230,45 @@ public:
         FD_SET(fd_, &rfds);
         timeval tv{};
         tv.tv_sec = 15;
-        if (::select(fd_ + 1, &rfds, nullptr, nullptr, &tv) <= 0) {
+        if (::select(static_cast<int>(fd_ + 1), &rfds, nullptr, nullptr, &tv) <= 0) {
             return "<accept timeout>";
         }
         sockaddr_in peer{};
-        socklen_t plen = sizeof(peer);
-        const int conn = ::accept(fd_, reinterpret_cast<sockaddr*>(&peer), &plen);
-        if (conn < 0) {
+        SocketLength plen = sizeof(peer);
+        const SocketHandle conn = ::accept(fd_, reinterpret_cast<sockaddr*>(&peer), &plen);
+        if (conn == kInvalidSocket) {
             return "<accept failed>";
         }
+#ifdef _WIN32
+        DWORD rv = 15000;
+#else
         timeval rv{};
         rv.tv_sec = 15;
-        setsockopt(conn, SOL_SOCKET, SO_RCVTIMEO, &rv, sizeof(rv));
+#endif
+        setsockopt(conn, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&rv), sizeof(rv));
         while (static_cast<int>(got.size()) < want) {
             char buf[64];
-            const ssize_t n = ::recv(conn, buf, sizeof(buf), 0);
+            const auto n = ::recv(conn, buf, sizeof(buf), 0);
             if (n <= 0) {
                 break;
             }
             got.append(buf, static_cast<size_t>(n));
         }
-        ::send(conn, answer.data(), answer.size(), 0);
+        ::send(conn, answer.data(), static_cast<int>(answer.size()), 0);
+#ifdef _WIN32
+        ::shutdown(conn, SD_SEND);
+#else
         ::shutdown(conn, SHUT_WR);
-        ::close(conn);
+#endif
+        closeSocket(conn);
         return got;
     }
 
 private:
-    int fd_ = -1;
+    SocketRuntime runtime_;
+    SocketHandle fd_ = kInvalidSocket;
     int port_ = 0;
 };
-
-#endif  // !_WIN32
 
 }  // namespace
 
@@ -240,9 +277,6 @@ private:
 // ---------------------------------------------------------------------------
 
 TEST(Soundness_SyncNet, SyncSampleRunsEndToEnd) {
-#ifdef _WIN32
-    GTEST_SKIP() << "sync externs do not resolve on Windows (lib/std/sync.fin names the refusal)";
-#else
     // The bundled sample, run as a child: spawn, blocking recv, join. "7" is
     // the answer either thread ordering gives -- recv waits until a value is
     // queued, so a nonblocking implementation would print -1 and the pinned
@@ -257,13 +291,9 @@ TEST(Soundness_SyncNet, SyncSampleRunsEndToEnd) {
     ASSERT_TRUE(p.exited) << "the sample died on a signal; stderr: " << p.err;
     EXPECT_EQ(p.exitCode, 0) << "stderr: " << p.err;
     EXPECT_EQ(p.out, "7\n") << "stderr: " << p.err;
-#endif
 }
 
 TEST(Soundness_SyncNet, MutexCountsAcrossThreads) {
-#ifdef _WIN32
-    GTEST_SKIP() << "sync externs do not resolve on Windows (lib/std/sync.fin names the refusal)";
-#else
     // Two threads, one guarded counter, one answer -- 2000 only if the mutex
     // actually excluded the increments across two real threads. Both workers
     // increment the same heap `Mutex`, so neither can run on its own copy.
@@ -299,13 +329,23 @@ fun main() <noret> {
 )";
     const Proc p = buildRun(src, "sync_mutex");
     EXPECT_EQ(p.out, "2000\n") << "rc: " << p.exitCode << ", stderr: " << p.err;
-#endif
+}
+
+TEST(Soundness_SyncNet, ThreadRunsCapturedBody) {
+    const Proc p = buildRun(R"(import { Thread } from sync::std;
+fun main() <noret> {
+    let answer <int> = 42;
+    let thread <Thread> = Thread::spawn(() <noret> => { printf("%d\n", answer); });
+    answer = 99;
+    thread.join();
+}
+)", "sync_capture");
+    ASSERT_TRUE(p.exited) << p.err;
+    EXPECT_EQ(p.exitCode, 0) << p.err;
+    EXPECT_EQ(p.out, "42\n") << p.err;
 }
 
 TEST(Soundness_SyncNet, ChannelKeepsFifoOrderAndRefusesWhenFull) {
-#ifdef _WIN32
-    GTEST_SKIP() << "sync externs do not resolve on Windows (lib/std/sync.fin names the refusal)";
-#else
     // One thread, so FIFO order and the bounded capacity are the only things
     // under test: two accepted sends, a third refused by capacity, and two
     // dequeues in oldest-first order. The cross-thread side is the sample
@@ -326,7 +366,6 @@ fun main() <noret> {
 )";
     const Proc p = buildRun(src, "sync_chan");
     EXPECT_EQ(p.out, "1 1 0 1 2\n") << "rc: " << p.exitCode << ", stderr: " << p.err;
-#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -334,9 +373,6 @@ fun main() <noret> {
 // ---------------------------------------------------------------------------
 
 TEST(Soundness_SyncNet, TcpWrappersRunAnEcho) {
-#ifdef _WIN32
-    GTEST_SKIP() << "socket externs do not resolve on Windows (lib/std/networking.fin names the refusal)";
-#else
     // bind/listen on the test thread before the child exists, so the child's
     // connect cannot race the listen; the peer thread answers one connection.
     LoopbackPeer peer;
@@ -370,27 +406,52 @@ TEST(Soundness_SyncNet, TcpWrappersRunAnEcho) {
     fs::remove(exe, ec);
     EXPECT_EQ(seen, "ping") << "the peer read: " << seen;
     EXPECT_EQ(p.out, "4 pong\n") << "rc: " << p.exitCode << ", stderr: " << p.err;
-#endif
+}
+
+TEST(Soundness_SyncNet, AcceptedStreamSurvivesListenerClose) {
+    const Proc p = buildRun(R"(import { TcpStream, TcpListener } from networking::std;
+fun main() <noret> {
+    let listener <TcpListener> = TcpListener::bind(0, 4);
+    let client <TcpStream> = TcpStream::connect("127.0.0.1", listener.local_port());
+    let accepted <TcpStream> = listener.accept();
+    blame listener.close();
+    let replacement <TcpListener> = TcpListener::bind(0, 4);
+    blame !listener.close();
+    blame replacement.local_port() > 0;
+    blame replacement.close();
+    blame client.write("ping", 4) == 4;
+    let got <[char]> = accepted.read(4);
+    blame got[0] == 'p' && got[3] == 'g';
+    delete got;
+    blame accepted.close();
+    blame !accepted.close();
+    blame client.close();
+    blame !client.close();
+    printf("closed\n");
+}
+)", "net_listener_lifetime");
+    ASSERT_TRUE(p.exited) << p.err;
+    EXPECT_EQ(p.exitCode, 0) << p.err;
+    EXPECT_EQ(p.out, "closed\n") << p.err;
 }
 
 TEST(Soundness_SyncNet, ConnectRefusalNamesTheFailure) {
-#ifdef _WIN32
-    GTEST_SKIP() << "socket externs do not resolve on Windows (lib/std/networking.fin names the refusal)";
-#else
     // A port we close on the spot: nothing listens on it from here on, so
     // connect refuses immediately rather than hanging. The ruling's
     // contract is that refusal is `blame`, and the message names the call.
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    ASSERT_GE(fd, 0);
+    SocketRuntime runtime;
+    ASSERT_TRUE(runtime.ok());
+    const SocketHandle fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_NE(fd, kInvalidSocket);
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = 0;
     ASSERT_EQ(bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
-    socklen_t len = sizeof(addr);
+    SocketLength len = sizeof(addr);
     ASSERT_EQ(getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len), 0);
     const int port = ntohs(addr.sin_port);
-    ::close(fd);
+    closeSocket(fd);
     const std::string src =
         "import { TcpStream } from networking::std;\n"
         "\n"
@@ -401,18 +462,19 @@ TEST(Soundness_SyncNet, ConnectRefusalNamesTheFailure) {
         "    s.close();\n"
         "}\n";
     const Proc p = buildRun(src, "net_refuse");
+#ifdef _WIN32
+    EXPECT_TRUE(p.exited);
+    EXPECT_NE(p.exitCode, 0) << p.err;
+#else
     EXPECT_TRUE(p.signaled) << "a refused connect must blame (SIGABRT), rc: "
                             << p.exitCode << ", stderr: " << p.err;
     EXPECT_EQ(p.termSig, SIGABRT) << "refusal is a blame abort like every libc-ruled failure";
+#endif
     EXPECT_TRUE(p.err.find("cannot connect") != std::string::npos)
         << "blamed with: " << p.err;
-#endif
 }
 
 TEST(Soundness_SyncNet, HttpGetServesAgainstATestPeer) {
-#ifdef _WIN32
-    GTEST_SKIP() << "socket externs do not resolve on Windows (lib/std/networking.fin names the refusal)";
-#else
     // The stretch demo against a peer that reads the whole request and
     // answers one fixed response: the pinned child output is the whole wire,
     // headers included, byte for byte.
@@ -451,5 +513,4 @@ TEST(Soundness_SyncNet, HttpGetServesAgainstATestPeer) {
     EXPECT_TRUE(seen.find("Host: 127.0.0.1") != std::string::npos)
         << "the peer read: " << seen;
     EXPECT_EQ(p.out, response) << "rc: " << p.exitCode << ", stderr: " << p.err;
-#endif
 }

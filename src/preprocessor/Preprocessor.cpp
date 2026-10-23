@@ -7,6 +7,21 @@
 
 namespace fin {
 
+Preprocessor::Preprocessor() {
+#if defined(_WIN32)
+    defines.emplace("FIN_TARGET_WINDOWS", MacroDef{});
+#elif defined(__APPLE__) && defined(__MACH__)
+    defines.emplace("FIN_TARGET_DARWIN", MacroDef{});
+#elif defined(__linux__)
+    defines.emplace("FIN_TARGET_LINUX", MacroDef{});
+#endif
+#if defined(_M_ARM64) || defined(__aarch64__)
+    defines.emplace("FIN_TARGET_ARM64", MacroDef{});
+#elif defined(_M_X64) || defined(__x86_64__)
+    defines.emplace("FIN_TARGET_X86_64", MacroDef{});
+#endif
+}
+
 std::string Preprocessor::trim(const std::string& str) {
     size_t first = str.find_first_not_of(" \t");
     if (std::string::npos == first) return "";

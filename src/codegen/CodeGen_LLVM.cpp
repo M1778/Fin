@@ -586,6 +586,7 @@ struct FnInfo {
     CgType returnType;
     std::vector<CgType> paramTypes;
     bool isVarArg = false;
+    bool isExtern = false;
     // Whether this is the program's entry point, which is a property of the Fin
     // name and not of the emitted symbol: `return` inside it means something
     // different (a process status) and its LLVM signature is C's rather than
@@ -3896,7 +3897,8 @@ private:
             if (!unit) continue;
             for (auto& stmt : unit->statements) {
                 auto* s = dynamic_cast<StructDeclaration*>(stmt.get());
-                if (s && s->name == name && s->generic_params.empty()) return s;
+                if (s && s->name == name && s->generic_params.empty() &&
+                    !s->is_forward_declaration) return s;
             }
         }
         return nullptr;
@@ -6152,6 +6154,26 @@ private:
         return true;
     }
 
+    llvm::FunctionType* nativeCallbackSignature(ASTNode& node, const CgType& type) {
+        if (!type.result || !type.llvmSignature) {
+            unsupported(node, "a C callback without a signature");
+            return nullptr;
+        }
+        if (type.result->llvmType->isAggregateType() || type.result->isFn()) {
+            unsupported(node, "a C callback with an aggregate return value");
+            return nullptr;
+        }
+        std::vector<llvm::Type*> params;
+        for (const auto& param : type.params) {
+            if (param->llvmType->isAggregateType() || param->isFn()) {
+                unsupported(node, "a C callback with an aggregate parameter");
+                return nullptr;
+            }
+            params.push_back(param->llvmType);
+        }
+        return llvm::FunctionType::get(type.result->llvmType, params, false);
+    }
+
     void declareFunction(ASTNode& node, const std::string& name,
                          const std::string& symbol,
                          const std::vector<std::unique_ptr<Parameter>>& params,
@@ -6162,6 +6184,7 @@ private:
         FnInfo info;
         info.source = &node;
         info.isVarArg = isVarArg;
+        info.isExtern = isExtern;
         info.hasReceiver = (receiver != nullptr);
         // A lambda's closure environment travels as a leading `ptr` parameter.
         // Only lambdas set this: named functions are called directly (no env),
@@ -6180,6 +6203,10 @@ private:
         // that classification itself rather than leaving it to LLVM. Emitting the
         // aggregate and calling it C-compatible would link cleanly and pass garbage.
         // Settling it needs the ABI classifier, which is a unit of its own.
+        if (isExtern && info.returnType.isFn()) {
+            unsupported(node, "an extern returning a function value");
+            return;
+        }
         if (isExtern && info.returnType.isAggregate()) {
             unsupported(node, fmt::format("an extern '{}' returning {}", name,
                                           info.returnType.isArray() ? "an array"
@@ -6223,7 +6250,12 @@ private:
                 return;
             }
             info.paramTypes.push_back(*t);
-            llvmParams.push_back(t->llvmType);
+            if (isExtern && t->isFn()) {
+                if (!nativeCallbackSignature(*p, *t)) return;
+                llvmParams.push_back(llvm::PointerType::getUnqual(ctx_));
+            } else {
+                llvmParams.push_back(t->llvmType);
+            }
         }
 
         // `main` is the process entry point, so its LLVM signature is the C one
@@ -7129,55 +7161,58 @@ private:
             return Addr{ptr, base->type.structInfo->fields[index].type};
         }
         if (auto* access = dynamic_cast<ArrayAccess*>(&expr)) {
-            // Only through an address. An array that is a *value* -- `make()[0]` --
-            // has no home to index into, and unlike a struct field there is no
-            // extractvalue with a run-time index: LLVM's extractvalue takes constants
-            // only. Returning nullopt sends it to visit(ArrayAccess&), which refuses
-            // rather than materialising a temporary the program did not ask for.
-            // Through the array's address, or through a pointer to the array --
-            // deeptest3.fin:111 says `ptr_to_arr[0]` on a `<&[int, 3]>` is element 0
-            // of the array ("The compiler knows to dereference the base first"), and
-            // that is the same rule `.` follows one line up.
-            //
-            // Indexing a pointer to a *non-array* is not this, and baseAddress does not
-            // find a base for it: `p[i]` on an `&int` is pointer arithmetic, and whether
-            // a Fin pointer strides by an element or a byte is the ruling that also
-            // refuses `p++` (see emitIncrement).
-            auto base = baseAddress(*access->array, CgType::Kind::Array);
-            if (!base) return std::nullopt;
-            if (!base->type.isArray() || !base->type.element) return std::nullopt;
-
-            CgVal idx = emit(*access->index);
-            if (failed_ || !idx.ok()) return std::nullopt;
-            if (idx.type.kind != CgType::Kind::Int) return std::nullopt;
-
-            // Two indices, and the first is the constant 0: the pointer is to the
-            // array, so it is stepped over zero whole arrays and then to element i.
-            // A single-index GEP on an array pointer strides by the *array*, which
-            // is the classic way to land one full array past where the program meant.
-            //
-            // The index is widened to i64 first. A GEP index narrower than the
-            // pointer is sign-extended by LLVM anyway, but doing it here keeps the
-            // signedness this file's own -- a Fin `int` is signed, and a `uint`
-            // index must not be read as a negative offset.
-            llvm::Value* i = idx.type.bits == 64
-                                 ? idx.value
-                                 : (idx.type.isSigned
-                                        ? builder_.CreateSExt(idx.value, builder_.getInt64Ty())
-                                        : builder_.CreateZExt(idx.value, builder_.getInt64Ty()));
-            llvm::Value* ptr = nullptr;
-            if (base->type.isDynamicArray) {
-                llvm::Value* pair = builder_.CreateLoad(base->type.llvmType, base->ptr, "array");
-                llvm::Value* data = builder_.CreateExtractValue(pair, {0}, "data");
-                ptr = builder_.CreateInBoundsGEP(base->type.element->llvmType, data, i, "elem");
-            } else {
-                ptr = builder_.CreateInBoundsGEP(
-                    base->type.llvmType, base->ptr,
-                    {builder_.getInt64(0), i}, "elem");
-            }
-            return Addr{ptr, *base->type.element};
+            return emitArrayAddress(*access, baseAddress(*access->array, CgType::Kind::Array));
         }
         return std::nullopt;
+    }
+
+    std::optional<Addr> emitArrayAddress(ArrayAccess& access, std::optional<Addr> base) {
+        // Only through an address. An array that is a *value* -- `make()[0]` --
+        // has no home to index into, and unlike a struct field there is no
+        // extractvalue with a run-time index: LLVM's extractvalue takes constants
+        // only. Returning nullopt sends it to visit(ArrayAccess&), which refuses
+        // rather than materialising a temporary the program did not ask for.
+        // Through the array's address, or through a pointer to the array --
+        // deeptest3.fin:111 says `ptr_to_arr[0]` on a `<&[int, 3]>` is element 0
+        // of the array ("The compiler knows to dereference the base first"), and
+        // that is the same rule `.` follows one line up.
+        //
+        // Indexing a pointer to a *non-array* is not this, and baseAddress does not
+        // find a base for it: `p[i]` on an `&int` is pointer arithmetic, and whether
+        // a Fin pointer strides by an element or a byte is the ruling that also
+        // refuses `p++` (see emitIncrement).
+        if (!base) return std::nullopt;
+        if (!base->type.isArray() || !base->type.element) return std::nullopt;
+
+        CgVal idx = emit(*access.index);
+        if (failed_ || !idx.ok()) return std::nullopt;
+        if (idx.type.kind != CgType::Kind::Int) return std::nullopt;
+
+        // Two indices, and the first is the constant 0: the pointer is to the
+        // array, so it is stepped over zero whole arrays and then to element i.
+        // A single-index GEP on an array pointer strides by the *array*, which
+        // is the classic way to land one full array past where the program meant.
+        //
+        // The index is widened to i64 first. A GEP index narrower than the
+        // pointer is sign-extended by LLVM anyway, but doing it here keeps the
+        // signedness this file's own -- a Fin `int` is signed, and a `uint`
+        // index must not be read as a negative offset.
+        llvm::Value* i = idx.type.bits == 64
+                             ? idx.value
+                             : (idx.type.isSigned
+                                    ? builder_.CreateSExt(idx.value, builder_.getInt64Ty())
+                                    : builder_.CreateZExt(idx.value, builder_.getInt64Ty()));
+        llvm::Value* ptr = nullptr;
+        if (base->type.isDynamicArray) {
+            llvm::Value* pair = builder_.CreateLoad(base->type.llvmType, base->ptr, "array");
+            llvm::Value* data = builder_.CreateExtractValue(pair, {0}, "data");
+            ptr = builder_.CreateInBoundsGEP(base->type.element->llvmType, data, i, "elem");
+        } else {
+            ptr = builder_.CreateInBoundsGEP(
+                base->type.llvmType, base->ptr,
+                {builder_.getInt64(0), i}, "elem");
+        }
+        return Addr{ptr, *base->type.element};
     }
 
     // The address of what `object` denotes, following one pointer if that is what it
@@ -7533,6 +7568,7 @@ private:
         explicit ScopedEmission(Emitter& e)
             : e_(e), block_(e.builder_.GetInsertBlock()),
               point_(block_ ? e.builder_.GetInsertPoint() : llvm::BasicBlock::iterator()),
+              debugLocation_(e.builder_.getCurrentDebugLocation()),
               fn_(e.currentFn_), structBase_(e.fnScopeBase_),
               scopes_(std::move(e.scopes_)),
               nested_(std::move(e.nested_)), lambdas_(std::move(e.lambdaTemplates_)),
@@ -7574,6 +7610,7 @@ private:
             e_.fnScopeBase_ = structBase_;
             if (block_) e_.builder_.SetInsertPoint(block_, point_);
             else e_.builder_.ClearInsertionPoint();
+            e_.builder_.SetCurrentDebugLocation(debugLocation_);
         }
         ScopedEmission(const ScopedEmission&) = delete;
         ScopedEmission& operator=(const ScopedEmission&) = delete;
@@ -7582,6 +7619,7 @@ private:
         Emitter& e_;
         llvm::BasicBlock* block_;
         llvm::BasicBlock::iterator point_;
+        llvm::DebugLoc debugLocation_;
         FnInfo* fn_;
         size_t structBase_;
         std::vector<std::unordered_map<std::string, Local>> scopes_;
@@ -7873,11 +7911,6 @@ private:
 
         popScope();
         currentFn_ = nullptr;
-        // Issue #37: an instantiation emits mid-caller-body via ScopedEmission,
-        // which restores the insert point but not the location -- clear it so the
-        // caller's next instruction is not misattributed to the callee's line.
-        if (dib_) builder_.SetCurrentDebugLocation(llvm::DebugLoc());
-
         // Not verified once anything has been refused. A body that resumed past a
         // refusal is deliberately incomplete -- a statement that produced no value
         // emitted no instructions -- so the verifier would report that incompleteness
@@ -9447,6 +9480,9 @@ private:
     // decides that, and it rewrites `main` and folds a receiver into parameter 0.
     std::optional<CgType> fnValueType(const FnInfo& info) {
         if (info.isVarArg || info.isMain || !info.fn) return std::nullopt;
+        if (info.isExtern)
+            for (const auto& param : info.paramTypes)
+                if (param.isFn()) return std::nullopt;
         CgType t;
         t.kind = CgType::Kind::Fn;
         // The closure pair, `{code, env}`: the same uniqued literal struct
@@ -9485,6 +9521,56 @@ private:
         pair = builder_.CreateInsertValue(pair, code, {0}, "closure.code");
         pair = builder_.CreateInsertValue(pair, env, {1}, "closure.env");
         return pair;
+    }
+
+    llvm::Value* nativeCallback(ASTNode& node, llvm::Value* pair, const CgType& type) {
+        if (auto* lambda = dynamic_cast<LambdaExpression*>(&node)) {
+            if (!lambda->captures.empty()) {
+                unsupported(node, "a capturing function value as a C callback (pass state through an explicit context parameter)");
+                return nullptr;
+            }
+        }
+        auto* constant = llvm::dyn_cast<llvm::Constant>(pair);
+        if (!constant) {
+            unsupported(node, "a runtime function value as a C callback (use a named function or a noncapturing lambda directly)");
+            return nullptr;
+        }
+        auto* code = constant->getAggregateElement(0u);
+        auto* env = constant->getAggregateElement(1u);
+        if (!code || !env || !env->isNullValue()) {
+            unsupported(node, "a capturing function value as a C callback (pass state through an explicit context parameter)");
+            return nullptr;
+        }
+        if (code->isNullValue()) return llvm::Constant::getNullValue(llvm::PointerType::getUnqual(ctx_));
+        auto* target = llvm::dyn_cast<llvm::Function>(code->stripPointerCasts());
+        if (!target) {
+            unsupported(node, "a runtime function value as a C callback");
+            return nullptr;
+        }
+        const auto found = nativeCallbacks_.find(target);
+        if (found != nativeCallbacks_.end()) return found->second;
+        auto* signature = nativeCallbackSignature(node, type);
+        if (!signature) return nullptr;
+        auto* thunk = llvm::Function::Create(signature, llvm::Function::InternalLinkage,
+                                              target->getName() + ".fin.c_callback", &module_);
+        const auto extend = [](const CgType& scalar) {
+            return scalar.isSigned && !scalar.isBool ? llvm::Attribute::SExt : llvm::Attribute::ZExt;
+        };
+        if (type.result->kind == CgType::Kind::Int && type.result->bits < 32)
+            thunk->addRetAttr(extend(*type.result));
+        for (size_t i = 0; i < type.params.size(); ++i) {
+            if (type.params[i]->kind == CgType::Kind::Int && type.params[i]->bits < 32)
+                thunk->addParamAttr(i, extend(*type.params[i]));
+        }
+        auto* entry = llvm::BasicBlock::Create(ctx_, "entry", thunk);
+        llvm::IRBuilder<> bridge(entry);
+        std::vector<llvm::Value*> args{env};
+        for (auto& arg : thunk->args()) args.push_back(&arg);
+        auto* call = bridge.CreateCall(type.llvmSignature, target, args);
+        if (type.result->isVoid()) bridge.CreateRetVoid();
+        else bridge.CreateRet(call);
+        nativeCallbacks_[target] = thunk;
+        return thunk;
     }
 
     // A named or nested function as a closure value: a thin wrapper with the
@@ -10992,11 +11078,9 @@ private:
     // capacity word, so a new key grows both parallel arrays with realloc; existing
     // keys update only the value slot. This keeps insertion order and the key/value
     // index invariant without inventing a sentinel or a second storage format.
-    bool emitPrototypeStore(ArrayAccess& access, const CgVal& rhs, BinaryOp& node) {
-        auto* baseExpr = access.array.get();
-        if (!baseExpr) return false;
-        auto base = emitAddress(*baseExpr);
-        if (failed_ || !base || !base->type.isPrototype() || !base->type.keys ||
+    bool emitPrototypeStore(ArrayAccess& access, std::optional<Addr> base,
+                            const CgVal& rhs, BinaryOp& node) {
+        if (!base || !base->type.isPrototype() || !base->type.keys ||
             !base->type.values || !base->type.keys->element ||
             !base->type.values->element) return false;
         const CgType& proto = base->type;
@@ -11168,60 +11252,66 @@ private:
     }
 
     void emitAssignment(BinaryOp& node) {
-        if (node.op == ASTTokenKind::EQUAL) {
-            if (auto* access = dynamic_cast<ArrayAccess*>(node.left.get())) {
-                CgVal rhs = emit(*node.right);
-                if (failed_) return;
-                if (emitPrototypeStore(*access, rhs, node)) return;
-                // `a[k] = v` through `operator[]=`: a call, not a store,
-                // because there is no address that `a[k]` names. The value
-                // was already emitted above, so both arguments are converted
-                // here rather than re-emitted through emitCallArgs -- emitting
-                // the source twice would run it twice.
-                if (auto target = indexOperatorCall(node, *access->array,
-                                                    ASTTokenKind::INDEX_ASSIGN)) {
-                    const FnInfo& info = *target->fn;
-                    // Receiver, key, value: the operator's own arity, checked
-                    // rather than assumed. An `[]=` of any other shape is a
-                    // program the analyzer accepted and this slice cannot call.
-                    if (info.paramTypes.size() != 3) {
-                        unsupported(node, fmt::format("operator '[]=' on struct '{}' "
-                                                      "with {} parameter(s)",
-                                                      target->owner->finName,
-                                                      info.paramTypes.size() - 1));
-                        return;
-                    }
-                    CgVal key = emitAs(*access->index, info.paramTypes[1]);
-                    if (failed_) return;
-                    if (!key.ok()) {
-                        unsupported(node, "this index");
-                        return;
-                    }
-                    llvm::Value* k = convert(node, key, info.paramTypes[1]);
-                    if (!k) return;
-                    llvm::Value* stored =
-                        convert(node, rhs, info.paramTypes[2]);
-                    if (!stored) return;
-                    emitCall(info, {target->receiver.ptr, k, stored});
-                    // The assignment's value is the value stored, as on the
-                    // plain path below.
-                    value_ = CgVal{stored, info.paramTypes[2]};
+        std::optional<CgVal> assigned;
+        std::optional<Addr> target;
+        auto* access = node.op == ASTTokenKind::EQUAL
+            ? dynamic_cast<ArrayAccess*>(node.left.get()) : nullptr;
+        if (access) {
+            assigned = emit(*node.right);
+            if (failed_) return;
+            const auto base = emitAddress(*access->array);
+            if (failed_) return;
+            if (emitPrototypeStore(*access, base, *assigned, node)) return;
+            // `a[k] = v` through `operator[]=`: a call, not a store,
+            // because there is no address that `a[k]` names. The value
+            // was already emitted above, so both arguments are converted
+            // here rather than re-emitted through emitCallArgs -- emitting
+            // the source twice would run it twice.
+            if (auto target = indexOperatorCall(node, *access->array,
+                                                ASTTokenKind::INDEX_ASSIGN)) {
+                const FnInfo& info = *target->fn;
+                // Receiver, key, value: the operator's own arity, checked
+                // rather than assumed. An `[]=` of any other shape is a
+                // program the analyzer accepted and this slice cannot call.
+                if (info.paramTypes.size() != 3) {
+                    unsupported(node, fmt::format("operator '[]=' on struct '{}' "
+                                                  "with {} parameter(s)",
+                                                  target->owner->finName,
+                                                  info.paramTypes.size() - 1));
                     return;
                 }
+                CgVal key = emitAs(*access->index, info.paramTypes[1]);
                 if (failed_) return;
+                if (!key.ok()) {
+                    unsupported(node, "this index");
+                    return;
+                }
+                llvm::Value* k = convert(node, key, info.paramTypes[1]);
+                if (!k) return;
+                llvm::Value* stored =
+                    convert(node, *assigned, info.paramTypes[2]);
+                if (!stored) return;
+                emitCall(info, {target->receiver.ptr, k, stored});
+                // The assignment's value is the value stored, as on the
+                // plain path below.
+                value_ = CgVal{stored, info.paramTypes[2]};
+                return;
             }
+            if (failed_) return;
+            target = emitArrayAddress(*access, baseOf(base, CgType::Kind::Array));
+        } else {
+            target = emitAddress(*node.left);
         }
         // One address, used by both halves of a compound assignment. An index or a
         // dereference on the left still has none -- those are their own units -- but
         // a local and any chain of field names off one now do.
-        auto target = emitAddress(*node.left);
         if (failed_) return;
         if (!target) {
             unsupported(node, "an assignment to this target");
             return;
         }
 
-        CgVal rhs = emit(*node.right);
+        CgVal rhs = assigned ? *assigned : emit(*node.right);
         if (failed_) return;
         if (!rhs.ok()) { unsupported(node, "this assigned expression"); return; }
 
@@ -12657,6 +12747,10 @@ private:
             if (p < info.paramTypes.size()) {
                 llvm::Value* converted = convert(node, a, info.paramTypes[p]);
                 if (!converted) return false;
+                if (info.isExtern && info.paramTypes[p].isFn()) {
+                    converted = nativeCallback(*argNodes[i], converted, info.paramTypes[p]);
+                    if (!converted) return false;
+                }
                 args.push_back(converted);
                 continue;
             }
@@ -12673,7 +12767,9 @@ private:
         }
         for (size_t p = args.size(); p < info.paramTypes.size(); ++p) {
             if (info.paramTypes[p].isNullable) {
-                args.push_back(llvm::Constant::getNullValue(info.paramTypes[p].llvmType));
+                auto* type = info.isExtern && info.paramTypes[p].isFn()
+                    ? llvm::PointerType::getUnqual(ctx_) : info.paramTypes[p].llvmType;
+                args.push_back(llvm::Constant::getNullValue(type));
             }
         }
         if (args.size() < info.paramTypes.size()) {
@@ -13129,6 +13225,10 @@ private:
     // skipped this compiles and prints garbage, which is why
     // FloatsAreDoublesAtTheVarargBoundary is a run test and not an IR test.
     llvm::Value* promoteVararg(ASTNode& node, const CgVal& v) {
+        if (v.type.isFn()) {
+            unsupported(node, "a function value passed to a C variadic (declare a typed callback parameter)");
+            return nullptr;
+        }
         if (v.type.isAggregate()) {
             // `printf("%d", p)` for a struct or an array `p` type-checks -- printf's
             // parameter is `...` and the analyzer does not read the format string.
@@ -16405,7 +16505,12 @@ private:
     void visit(ArrayAccess& node) override {
         // Prototype indexing searches by key. Do this before the ordinary address
         // path, whose GEP semantics are correct for arrays but wrong for dictionaries.
-        CgVal object = emit(*node.array);
+        const auto base = emitAddress(*node.array);
+        if (failed_) return;
+        CgVal object = base
+            ? CgVal{builder_.CreateLoad(base->type.llvmType, base->ptr, "array.base"),
+                    base->type}
+            : emit(*node.array);
         if (failed_) return;
         if (object.ok() && object.type.isPrototype()) {
             CgVal key = emit(*node.index);
@@ -16427,7 +16532,7 @@ private:
             return;
         }
         if (failed_) return;
-        if (auto addr = emitAddress(node)) {
+        if (auto addr = emitArrayAddress(node, baseOf(base, CgType::Kind::Array))) {
             value_ = CgVal{builder_.CreateLoad(addr->type.llvmType, addr->ptr, "load"),
                            addr->type};
             return;
@@ -16896,6 +17001,7 @@ private:
     // takes the closure ABI so that every `fn` value is one pair however its
     // code was declared.
     std::unordered_map<std::string, std::string> wrappers_;
+    std::unordered_map<llvm::Function*, llvm::Function*> nativeCallbacks_;
     // Keyed by Fin name, and never erased from after declareEnums: enumMembers_
     // points into it.
     std::unordered_map<std::string, EnumInfo> enums_;

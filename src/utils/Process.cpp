@@ -70,14 +70,7 @@ std::vector<std::string> defaultLinkLibs() {
     if (!keg.empty()) return {"-L" + keg, "-lLLVM", "-lm"};
     return {"-lLLVM", "-lm"};
 #elif defined(_WIN32)
-    // Nothing: the clang/MSVC driver links the CRT itself, so GNU
-    // `-l`/`-Wl,` flags would break the link rather than help it, and a
-    // plain Fin object references no LLVM symbols (proven by
-    // MachineContract.DashOProducesTheNamedExecutable passing on Windows).
-    // A self-host object that does call the LLVM C API fails here with
-    // unresolved symbols, which Driver::runLinker reports by name with the
-    // FIN_CC/FIN_LDFLAGS pointer -- there is no silent default to guess.
-    return {};
+    return {"ws2_32.lib"};
 #else
     return {"-Wl,--as-needed", llvmLib, "-lm"};
 #endif
@@ -203,8 +196,7 @@ std::vector<std::string> linkCommand(const std::vector<std::string>& objects,
     args.insert(args.end(), {"-llegacy_stdio_definitions", "-Xlinker", "/out:" + output});
 #endif
     // FIN_LDFLAGS replaces the default library set; an empty or unset value
-    // keeps the per-host default from defaultLinkLibs above (empty on
-    // Windows: the clang/MSVC driver links the CRT itself).
+    // keeps the per-host default from defaultLinkLibs above.
     const char* ldflags = std::getenv("FIN_LDFLAGS");
     if (ldflags != nullptr && *ldflags != '\0') {
         const auto flags = splitFlags(ldflags);

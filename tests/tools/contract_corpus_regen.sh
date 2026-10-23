@@ -27,7 +27,22 @@ for case_dir in "$corpus"/*/; do
     done < "${case_dir}argv"
     # stderr only: stdout is reserved by the contract and is expected empty.
     out="$("$finc" "${args[@]}" 2>&1 1>/dev/null)"
-    out="${out//$abs/@DIR@}"
+    native_abs="$abs"
+    if command -v cygpath >/dev/null 2>&1; then
+        native_abs="$(cygpath -m "$abs")" || exit 1
+    fi
+    out="$(printf '%s' "$out" | python3 -c '
+import re
+import sys
+
+directory = sys.argv[1].replace("\\", "/")
+separator = r"(?:/|\\\\)"
+pattern = separator.join(re.escape(part) for part in directory.split("/"))
+if len(directory) > 1 and directory[1] == ":" and directory[0].isascii() and directory[0].isalpha():
+    pattern = "[" + directory[0].lower() + directory[0].upper() + "]" + pattern[1:]
+output = re.sub("(?:" + pattern + "|@DIR@)" + separator, "@DIR@/", sys.stdin.buffer.read().decode("utf-8").replace("\r", ""))
+sys.stdout.buffer.write(output.encode("utf-8"))
+' "$native_abs")" || exit 1
     printf '%s\n' "$out" > "${case_dir}expected.jsonl"
     last_line="$(tail -n 1 "${case_dir}expected.jsonl")"
     case "$last_line" in

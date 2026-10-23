@@ -52,6 +52,6 @@ tests/tools/corpus_snapshot.sh                  # corpus state
   be committed.
 - Test-first: failing regression test before implementation. Never amend.
 - Held rulings (owner decision required): struct `==` declared-only
-  (ADR 0036); `any` values refused (ADR 0034). Open questions (do not settle
-  unilaterally): nullable struct-field layout (`nullifier.fin`), enum value
-  representation (ADR 0037), wave-4 compiler API.
+  (ADR 0036); `any` boxes with value semantics (ADR 0034 amendment).
+  Nullable layout and enum representation are accepted and implemented
+  (ADR 0040 amendment NL-A and ADR 0041). Wave-4 compiler API changes need a plan.

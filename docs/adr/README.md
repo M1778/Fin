@@ -50,7 +50,7 @@ Numbering: ADR 0024 is deliberately skipped and reserved (`docs/HANDOFF.md` §8,
 | 0034 | `any` maps as an opaque blob | Accepted | `{i8*, i64}` for layout/signatures only; all value operations still refuse (held: value semantics per amendment) |
 | 0035 | Meta-types map to opaque words | Accepted | `$type`-family are named words; `resolve_type*` fold at compile time to the static type |
 | 0036 | Equality is declared, not synthesized | Accepted | Struct `==` is declared-only (`operator ==` / `Equal`); no field-wise synthesis — held ruling |
-| 0037 | `Ok(T)` is the member | Accepted; addendum: still unlowered | Enum comparison `Ok(T)` denotes the member; lowering waits on enum representation |
+| 0037 | `Ok(T)` is the member | Accepted; representation settled by 0041 | Enum comparison `Ok(T)` denotes the member; tagged-union lowering reads its discriminant |
 | 0038 | Bounded any narrows | Accepted | `Any<Printable>` resolves calls against the bound (see ADR 0034) |
 | 0039 | `release()` drops one reference | Accepted | Decrement and free at zero; outstanding handles keep working; Dispose refused |
 | 0040 | Nullable values are tagged discriminants | Accepted | Pointers use the null sentinel; value types lower as `{T, bool}` presence tag |
@@ -69,14 +69,14 @@ Numbering: ADR 0024 is deliberately skipped and reserved (`docs/HANDOFF.md` §8,
 | 0048 | Module body calls its own function | Accepted | Same-name free functions resolve to the calling module, whatever the import order |
 | 0049 | String equality compares content | Accepted | `==`, map keys and `.find` all compare content; `hash_of` keeps its documented pointer contract |
 | 0050 | Pattern matching over existing tags | Accepted; addendum: shipped stage 1 (19ffc10) | `match (scrutinee)` with `=>` arms reusing existing spellings; no new sigil |
-| 0051 | Target triple pinned to the host | Accepted | `--target` refused; a silent host build never masquerades as the requested target |
+| 0051 | Target triple pinned to the host | Accepted; addendum: native ABI selectors | Foreign `--target` refused; predefined `#c_ifdef` names select the native OS and architecture in both preprocessors |
 | 0052 | Uninitialized storage is zero-filled | Accepted | Every uninitialised alloca reads zeros; the policy is pinned by tests |
 | 0053 | A `blame` raises error-like values | Accepted | Raises `string`, an `Error`-implementing value, or `any`/object |
 | 0054 | Signed overflow wraps | Accepted | Plain two's-complement `+ - *` and negation; no traps, no flags |
 | 0055 | Returned references outlive the frame | Accepted | A returned reference must name storage that survives the call |
 | 0056 | Escaping references tracked interprocedurally | Accepted | Literals, stores and forwarding calls get provenance checks beside ADR 0055's operand rule |
 | 0057 | Reflected intrinsics fold from own facts | Accepted; addendum: shipped (47ceb96) | `name_of`/`size_of`/`field_count`/`offset_of` runtime-compute from the compiler's own facts; `fields_of`/FieldInfo blocked |
-| 0058 | derive_hash walks field values | Accepted; addendum: shipped (300458f) | FNV-1a 64 over field values in declaration order, one walk on both lanes; `derive_eq`/`derive_encode` blocked |
+| 0058 | derive_hash walks field values | Accepted; addenda: shipped (300458f), platform-stable width | FNV-1a 64 over field values in declaration order, identical across target ABIs; `derive_eq`/`derive_encode` blocked |
 | 0059 | `enum_from!` answers the member name | Accepted; addendum: shipped (cdc9331) | Runtime value→member-name dispatch for enums; the member ops' missing leg |
 
 ---

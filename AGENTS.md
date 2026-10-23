@@ -29,9 +29,10 @@ diagnostics, never silently disappear.
 - `any` boxes with value semantics (ADR 0034 amendment; `useful_macros.fin` builds).
 
 ## Open questions (brief with evidence; do not settle unilaterally)
-- Nullable struct-field layout (`nullifier.fin`: `b? <int>` refused in codegen).
-- Enum value representation (`Ok(T)` denotes the member per ADR 0037; lowering waits).
 - Wave-4 compiler API (`@implements`, `@defined`, `@Alloc`...): plan before any code.
+
+Nullable layout is accepted in ADR 0040 (including amendment NL-A); enum tagged
+unions are accepted in ADR 0041. `nullifier.fin` and `enums.fin` build and run.
 
 ## Choose the right documentation
 - **Writing Fin applications or examples:** read [docs/agent-guide.md](docs/agent-guide.md)

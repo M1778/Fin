@@ -495,6 +495,26 @@ priv fun? drv_preprocess(source: string, filename: string) <string> {
     let out <Buffer> = new_buffer(total + 64);
     let defines <[string]> = new [string, 256]{};
     let ndef <int> = 0;
+    #c_ifdef FIN_TARGET_WINDOWS
+    defines[ndef] = "FIN_TARGET_WINDOWS";
+    ndef++;
+    #c_endif
+    #c_ifdef FIN_TARGET_DARWIN
+    defines[ndef] = "FIN_TARGET_DARWIN";
+    ndef++;
+    #c_endif
+    #c_ifdef FIN_TARGET_LINUX
+    defines[ndef] = "FIN_TARGET_LINUX";
+    ndef++;
+    #c_endif
+    #c_ifdef FIN_TARGET_X86_64
+    defines[ndef] = "FIN_TARGET_X86_64";
+    ndef++;
+    #c_endif
+    #c_ifdef FIN_TARGET_ARM64
+    defines[ndef] = "FIN_TARGET_ARM64";
+    ndef++;
+    #c_endif
     // Function-like `#cdef` table (parallel arrays, C++ single-map
     // semantics: a redefinition overwrites in place). Only the name feeds
     // `defines` above; values live here for drv_pp_expand_line.
@@ -2758,7 +2778,7 @@ priv fun resolve_module_spec(spec: string, importer: string) <string> {
 }
 
 pub fun print_version() <int> {
-    printf("finc 0.4.0 (contract 3)\n");
+    printf("finc 1.0.0 (contract 3)\n");
     return 0;
 }
 

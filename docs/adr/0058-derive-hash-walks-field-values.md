@@ -143,3 +143,18 @@ The wrapper-primary shape means the wrapper is the thing tested: a caller writin
 a lib/std wrapper module, which is the shape Phase B's plan promised. Fields that
 need a different owning model (`fields_of`, `enum_from!`, derive_eq) stay owned by
 issue #53's remaining scope and separate rulings; this ADR does not touch them.
+
+## Addendum — platform-stable width (2026-10-20)
+
+For the same declared field types, declaration order and scalar bit patterns,
+`derive_hash` must return the same unsigned 64-bit value on every supported
+platform. Its arithmetic wraps modulo 2^64, independently of the target C ABI
+and struct padding. Fin `long` and `ulong` remain 64-bit on both LP64 and LLP64;
+the existing LLVM walk already uses explicit `i64` operations throughout.
+
+The Windows truncation reported by the original runtime pins was in C `printf`:
+`%lu` reads a 32-bit C `unsigned long` on LLP64. Printing a Fin `ulong` uses
+`%llu` to preserve all 64 bits. The four `Soundness_Derive` output pins and the
+normative sample use that conversion without changing their expected hashes or
+the `derive_hash` declaration. Native Windows CI owns the LLP64 runtime proof;
+Linux output alone cannot detect that formatting defect.

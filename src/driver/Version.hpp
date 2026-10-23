@@ -2,7 +2,7 @@
 #pragma once
 
 // The semver is derived, never written down here. `FINC_VERSION` is defined by
-// CMakeLists.txt from ${PROJECT_VERSION} — `project(FinCompiler VERSION 0.4.0)`
+// CMakeLists.txt from ${PROJECT_VERSION} — `project(FinCompiler VERSION ...)`
 // on line 2 — which is the same value the release workflow reads when it names
 // archives `finc-<semver>-<triple>` and the value conanfile.py's set_version()
 // parses. One place, three consumers.

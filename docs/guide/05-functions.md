@@ -134,6 +134,13 @@ called `sqrt` in C usually takes and returns `double`, so a Fin `float` declarat
 would be wrong even if it type-checks. Foreign aggregate parameters also have
 backend restrictions.
 
+Typed `@define` callback parameters accept a named function or a noncapturing
+lambda directly. The reference compiler bridges Fin's closure representation to
+the C ABI. Captured and runtime-selected callback values are refused; carry state
+through an explicit C context parameter. Aggregate callback arguments/results
+and foreign function-valued returns are also refused. Ordinary Fin calls retain
+their closure representation.
+
 `...` marks a variadic declaration, as in the library's
 `@define printf(fmt: string, ...) <noret>;`. There is no format-string checking.
 Use `%d` for an `int`, `%s` for a `string`, and keep user text in a value argument:

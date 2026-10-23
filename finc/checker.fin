@@ -2065,6 +2065,12 @@ pub struct Checker {
         return inner;
       }
 
+      fun chk_record_array_literal_type(self: &Self, node: &AstNode, target: string) <noret> {
+        if (node == null || node.kind != ast_call_expr() || !chk_str_eq(node.name, "__fin_array_literal")) { return; }
+        if (!self.chk_is_arr(target)) { return; }
+        node.resolved_spelling = self.chk_resolve_generic_spelling(target);
+      }
+
       // Pointer-like spellings: `&T`, `T*`, `void*`. C++ PointerType answers
       // the word-size question once, so every pointer spelling converts the
       // same; `void*` in either direction is covered by the caller.
@@ -3241,6 +3247,7 @@ pub struct Checker {
       // resolved here exactly like the plain-call path resolves it.
       fun chk_check_arg_type(self: &Self, actual_arg: &AstNode, at: string, want_raw: string) <noret> {
         let want <string> = self.resolve_type(chk_trim(want_raw));
+        self.chk_record_array_literal_type(actual_arg, want);
         // A bare enumerator name where `$enum_member` is expected is that
         // member (C++ visit(Identifier&) hint rule): `extern E::A as A`
         // then `p(A)` types `A` as `$enum_member`, not `E`.
@@ -3263,23 +3270,6 @@ pub struct Checker {
           !chk_str_eq(at, "module") && !self.chk_mentions_gen_param(at) &&
           !chk_str_eq(want, "") && !chk_str_eq(want, "void") && !chk_str_eq(want, "void*") &&
           !chk_str_eq(want, "error") && !self.chk_mentions_gen_param(want)) {
-            // Parser artifact (parser.fin parse_param_type): a written
-            // `[T]` parameter arrives here as `T*`, the same spelling an
-            // explicit `*T` writes. C++ keeps the array and accepts `[T]`
-            // for it, but refuses an array for a real pointer (no decay
-            // in checkType). Read a star-form want against an array
-            // actual the array way, one level, element against element.
-            if (self.chk_is_arr(at) && !self.chk_is_arr(want)) {
-                let wlen <int> = cast<int>(chk_strlen(want));
-                if (wlen > 1 && chk_str_eq(substr(want, wlen - 1, 1), "*") &&
-                  !chk_str_eq(substr(want, 0, 1), "&")) {
-                    let wbase <string> = substr(want, 0, wlen - 1);
-                    if (!self.chk_types_compatible(self.chk_arr_elem(at), wbase)) {
-                        self.report_value_mismatch(want, at, actual_arg.line, actual_arg.col);
-                    }
-                    return;
-                  }
-            }
             if (!self.chk_types_compatible(at, want)) {
                 let fit_ok <bool> = false;
                 if (chk_int_bits(want) > 0 && chk_is_int_const(actual_arg) &&
@@ -6559,6 +6549,9 @@ pub struct Checker {
         }
 
         if (expr.kind == ast_literal_int()) {
+            if (expr.type_annotation != null && chk_str_eq(expr.type_annotation, "char")) {
+                return "char";
+            }
             // Float literals share the int kind (parser.fin tags them
             // `float`); they type as float, so `let f = 2.5` infers
             // float like C++ instead of int (which lowered 0.0).
@@ -7046,8 +7039,8 @@ pub struct Checker {
                 let elem_t <string> = "int";
                 let el <&AstNode> = expr.left;
                 while (el != null) {
-                    let actual_el <&AstNode> = el.left;
-                    if (actual_el == null) { actual_el = el; }
+                    let actual_el <&AstNode> = el;
+                    if (el.kind == 0 && el.left != null) { actual_el = el.left; }
                     let cur_t <string> = self.check_expression(actual_el);
                     if (!chk_str_eq(cur_t, "void") && !chk_str_eq(cur_t, "auto")) {
                         elem_t = cur_t;
@@ -8250,7 +8243,8 @@ pub struct Checker {
                     // backend prefers where recorded; nothing else reads
                     // these spellings off such nodes.
                     if (actual_arg.kind == ast_binary_expr() || actual_arg.kind == ast_unary_expr() ||
-                      actual_arg.kind == ast_index_expr() || actual_arg.kind == ast_member_access()) {
+                      actual_arg.kind == ast_index_expr() || actual_arg.kind == ast_member_access() ||
+                      (actual_arg.kind == ast_ident() && ai == 0 && (hit_method || call_recv_skip))) {
                         if (actual_arg.resolved_spelling == null || chk_strlen(actual_arg.resolved_spelling) == cast<ulong>(0)) {
                             if (!chk_str_eq(at, "auto") && !chk_str_eq(at, "error") && !chk_str_eq(at, "void") &&
                               !chk_str_eq(at, "void*") && !chk_str_eq(at, "module") &&
@@ -9212,6 +9206,7 @@ pub struct Checker {
         if (stmt.kind == ast_return_stmt()) {
             if (stmt.left != null) {
                 let rt <string> = self.check_expression(stmt.left);
+                self.chk_record_array_literal_type(stmt.left, self.current_ret_type);
                 // A call through a bare function name types as the whole
                 // `fn(...)` spelling (the callee variable's type, not its
                 // result), so `return f(x)` through one would misfire here

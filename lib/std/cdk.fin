@@ -37,19 +37,13 @@
 // needs the bag first, and this module's stages refuse by name at the
 // one that fails.
 //
-// OWNERSHIP, stated honestly. `calc_compile`'s emitted text is
-// caller-owned (`free_str`); `cdk_lower`'s Outcome wraps a caller-owned
-// IrFunction (`free_ir_function`). Three leaks this module knows of and
-// takes at demo scale: `fresh_temp`'s name strings (ir::std calls them
-// the struct's words and frees nothing inside an instruction),
-// `cdk_scan`'s token texts outside the slice_str kinds (same rule
-// scanner.fin's other callers live with), and the parse messages. A
-// product pipeline frees the three; the module documents where it would.
+// `calc_compile` returns caller-owned text or an error message (`free_str`).
+// `cdk_lower` returns a caller-owned IrFunction (`free_ir_function`) on success
+// and a borrowed static message on failure. Internal ASTs, tokens, and parser
+// arrays are released before returning; generated names belong to the IrFunction.
 //
-// The eval result roofs at int32; the calc numbers the demo language
-// accepts are the ones that survive that walk. Division by zero is not
-// guarded in the interpreter (the C reference would fault); the language
-// the demo accepts is held to the absence.
+// Evaluation uses int32 slots. Division by zero and an unrepresentable signed
+// quotient blame with a calc diagnostic before executing the division.
 
 import { Scanner, new_scanner, free_scanner } from scanner::std;
 import { Token, tok_eof, tok_int_lit, tok_plus, tok_minus, tok_star, tok_slash, tok_lparen, tok_rparen } from token::std;
@@ -97,20 +91,17 @@ pub fun cdk_scan(text: string) <CdkTokens> {
     return CdkTokens{tokens: toks, count: count};
 }
 
-// Deletes the token array and frees the texts scanner.fin hands through
-// `slice_str`: the int/float/string/char literal kinds and the kind-1
-// unknown tail. Punctuation and operator tokens wear static spelling, and
-// scanner.fin's backtick arm returns a static text under the ident kind,
-// so those kinds are skipped -- this is the v0 free rule the header
-// records.
+// Releases the token array and allocated scanner texts. Punctuation, lexical
+// error messages, and the backtick identifier use static spelling.
 #[export]
 pub fun free_cdk_tokens(t: CdkTokens) <noret> {
     let i <int> = 0;
     while (i < t.count) {
         let k <int> = t.tokens[i].kind;
-        if (k == tok_int_lit() || k == 4 || k == 5 || k == 6 || k == 1) {
+        if (k == tok_int_lit() || k == 4 || k == 5 || k == 6 || k == 1 ||
+          (k == 2 && !equals(t.tokens[i].text, "`")) || (k >= 10 && k <= 78)) {
             free_str(t.tokens[i].text);
-        }
+          }
         i = i + 1;
     }
     delete t.tokens;
@@ -191,6 +182,7 @@ pub struct CdkGrammar {
                 self.atom(ts, out);
                 if (out.node == null) {
                     free_ast(lhs);
+                    delete m_types;
                     return;
                 }
                 let rhs <&AstNode> = out.node;
@@ -201,6 +193,7 @@ pub struct CdkGrammar {
                 }
             }
         }
+        delete m_types;
         out.node = lhs;
     }
 
@@ -220,6 +213,7 @@ pub struct CdkGrammar {
                 self.mul(ts, out);
                 if (out.node == null) {
                     free_ast(lhs);
+                    delete pm;
                     return;
                 }
                 let rhs <&AstNode> = out.node;
@@ -230,6 +224,7 @@ pub struct CdkGrammar {
                 }
             }
         }
+        delete pm;
         out.node = lhs;
     }
 }
@@ -297,6 +292,7 @@ pub fun cdk_lower(text: string) <Outcome<IrFunction>> {
     let blk <IrBlock> = irfn.blocks[0];
     blk.emit(make_ir_ret(val_name));
     irfn.blocks[0] = blk;
+    free_ast(p.node);
     free_cdk_tokens(toks);
     return Ok::<IrFunction>(irfn);
 }
@@ -385,7 +381,11 @@ pub fun cdk_eval_ir(irfn: IrFunction) <int> {
             if (inst.opcode == ir_add()) { v = a + bv; }
             else if (inst.opcode == ir_sub()) { v = a - bv; }
             else if (inst.opcode == ir_mul()) { v = a * bv; }
-            else if (inst.opcode == ir_div()) { v = a / bv; }
+            else if (inst.opcode == ir_div()) {
+                blame bv != 0, "calc: division by zero";
+                blame a != (-2147483647 - 1) || bv != -1, "calc: integer division overflow";
+                v = a / bv;
+            }
             slots[cdk_tnum(inst.dest)] = v;
         }
         j = j + 1;

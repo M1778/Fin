@@ -6,6 +6,11 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <winioctl.h>
+#endif
+
 #include "Corpus.hpp"
 #include "driver/SearchPaths.hpp"
 
@@ -71,7 +76,8 @@ FincRun compileBundled(const std::string& code) {
 // a second file: `-I <dir>` *adds* to the search paths where `--fin-libs` replaces them,
 // and replacing them would take the bundle -- and with it the ambient `printf` those
 // programs print through -- out of the run.
-std::string buildAndRun(const std::string& code, const std::vector<std::string>& extra) {
+std::string buildAndRun(const std::string& code, const std::vector<std::string>& extra,
+                       const std::vector<std::string>& runtimeArgs = {}) {
     Src src(code);
     const fs::path exe = uniqueTempPath("fin_stdlib_exe");
     std::vector<std::string> args{src.str()};
@@ -83,7 +89,9 @@ std::string buildAndRun(const std::string& code, const std::vector<std::string>&
         return "compile failed: " + stripAnsi(c.err);
     }
     const fs::path outPath = uniqueTempPath("fin_stdlib_out");
-    const int status = fin::runProcess({exe.string()}, outPath.string(), outPath.string());
+    std::vector<std::string> command{exe.string()};
+    command.insert(command.end(), runtimeArgs.begin(), runtimeArgs.end());
+    const int status = fin::runProcess(command, outPath.string(), outPath.string());
     const std::string out = readProcessOutput(outPath.string());
     std::error_code ec;
     fs::remove(exe, ec);
@@ -208,6 +216,172 @@ const std::vector<Row>& corpusImports() {
 }
 
 } // namespace
+
+TEST(Soundness_Stdio, PrintableTextIsNotAFormatString) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    EXPECT_EQ(buildBundledAndRun(R"FIN(
+import { Printable, print, println } from stdio::std;
+struct Label : <Printable> {
+    pub fun format_str() <string> { return "100%% complete"; }
+}
+fun main() <noret> {
+    print(Label{});
+    println(Label{});
+}
+)FIN"), "100%% complete100%% complete\n");
+}
+
+TEST(Soundness_Stdio, TypedErrorOutputUsesStandardError) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    Src src(R"FIN(
+import { Printable, eprint, eprintln, eprint_str, eprintln_str,
+         eprint_int, eprintln_int, eprint_bool, eprintln_bool,
+         eprint_double, eprintln_double, flush } from stdio::std;
+struct Label : <Printable> {
+    pub fun format_str() <string> { return "100%"; }
+}
+fun main() <noret> {
+    eprint(Label{});
+    eprintln(Label{});
+    eprint_str("left"); eprintln_str("right");
+    eprint_int(4); eprintln_int(2);
+    eprint_bool(true); eprintln_bool(false);
+    eprint_double(cast<double>(2.5)); eprintln_double(cast<double>(1.5));
+    printf("stdout\n");
+    flush();
+}
+)FIN");
+    const fs::path dir = uniqueTempPath("fin_stdio_streams");
+    fs::create_directories(dir);
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { std::error_code ec; fs::remove_all(path, ec); }
+    } cleanup{dir};
+    const auto exe = dir / "program.exe";
+    const auto out = dir / "stdout.txt";
+    const auto err = dir / "stderr.txt";
+    const auto compiled = runFinc({src.str(), "-o", exe.string()}, {{"FIN_LIBS", ""}});
+    ASSERT_EQ(compiled.exitCode, 0) << compiled.err;
+    ASSERT_EQ(fin::runProcess({exe.string()}, out.string(), err.string()), 0);
+    EXPECT_EQ(readProcessOutput(out.string()), "stdout\n");
+    EXPECT_EQ(readProcessOutput(err.string()), "100%100%\nleftright\n42\n10\n2.51.5\n");
+}
+
+TEST(Soundness_Stdio, BufferedWriteFailuresAreReported) {
+#if !defined(FIN_TESTS_HAVE_BACKEND) || !defined(__linux__)
+    GTEST_SKIP() << "This error probe needs the Linux /dev/full device and LLVM backend";
+#endif
+    EXPECT_EQ(buildBundledAndRun(R"FIN(
+import { File } from stdio::std;
+fun main() <noret> {
+    blame !File::write_text("/dev/full", "x", 1);
+    blame !File::append_text("/dev/full", "x", 1);
+    printf("reported\n");
+}
+)FIN"), "reported\n");
+}
+
+TEST(Soundness_Stdio, FileSizeRefusesAnExtentItsIntApiCannotRepresent) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    const fs::path path = uniqueTempPath("fin_stdio_sparse");
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { std::error_code ec; fs::remove(path, ec); }
+    } cleanup{path};
+    { std::ofstream file(path, std::ios::binary); }
+#ifdef _WIN32
+    const HANDLE handle = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                                      nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    ASSERT_NE(handle, INVALID_HANDLE_VALUE);
+    DWORD returned = 0;
+    const bool sparse = DeviceIoControl(handle, FSCTL_SET_SPARSE, nullptr, 0,
+                                       nullptr, 0, &returned, nullptr) != 0;
+    CloseHandle(handle);
+    ASSERT_TRUE(sparse);
+#endif
+    std::error_code error;
+    fs::resize_file(path, 2147483648ULL, error);
+    ASSERT_FALSE(error) << error.message();
+    EXPECT_EQ(buildAndRun(R"FIN(
+import { File } from stdio::std;
+fun main(args: [string]) <noret> {
+    blame args.length == 1;
+    blame File::exists(args[0]);
+    printf("%d\n", File::size(args[0]));
+}
+)FIN", {}, {path.string()}), "-1\n");
+}
+
+TEST(Soundness_Stdio, StreamRejectsLengthsBeyondItsStorage) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    const auto write = buildBundledAndRun(R"FIN(
+import { Stream } from stdio::std;
+fun main() <noret> {
+    let stream <Stream> = Stream(new [char, 1]{}, 0);
+    let data <[char]> = ['x'];
+    stream.write(data, 2);
+}
+)FIN");
+    EXPECT_NE(write.find("a write count exceeds its input"), std::string::npos) << write;
+    const auto construct = buildBundledAndRun(R"FIN(
+import { Stream } from stdio::std;
+fun main() <noret> {
+    let stream <Stream> = Stream(new [char, 1]{}, 2);
+}
+)FIN");
+    EXPECT_NE(construct.find("stream length exceeds its storage"), std::string::npos) << construct;
+}
+
+TEST(Soundness_Stdio, FileBytesAndStreamCleanupPreserveEmbeddedNul) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    const fs::path path = uniqueTempPath("fin_stdio_binary");
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { std::error_code ec; fs::remove(path, ec); }
+    } cleanup{path};
+    {
+        std::ofstream file(path, std::ios::binary);
+        file.write("a\0b", 3);
+    }
+    EXPECT_EQ(buildAndRun(R"FIN(
+import { File } from stdio::std;
+fun main(args: [string]) <noret> {
+    blame args.length == 1;
+    blame File::size(args[0]) == 3;
+    let data <[char]> = File::read_all(args[0]);
+    blame data.length == 4;
+    blame data[0] == 'a' && data[1] == cast<char>(0) && data[2] == 'b' && data[3] == cast<char>(0);
+    delete data;
+    let stream <auto> = File::open(args[0]);
+    blame stream.remaining() == 3;
+    let head <[char]> = stream.read(2);
+    blame head.length == 2 && head[0] == 'a' && head[1] == cast<char>(0);
+    delete head;
+    stream.free_stream();
+    stream.free_stream();
+    blame stream.capacity() == 0 && stream.remaining() == 0 && stream.tell() == 0;
+    let text <[char]> = ['x', 'y'];
+    blame stream.write(text, 2) == 2;
+    delete text;
+    stream.rewind();
+    let reread <[char]> = stream.read_all();
+    blame reread.length == 2 && reread[0] == 'x' && reread[1] == 'y';
+    delete reread;
+    stream.free_stream();
+    printf("bytes ok\n");
+}
+)FIN", {}, {path.string()}), "bytes ok\n");
+}
 
 // The plumbing, end to end, with the real binary: a module in the bundled library
 // resolves with nothing on the command line and nothing in the environment.
@@ -1399,9 +1573,6 @@ TEST(Soundness_Log, TheSurfaceResolves) {
 #ifdef FIN_TESTS_HAVE_BACKEND
 
 TEST(Soundness_Log, TextModeEmitsToStderrAndNeverToStdout) {
-#ifdef _WIN32
-    GTEST_SKIP() << "log externs (setenv, dprintf) do not resolve on Windows (lib/std/log.fin names the refusal)";
-#endif
     // The stream-discipline half of the issue's acceptance ("mirror finc's
     // stdout-reserved rule"): the lines land on fd 2 with the padded label and
     // the message, stdout stays empty, and a debug line under the default
@@ -1418,17 +1589,13 @@ TEST(Soundness_Log, TextModeEmitsToStderrAndNeverToStdout) {
         "}\n", {});
     ASSERT_FALSE(r.failed) << r.err;
     EXPECT_EQ(r.out, "") << "stdout is reserved; log lines go to stderr:\n" << r.out;
-    EXPECT_NE(r.err.find("[INFO ] the info line"), std::string::npos) << r.err;
-    EXPECT_NE(r.err.find("[WARN ] the warn line"), std::string::npos) << r.err;
-    EXPECT_NE(r.err.find("[ERROR] the error line"), std::string::npos) << r.err;
-    EXPECT_EQ(r.err.find("hidden"), std::string::npos)
-        << "debug under the info filter must stay unsaid:\n" << r.err;
+    EXPECT_EQ(r.err,
+              "[INFO ] the info line\n"
+              "[WARN ] the warn line\n"
+              "[ERROR] the error line\n");
 }
 
 TEST(Soundness_Log, TheFilterRanksAndTheEnvOverrideWins) {
-#ifdef _WIN32
-    GTEST_SKIP() << "log externs (setenv, dprintf) do not resolve on Windows (lib/std/log.fin names the refusal)";
-#endif
     // The rank order, held as runs: at `init(Level::Error())` only the error
     // call emits; at `LOG_LEVEL=debug` with no init at all, the debug call
     // does — which pins both the default-resolve path and the filter — and at
@@ -1472,9 +1639,6 @@ TEST(Soundness_Log, TheFilterRanksAndTheEnvOverrideWins) {
 }
 
 TEST(Soundness_Log, ABadLogLevelBlamesAndNamesTheValue) {
-#ifdef _WIN32
-    GTEST_SKIP() << "log externs (setenv, dprintf) do not resolve on Windows (lib/std/log.fin names the refusal)";
-#endif
     // `debug|info|warn|error`, and a bad value aborts with the value in the
     // message — the issue's "never silent" rule as a run. The abort happens at
     // the first emit unless `init` came first, so both spells are pinned.
@@ -1495,9 +1659,6 @@ TEST(Soundness_Log, ABadLogLevelBlamesAndNamesTheValue) {
 }
 
 TEST(Soundness_Log, JsonlModeEmitsTheFincContractShape) {
-#ifdef _WIN32
-    GTEST_SKIP() << "log externs (setenv, dprintf) do not resolve on Windows (lib/std/log.fin names the refusal)";
-#endif
     // kind first, message next, the escaped message, and the record closed —
     // with the finc-style prefix intact; the timestamp, when it rides, is an
     // appended field precisely so this prefix stays the contract's own. The
@@ -1524,9 +1685,6 @@ TEST(Soundness_Log, JsonlModeEmitsTheFincContractShape) {
 }
 
 TEST(Soundness_Log, TheTimestampPrefixRidesByDefault) {
-#ifdef _WIN32
-    GTEST_SKIP() << "log externs (setenv, dprintf) do not resolve on Windows (lib/std/log.fin names the refusal)";
-#endif
     // The `time` (#59) half of the shape: by default an emitted line carries an
     // rfc3339 prefix (which ends where the level label begins), and
     // `timestamps(false)` takes it off. Contains, never equality — the clock
@@ -1758,9 +1916,6 @@ json_decode_float: trailing data after the value
 }
 
 TEST(Soundness_Fs, EveryCallRunsInATmpdirAndNothingTouchesTheCwd) {
-#ifdef _WIN32
-    GTEST_SKIP() << "fs externs (mkdtemp, opendir, readdir, closedir, rewinddir) do not resolve on Windows (lib/std/fs.fin names the refusal)";
-#endif
     // Issue #61's shape, in one run: the scratch directory comes from
     // mkdtemp, so no call touches a fixed path and none of them need (or
     // change) the cwd. Printed lines are the pinned byte facts; the booleans
@@ -1819,9 +1974,6 @@ gone=ok
 }
 
 TEST(Soundness_Fs, AMissingPathIsRoutineAndNeverAFault) {
-#ifdef _WIN32
-    GTEST_SKIP() << "fs externs (mkdtemp, opendir, readdir, closedir, rewinddir) do not resolve on Windows (lib/std/fs.fin names the refusal)";
-#endif
     // The deliberate contrast with the networking module: a missing file is
     // not a diagnostic, it is null / -1 / an empty walk, the shapes a caller
     // branches on. Three calls, one nonexistent path family, no abort.
@@ -1839,6 +1991,165 @@ size=-1
 walk=0
 )fsf")
         << "a missing path stopped being routine";
+}
+
+TEST(Soundness_Fs, FreshDirectoriesKeepTheirNamesAndEntriesSeparate) {
+    const std::string source = R"fsf(
+import { mk_tmp_dir, mkdir_p, write_string, walk_dir, remove_file, remove_dir, is_dir } from fs::std;
+import { concat, equals, free_str, substr, to_chars, from_chars } from strings::std;
+#c_ifdef FIN_TARGET_WINDOWS
+#[llvm_name="_getcwd"]
+@define probe_getcwd(buffer: &char, size: int) <string>;
+#[llvm_name="_chdir"]
+@define probe_chdir(path: string) <int>;
+#[llvm_name="GetACP"]
+@define probe_code_page() <uint>;
+#c_endif
+fun main() <noret> {
+    let first? <string> = mk_tmp_dir("finfs_names");
+    let second? <string> = mk_tmp_dir("finfs_names");
+    blame first != null && second != null;
+    blame !equals(first?, second?);
+    blame is_dir(first?) && is_dir(second?);
+    let name <string> = "a name with spaces.txt";
+    let stem <string> = concat(first?, "/");
+    let path <string> = concat(stem, name);
+    free_str(stem);
+    blame write_string(path, "one");
+    let entries <[string]> = walk_dir(first?);
+    blame entries.length == 1;
+    blame equals(entries[0], name);
+    let empty <[string]> = walk_dir(second?);
+    blame empty.length == 0;
+    free_str(entries[0]);
+    delete entries;
+    delete empty;
+#c_ifdef FIN_TARGET_WINDOWS
+    let first_chars <[char]> = to_chars(first?);
+    if (first_chars.length > 2 && first_chars[1] == ':') {
+        let cwd_chars <[char]> = new [char, 32768]{};
+        let cwd <string> = probe_getcwd(&cwd_chars[0], 32768);
+        blame cwd != null;
+        blame probe_chdir(first?) == 0;
+        let drive <string> = substr(first?, 0, 2);
+        let relative <[string]> = walk_dir(drive);
+        blame relative.length == 1;
+        blame equals(relative[0], name);
+        blame probe_chdir(cwd) == 0;
+        free_str(relative[0]);
+        delete relative;
+        free_str(drive);
+        delete cwd_chars;
+    }
+    delete first_chars;
+    if (probe_code_page() == cast<uint>(932)) {
+        let name_chars <[char]> = [cast<char>(131), cast<char>(92)];
+        let dbcs_name <string> = from_chars(name_chars, 0, 2);
+        delete name_chars;
+        let dbcs_stem <string> = concat(first?, "/");
+        let dbcs_dir <string> = concat(dbcs_stem, dbcs_name);
+        free_str(dbcs_stem);
+        free_str(dbcs_name);
+        blame mkdir_p(dbcs_dir);
+        let dbcs_prefix <string> = concat(dbcs_dir, "/");
+        let dbcs_file <string> = concat(dbcs_prefix, name);
+        free_str(dbcs_prefix);
+        blame write_string(dbcs_file, "two");
+        let dbcs_entries <[string]> = walk_dir(dbcs_dir);
+        blame dbcs_entries.length == 1;
+        blame equals(dbcs_entries[0], name);
+        free_str(dbcs_entries[0]);
+        delete dbcs_entries;
+        blame remove_file(dbcs_file) && remove_dir(dbcs_dir);
+        free_str(dbcs_file);
+        free_str(dbcs_dir);
+    }
+#c_endif
+    blame remove_file(path);
+    blame remove_dir(first?) && remove_dir(second?);
+    free_str(path);
+    free_str(first?);
+    free_str(second?);
+    printf("separate=ok\n");
+}
+)fsf";
+    EXPECT_EQ(buildBundledAndRun(source), "separate=ok\n");
+}
+
+TEST(Soundness_Fs, CopiesEmbeddedNulBytesAndSupportsTheSamePath) {
+    const std::string source = R"fsf(
+import { mk_tmp_dir, copy_file, file_size, remove_file, remove_dir } from fs::std;
+import { concat, free_str } from strings::std;
+#[llvm_name="fopen"]
+@define probe_open(path: string, mode: string) <&void>;
+#[llvm_name="fclose"]
+@define probe_close(stream: &void) <int>;
+#[llvm_name="fwrite"]
+@define probe_write(data: &char, size: ulong, count: ulong, stream: &void) <ulong>;
+#[llvm_name="fread"]
+@define probe_read(data: &char, size: ulong, count: ulong, stream: &void) <ulong>;
+fun main() <noret> {
+    let made? <string> = mk_tmp_dir("finfs_binary");
+    blame made != null;
+    let source <string> = concat(made?, "/source.bin");
+    let target <string> = concat(made?, "/target.bin");
+    let bytes <[char]> = ['a', cast<char>(0), 'b', '\n'];
+    let file <&void> = probe_open(source, "wb");
+    blame file != null;
+    blame probe_write(&bytes[0], cast<ulong>(1), cast<ulong>(4), file) == cast<ulong>(4);
+    blame probe_close(file) == 0;
+    blame copy_file(source, target);
+    blame file_size(target) == cast<long>(4);
+    file = probe_open(target, "rb");
+    blame file != null;
+    let read <[char]> = new [char, 4]{};
+    blame probe_read(&read[0], cast<ulong>(1), cast<ulong>(4), file) == cast<ulong>(4);
+    blame probe_close(file) == 0;
+    blame read[0] == 'a' && read[1] == cast<char>(0) && read[2] == 'b' && read[3] == '\n';
+    blame copy_file(source, source);
+    blame file_size(source) == cast<long>(4);
+    file = probe_open(source, "rb");
+    blame file != null;
+    blame probe_read(&read[0], cast<ulong>(1), cast<ulong>(4), file) == cast<ulong>(4);
+    blame probe_close(file) == 0;
+    blame read[0] == 'a' && read[1] == cast<char>(0) && read[2] == 'b' && read[3] == '\n';
+    delete bytes;
+    delete read;
+    blame remove_file(source) && remove_file(target) && remove_dir(made?);
+    free_str(source);
+    free_str(target);
+    free_str(made?);
+    printf("binary=ok\n");
+}
+)fsf";
+    EXPECT_EQ(buildBundledAndRun(source), "binary=ok\n");
+}
+
+TEST(Soundness_Fs, LongBasenamesRetainTheirWholeDirectoryEntry) {
+    const std::string source = R"fsf(
+import { mk_tmp_dir, write_string, walk_dir, remove_file, remove_dir } from fs::std;
+import { concat, repeat, equals, free_str } from strings::std;
+fun main() <noret> {
+    let made? <string> = mk_tmp_dir("finlong");
+    blame made != null;
+    let name <string> = repeat("a", 120);
+    let base <string> = concat(made?, "/");
+    let path <string> = concat(base, name);
+    free_str(base);
+    blame write_string(path, "");
+    let entries <[string]> = walk_dir(made?);
+    blame entries.length == 1;
+    blame equals(entries[0], name);
+    free_str(entries[0]);
+    delete entries;
+    blame remove_file(path) && remove_dir(made?);
+    free_str(path);
+    free_str(name);
+    free_str(made?);
+    printf("long-name=ok\n");
+}
+)fsf";
+    EXPECT_EQ(buildBundledAndRun(source), "long-name=ok\n");
 }
 
 #endif  // FIN_TESTS_HAVE_BACKEND

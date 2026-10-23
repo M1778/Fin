@@ -23,6 +23,18 @@ add_executable(fin_tests
     test_opt_agreement.cpp
     test_mem.cpp
     test_sync_net.cpp
+    test_runtime_portability.cpp
+    test_target_selectors.cpp
+    test_foreign_callbacks.cpp
+    test_cli_library.cpp
+    test_container_lifetimes.cpp
+    test_stdptr_lifetimes.cpp
+    test_assignment_effects.cpp
+    test_stdlib_resource_cleanup.cpp
+    test_stage_array_regressions.cpp
+    test_stage_global_generics.cpp
+    test_stage_value_ownership.cpp
+    test_sync_lifetimes.cpp
     test_infra_contract.cpp
     Corpus.cpp
     Pipeline.cpp
@@ -33,6 +45,10 @@ target_link_libraries(fin_tests PRIVATE
     GTest::gtest
     GTest::gtest_main
 )
+
+if(WIN32)
+    target_link_libraries(fin_tests PRIVATE ws2_32)
+endif()
 
 target_include_directories(fin_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 

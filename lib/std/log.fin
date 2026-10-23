@@ -25,19 +25,15 @@
 // not lowered yet`; the globals pass reads only the root program), so the state
 // lives where finc's own driver state lives: the process environment. `init`
 // writes `FIN_LOG_RANK`/`FIN_LOG_JSON`; every emitter reads them back through
-// libc `getenv`/`setenv`, declared HERE under module-private spellings
+// libc `getenv` and a platform environment setter, declared HERE under module-private spellings
 // (`log_getenv`, `log_setenv`) the way every module declares its externs, rather
 // than importing env::std — whose externs are not #[global] and so do not lower
 // through an import. Every emitted line costs one getenv parse, and the
 // configuration is also inheritable-by-fork process state, which a config struct
 // would not be. That is the recorded trade.
 //
-// WINDOWS is namedly unimplemented the way sync.fin spells it: a child that
-// imports log::std refuses at the Windows link on this module's `setenv` and
-// `dprintf` externs (ucrt ships neither), so the soundness tests for these
-// paths skip there instead of showing a red link. A runtime platform gate
-// exists in no language construct yet, which is why the refusal lives where
-// the linker is.
+// Windows uses UCRT `_putenv_s` and `fprintf(__acrt_iob_func(2), ...)`;
+// POSIX uses `setenv` and `dprintf(2, ...)`. Both write the same stderr stream.
 //
 // THE FILTER. Default level is `info`, exactly as the issue says. `LOG_LEVEL`
 // (values `debug`|`info`|`warn`|`error`, anything else `blame`s with the bad
@@ -72,7 +68,7 @@
 //     is not lowered yet`). The struct spelling is what shipped; see the
 //     compat note above.
 //   * Emission is not thread-safe: two threads can interleave partial lines
-//     (the escaping + dprintf span). No lock exists in lib/std, so this is
+//     (the escaping + output span). No lock exists in lib/std, so this is
 //     recorded, not papered over.
 //   * `now()` and `format_rfc3339` blame on a nonpositive/over-9999 epoch; that
 //     failure is theirs, not this file's.
@@ -92,11 +88,26 @@ namespace std {
 #[llvm_name="getenv"]
 @define log_getenv(name: string) <string>;
 
+#c_ifdef FIN_TARGET_WINDOWS
+#[llvm_name="_putenv_s"]
+@define log_setenv(name: string, value: string) <int>;
+
+#[llvm_name="__acrt_iob_func"]
+@define log_iob(index: uint) <&void>;
+
+#[llvm_name="fprintf"]
+@define log_fprintf(stream: &void, fmt: string, ...) <int>;
+#c_else
 #[llvm_name="setenv"]
-@define log_setenv(name: string, value: string, overwrite: int) <int>;
+@define log_posix_setenv(name: string, value: string, overwrite: int) <int>;
 
 #[llvm_name="dprintf"]
 @define log_dprintf(fd: int, fmt: string, ...) <int>;
+
+priv fun log_setenv(name: string, value: string) <int> {
+    return log_posix_setenv(name, value, 1);
+}
+#c_endif
 
 #[llvm_name="strcmp"]
 @define log_strcmp(a: string, b: string) <int>;
@@ -196,8 +207,8 @@ priv fun set_rank_pass(level: Level, json: bool) <noret> {
         r = parsed;
     }
     if (r < 0) { r = 1; }
-    log_setenv("FIN_LOG_RANK", log_rank_text(r), 1);
-    log_setenv("FIN_LOG_JSON", json : "1" ? "0", 1);
+    log_setenv("FIN_LOG_RANK", log_rank_text(r));
+    log_setenv("FIN_LOG_JSON", json : "1" ? "0");
 }
 
 #[export]
@@ -216,7 +227,7 @@ pub fun init_json(level: Level, json: bool) <noret> {
 // for the byte-determinism that a [tätte]ed line cannot offer a harness.
 #[export]
 pub fun timestamps(on: bool) <noret> {
-    log_setenv("FIN_LOG_TS", on : "1" ? "0", 1);
+    log_setenv("FIN_LOG_TS", on : "1" ? "0");
 }
 
 // The threshold, read fresh per emit rather than cached at init: the process env
@@ -232,7 +243,7 @@ priv fun check_rank(rank_of_msg: int) <bool> {
         // The stored text is also what the local parse reads below: an `env = "1"`
         // placeholder here would filter exactly against the wrong rank.
         env = log_rank_text(requested);
-        log_setenv("FIN_LOG_RANK", env, 1);
+        log_setenv("FIN_LOG_RANK", env);
     }
     let cur <int> = 1;
     if (env != null) {
@@ -249,7 +260,7 @@ priv fun json_now() <bool> {
 }
 
 // The emission one spot: threshold check, line assembly (either mode, one access
-// to the env each), one dprintf(2) write, staging storage freed. Never stdout.
+// to the env each), one stderr write, staging storage freed. Never stdout.
 priv fun emit(msg: string, msg_rank: int, msg_json: bool) <noret> {
     if (msg == null) { msg = ""; }
     if (!check_rank(msg_rank)) { return; }
@@ -322,8 +333,13 @@ priv fun emit(msg: string, msg_rank: int, msg_json: bool) <noret> {
 
     let line <string> = out.to_string();
     free_buffer(out);
+    #c_ifdef FIN_TARGET_WINDOWS
+    log_fprintf(log_iob(cast<uint>(2)), "%s", line);
+    #c_else
     log_dprintf(2, "%s", line);
+    #c_endif
     log_free(line);
+    if (ts != "") { log_free(ts); }
 }
 
 #[export]

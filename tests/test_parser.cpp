@@ -32,6 +32,43 @@ TEST(Preprocessor, CRLFDirectivesAndContinuationsMatchLF) {
     EXPECT_EQ(crlf.process(windowsSource), expected);
 }
 
+TEST(Preprocessor, NativeOperatingSystemSelectsOnlyItsOwnBranch) {
+    const char* native = "";
+#if defined(_WIN32)
+    native = "FIN_TARGET_WINDOWS";
+#elif defined(__APPLE__) && defined(__MACH__)
+    native = "FIN_TARGET_DARWIN";
+#elif defined(__linux__)
+    native = "FIN_TARGET_LINUX";
+#endif
+    for (const std::string name : {"FIN_TARGET_WINDOWS", "FIN_TARGET_DARWIN",
+                                   "FIN_TARGET_LINUX"}) {
+        SCOPED_TRACE(name);
+        fin::Preprocessor pp;
+        const std::string source = "#c_ifdef " + name +
+            "\nselected\n#c_else\nexcluded\n#c_endif\n";
+        EXPECT_EQ(pp.process(source), name == native
+            ? "\nselected\n\n\n\n" : "\n\n\nexcluded\n\n");
+    }
+}
+
+TEST(Preprocessor, NativeArchitectureSelectsOnlyItsOwnBranch) {
+    const char* native = "";
+#if defined(_M_ARM64) || defined(__aarch64__)
+    native = "FIN_TARGET_ARM64";
+#elif defined(_M_X64) || defined(__x86_64__)
+    native = "FIN_TARGET_X86_64";
+#endif
+    for (const std::string name : {"FIN_TARGET_X86_64", "FIN_TARGET_ARM64"}) {
+        SCOPED_TRACE(name);
+        fin::Preprocessor pp;
+        const std::string source = "#c_ifdef " + name +
+            "\nselected\n#c_else\nexcluded\n#c_endif\n";
+        EXPECT_EQ(pp.process(source), name == native
+            ? "\nselected\n\n\n\n" : "\n\n\nexcluded\n\n");
+    }
+}
+
 namespace fs = std::filesystem;
 
 // --- Helper Functions ---

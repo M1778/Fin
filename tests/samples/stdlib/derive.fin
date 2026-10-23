@@ -36,7 +36,7 @@ fun main() <noret> {
     p.x = 3;
     p.y = -5;
 
-    printf("%lu\n", derive_hash(p));
+    printf("%llu\n", derive_hash(p));
 
     let q <Point>;
     q.x = 3;

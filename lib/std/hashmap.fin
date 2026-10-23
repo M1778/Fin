@@ -31,6 +31,9 @@
 // bucket layout, which may change with any rehash, and nothing here promises
 // more. A caller who needs a deterministic walk uses btreemap::std, whose
 // whole contract is that index order is sorted order in every compiler.
+// `free_hashmap` releases the vectors and their buffers, leaving this map empty
+// and reusable with the same hasher. Stored keys and values remain the caller's.
+// Copies share storage, so only one copy may own its cleanup.
 //
 // A caller who needs a different hash supplies one. `hasher <fn(any) -> int>` is a
 // field, `HashMap::with_hasher(f)` is the static that sets it, and `hash_key` consults
@@ -64,7 +67,7 @@
 //   * `grow` used to drop the old bucket vector instead of freeing it. It reuses the
 //     same `Collection` now -- `clear`, `reserve`, refill -- so the buffer change goes
 //     through `Collection::allocate`, whose `delete` of its own `[T]` is the only
-//     reclaim this library can express. No vector is dropped on growth anymore.
+//     buffer reclaim on growth. No vector is dropped on growth anymore.
 //   * An erased entry's key and value used to stay in `keys`/`values` forever. `rehash`
 //     packs the live entries down in place now (copy forward, `pop_last` the tail) and
 //     rebuilds the bucket vector, so slots stay proportional to the live count. It does
@@ -283,8 +286,11 @@ pub struct HashMap<T, U> : <Index, IndexAssign> {
         // Slots past twice the live count plus slack trigger the same rehash.
         // A rehash that only clears tombstones keeps the size when the live entries fit;
         // the table doubles only when they alone break the factor.
-        if ((self.used + self.dead) * 4 >= self.cap * 3 || self.keys.len() > self.used * 2 + 16) {
-            if (self.used * 4 >= self.cap * 3) { self.rehash(self.cap * 2); }
+        if ((cast<long>(self.used) + self.dead) * 4 >= cast<long>(self.cap) * 3 || cast<long>(self.keys.len()) > cast<long>(self.used) * 2 + 16) {
+            if (cast<long>(self.used) * 4 >= cast<long>(self.cap) * 3) {
+                blame self.cap <= 1073741823, "hash map capacity overflow";
+                self.rehash(self.cap * 2);
+            }
             else { self.rehash(self.cap); }
         }
 
@@ -355,7 +361,7 @@ pub struct HashMap<T, U> : <Index, IndexAssign> {
         return false;
       }
 
-      // Empties the map without freeing anything, which is all this library can express.
+      // Empties the map while retaining its buffers for reuse.
       pub fun clear(self: &Self) <noret> {
         self.ensure();
         for (let b <int> = 0; b < self.cap; b++) { self.buckets.__set(b, -1); }
@@ -364,6 +370,25 @@ pub struct HashMap<T, U> : <Index, IndexAssign> {
         self.keys.clear();
         self.values.clear();
         self.live.clear();
+        self.used = 0;
+        self.dead = 0;
+      }
+
+      pub fun free_hashmap(self: &Self) <noret> {
+        if (self.cap == 0) { return; }
+        self.keys.free_collection();
+        self.values.free_collection();
+        self.live.free_collection();
+        self.buckets.free_collection();
+        delete self.keys;
+        delete self.values;
+        delete self.live;
+        delete self.buckets;
+        self.keys = null;
+        self.values = null;
+        self.live = null;
+        self.buckets = null;
+        self.cap = 0;
         self.used = 0;
         self.dead = 0;
       }
@@ -435,19 +460,25 @@ pub struct HashMap<T, U> : <Index, IndexAssign> {
             }
 
             HashMap() {
-                return new HashMap{keys: null, values: null, live: null, buckets: null,
-                      cap: 0, used: 0, dead: 0, hasher: null};
-                }
+                self.keys = null;
+                self.values = null;
+                self.live = null;
+                self.buckets = null;
+                self.cap = 0;
+                self.used = 0;
+                self.dead = 0;
+                self.hasher = null;
             }
-
-            // The dictionary-shaped call `map!{"a" => 1}`, which useful_macros.fin:7 writes and ADR 0023
-            // step 8 asks for here. `{...}` arrives as one prototype with the written keys (step 3), so
-            // the body hands it straight to `from_prototype` and the macro is a rename rather than a
-            // construction. The brace form also accepts a trailing comma where a prototype literal
-            // written directly does not, which is why useful_macros.fin:9 can end in one. `HashMap::` is
-            // qualified because a body may spell nothing but qualified paths and `$` unquotes (ADR 0020,
-            // ADR 0023). The entries arrive through `from_prototype`, so the call builds a
-            // `HashMap<string, int>` holding the written pairs.
-            @macro map(p) { return quote { HashMap::from_prototype($p); }; }
-
         }
+
+        // The dictionary-shaped call `map!{"a" => 1}`, which useful_macros.fin:7 writes and ADR 0023
+        // step 8 asks for here. `{...}` arrives as one prototype with the written keys (step 3), so
+        // the body hands it straight to `from_prototype` and the macro is a rename rather than a
+        // construction. The brace form also accepts a trailing comma where a prototype literal
+        // written directly does not, which is why useful_macros.fin:9 can end in one. `HashMap::` is
+        // qualified because a body may spell nothing but qualified paths and `$` unquotes (ADR 0020,
+        // ADR 0023). The entries arrive through `from_prototype`, so the call builds a
+        // `HashMap<string, int>` holding the written pairs.
+        @macro map(p) { return quote { HashMap::from_prototype($p); }; }
+
+      }

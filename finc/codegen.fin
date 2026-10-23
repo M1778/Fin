@@ -35,6 +35,8 @@ import {
       llvm_function_type, llvm_add_function, llvm_get_named_function, llvm_append_basic_block,
       llvm_get_param, llvm_create_builder, llvm_dispose_builder, llvm_position_builder,
       llvm_get_insert_block, llvm_get_basic_block_terminator,
+      llvm_get_entry_basic_block, llvm_get_first_instruction, llvm_position_builder_before,
+      llvm_get_first_basic_block, llvm_get_next_basic_block, llvm_get_instruction_opcode,
       llvm_const_int, llvm_const_string, llvm_const_null, llvm_get_undef, llvm_build_global_string_ptr,
       llvm_const_int_of_string,
       llvm_build_ret, llvm_build_ret_void,
@@ -152,6 +154,8 @@ pub struct LocalVar {
       tie_kind <int> = 0,
       tie_master <int> = 0,
       tie_region <int> = 0,
+      active <bool> = true,
+      value_box <&LLVMValue> = null,
       fn_ty <&LLVMType> = null,
 }
 
@@ -160,6 +164,7 @@ pub struct FnSymbol {
       name <string> = "",
       fn_val <&LLVMValue> = null,
       fn_ty <&LLVMType> = null,
+      value_return <string> = "",
       // Lazy generic-method template (LM1): the uninstantiated method AST.
       // Null for ordinary symbols. A template declares no LLVM function
       // until a call site instantiates it, so uncalled generic methods
@@ -286,6 +291,7 @@ pub struct FnContext {
       src_file <string> = "",
       break_bb <&LLVMBasicBlock> = null,
       continue_bb <&LLVMBasicBlock> = null,
+      loop_cleanup_from <int> = 0,
       // True inside `main`, whose LLVM shape is always C `i32 main(...)`
       // even when declared `<void>`: a bare `return;` there answers exit
       // status 0 (C++ visit(ReturnStatement&)), never `ret void`.
@@ -298,6 +304,7 @@ pub struct FnContext {
       interface_count <int> = 0,
       current_scope_depth <int> = 0,
       ret_iface <&InterfaceInfo> = null,
+      value_return <string> = "",
       poisoned <bool> = false,
       // Wave-5 slice 1: the program holds a `move_or_copy` claimant, so
       // scope cleanups skip moved-from bindings. False keeps every value
@@ -335,6 +342,12 @@ pub struct FnContext {
       // cache for Self-returning statics no argument binds. Empty
       // everywhere else, so every other call lowers exactly as before.
       call_want <string> = "",
+      // Entry-allocated representation buffers, released on every return.
+      // Each source storage site has one box, including in loops. Nested
+      // value fields have their own entry boxes; payload handles do not.
+      owned_boxes <[&LLVMValue]>,
+      owned_box_count <int> = 0,
+      pin_frame_box <bool> = false,
 }
 
 fun fn_ctx_add_var(ctx: &FnContext, name: string, val: &LLVMValue, ty: &LLVMType, type_ann: string) <noret> {
@@ -1273,15 +1286,16 @@ fun fn_value_to_ptr(ctx: &FnContext, src_node: &AstNode, val: &LLVMValue) <&LLVM
 
 fun find_struct(ctx: &FnContext, name: string) <&StructInfo> {
     if (name == null || ctx == null) { return null; }
+    let found <&StructInfo> = null;
     let i <int> = 0;
     while (i < ctx.struct_count) {
         let st <&StructInfo> = ctx.structs[i];
         if (st != null && cg_str_eq(st.name, name)) {
-            return st;
+            if (found == null || st.field_count > found.field_count) { found = st; }
         }
         i = i + 1;
     }
-    return null;
+    return found;
 }
 
 // The struct count drifts whenever a field read instantiates a layout
@@ -2485,7 +2499,7 @@ fun emit_destructor_for_obj(ctx: &FnContext, st_name: string, rec_ptr: &LLVMValu
 }
 
 fun cg_destroy_var_struct(ctx: &FnContext, v: &LocalVar) <noret> {
-    if (v == null || v.val == null || v.type_annotation == null) { return; }
+    if (v == null || !v.active || v.val == null || v.type_annotation == null) { return; }
     let st_name <string> = v.type_annotation;
     let s_len <int> = cast<int>(cg_strlen(st_name));
     if (s_len == 0) { return; }
@@ -3384,6 +3398,689 @@ fun cg_body_writes_param(node: &AstNode, pname: string) <bool> {
     return false;
 }
 
+// Only plain nominal struct values own representation here; pointers,
+// array handles, nullable wrappers and unrelated types keep their shape.
+fun cg_value_struct(ctx: &FnContext, ann: string) <&StructInfo> {
+    let n <int> = cast<int>(cg_strlen(ann));
+    if (n == 0) { return null; }
+    let first <string> = substr(ann, 0, 1);
+    let last <string> = substr(ann, n - 1, 1);
+    if (cg_str_eq(first, "&") || cg_str_eq(first, "*") || cg_str_eq(first, "[") ||
+      cg_str_eq(last, "*") || cg_str_eq(last, "?")) { return null; }
+    return cg_ensure_struct_instance(ctx, ann);
+}
+
+fun get_fixed_array_extent(type_ann: string) <int> {
+    if (type_ann == null) { return -1; }
+    let len <int> = cast<int>(cg_strlen(type_ann));
+    if (len < 3) { return -1; }
+    let comma_idx <int> = -1;
+    let i <int> = 0;
+    while (i < len) {
+        let ch <string> = substr(type_ann, i, 1);
+        if (cg_str_eq(ch, ",")) {
+            comma_idx = i;
+        }
+        i = i + 1;
+    }
+    if (comma_idx < 0) { return -1; }
+
+    let extent <int> = 0;
+    let has_digits <bool> = false;
+    let j <int> = comma_idx + 1;
+    while (j < len) {
+        let ch <string> = substr(type_ann, j, 1);
+        if (!cg_str_eq(ch, " ") && !cg_str_eq(ch, "]") && !cg_str_eq(ch, ">")) {
+            let d <int> = -1;
+            if (cg_str_eq(ch, "0")) { d = 0; }
+            else if (cg_str_eq(ch, "1")) { d = 1; }
+            else if (cg_str_eq(ch, "2")) { d = 2; }
+            else if (cg_str_eq(ch, "3")) { d = 3; }
+            else if (cg_str_eq(ch, "4")) { d = 4; }
+            else if (cg_str_eq(ch, "5")) { d = 5; }
+            else if (cg_str_eq(ch, "6")) { d = 6; }
+            else if (cg_str_eq(ch, "7")) { d = 7; }
+            else if (cg_str_eq(ch, "8")) { d = 8; }
+            else if (cg_str_eq(ch, "9")) { d = 9; }
+            if (d >= 0) {
+                extent = extent * 10 + d;
+                has_digits = true;
+            }
+        }
+        j = j + 1;
+    }
+    if (has_digits) {
+        return extent;
+    }
+    return -1;
+}
+
+fun cg_array_element_ann(ann: string) <string> {
+    if (ann == null) { return ""; }
+    let t <string> = cg_trim_spaces(ann);
+    let len <int> = cast<int>(cg_strlen(t));
+    if (len < 3 || !cg_str_eq(substr(t, 0, 1), "[")) { return ""; }
+    let end <int> = len - 1;
+    let depth <int> = 0;
+    let i <int> = 1;
+    while (i < end) {
+        let c <string> = substr(t, i, 1);
+        if (cg_str_eq(c, "<") || cg_str_eq(c, "[")) { depth = depth + 1; }
+        if (cg_str_eq(c, ">") || cg_str_eq(c, "]")) { depth = depth - 1; }
+        if (depth == 0 && cg_str_eq(c, ",")) { end = i; break; }
+        i = i + 1;
+    }
+    return cg_trim_spaces(substr(t, 1, end - 1));
+}
+
+// LLVM's C entry points consume these carriers as contiguous pointer
+// tables, not Fin array handles. Their fixed member is inline storage.
+// Preserve this existing foreign ABI while ordinary value fields use
+// independently owned buffers.
+fun cg_inline_array_carrier(st: &StructInfo) <bool> {
+    return st != null && (cg_str_eq(st.name, "LLVMTypeArgs") || cg_str_eq(st.name, "LLVMValueArgs"));
+}
+
+// The stage lays a struct's fields out at an eight-byte stride: the field
+// GEPs index an `i8*` with the field ordinal, so field N sits at byte
+// 8*N and every field is one word wide. A copy must therefore read and
+// write whole words at that stride -- the C++ backend's packed layout
+// (which `map_type`/`llvm_abi_size_of` describe) is a different shape
+// and sizes a copy wrongly.
+fun cg_struct_storage_words(ctx: &FnContext, st: &StructInfo) <int> {
+    if (cg_inline_array_carrier(st)) { return 64; }
+    let words <int> = 0;
+    let i <int> = 0;
+    while (i < st.field_count) {
+        let field <&StructFieldInfo> = st.fields[i];
+        let end <int> = field.index + 1;
+        if (end > words) { words = end; }
+        i = i + 1;
+    }
+    if (words < 1) { words = 1; }
+    return words;
+}
+
+fun get_or_declare_free(ctx: &FnContext) <&LLVMValue> {
+    let free_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "free");
+    if (free_fn == null) {
+        let f_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
+        f_params.t[0] = ctx.ptr_ty;
+        let f_ty <&LLVMType> = llvm_function_type(ctx.void_ty, f_params, 1, 0);
+        delete f_params;
+        free_fn = llvm_add_function(ctx.module, "free", f_ty);
+    }
+    return free_fn;
+}
+
+fun cg_fixed_element_slot(ctx: &FnContext, buffer: &LLVMValue, index: int) <&LLVMValue> {
+    let ind <&LLVMIndices> = new LLVMIndices{};
+    ind.i0 = llvm_const_int(ctx.i64_ty, index, 0);
+    let slot <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, buffer, ind, 1, "fixed.value.slot");
+    delete ind;
+    return slot;
+}
+
+fun cg_fixed_field_count(field: &StructFieldInfo) <int> {
+    let ann <string> = field.type_annotation;
+    if (ann == null || cg_strlen(ann) == cast<ulong>(0) || !cg_str_eq(substr(ann, 0, 1), "[")) { return -1; }
+    return get_fixed_array_extent(ann);
+}
+
+fun cg_fixed_field_bytes(ctx: &FnContext, st: &StructInfo, field: &StructFieldInfo) <int> {
+    let stride <int> = 8;
+    let original <&StructInfo> = st;
+    let i <int> = 0;
+    while (i < cast<int>(cg_strlen(st.name))) {
+        if (cg_str_eq(substr(st.name, i, 1), "<")) { original = find_struct(ctx, substr(st.name, 0, i)); break; }
+        i = i + 1;
+    }
+    let param_field <bool> = false;
+    if (original != null && original.gen_params != null && cg_strlen(original.gen_params) > cast<ulong>(0)) {
+        // Generic fixed fields use word slots in the stage's writer/readers.
+        let oi <int> = 0;
+        while (oi < original.field_count) {
+            let f <&StructFieldInfo> = original.fields[oi];
+            if (cg_str_eq(f.name, field.name)) {
+                let et <string> = cg_array_element_ann(f.type_annotation);
+                if (cg_is_type_param(et) || cg_gen_text_contains(original.gen_params, et)) { param_field = true; }
+                break;
+            }
+            oi = oi + 1;
+        }
+    }
+    if (!param_field) {
+        let ety <&LLVMType> = map_type(ctx, cg_array_element_ann(field.type_annotation));
+        if (ety == ctx.i8_ty || ety == ctx.i1_ty) { stride = 1; }
+        else if (ety == ctx.i16_ty) { stride = 2; }
+        else if (ety == ctx.i32_ty || ety == ctx.float_ty) { stride = 4; }
+    }
+    return cg_fixed_field_count(field) * stride;
+}
+
+fun cg_copy_fixed_bytes(ctx: &FnContext, st: &StructInfo, field: &StructFieldInfo, dest: &LLVMValue, source: &LLVMValue) <noret> {
+    let copy_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "fixed.copy");
+    let end_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "fixed.end");
+    llvm_build_cond_br(ctx.builder, llvm_build_is_not_null(ctx.builder, source, "fixed.present"), copy_bb, end_bb);
+    llvm_position_builder(ctx.builder, copy_bb);
+    let copier <&LLVMValue> = get_or_declare_memcpy(ctx);
+    let args <&LLVMValueArgs> = new LLVMValueArgs{};
+    args.v[0] = dest;
+    args.v[1] = source;
+    args.v[2] = llvm_const_int(ctx.i64_ty, cg_fixed_field_bytes(ctx, st, field), 0);
+    llvm_build_call2(ctx.builder, llvm_global_get_value_type(copier), copier, args, 3, "");
+    delete args;
+    llvm_build_br(ctx.builder, end_bb);
+    llvm_position_builder(ctx.builder, end_bb);
+}
+
+fun cg_fixed_buffer(ctx: &FnContext, count: int, frame: bool) <&LLVMValue> {
+    let saved <&LLVMBasicBlock> = llvm_get_insert_block(ctx.builder);
+    if (frame) {
+        let entry <&LLVMBasicBlock> = llvm_get_entry_basic_block(ctx.fn_val);
+        let first <&LLVMValue> = llvm_get_first_instruction(entry);
+        if (first != null) { llvm_position_builder_before(ctx.builder, first); }
+        else { llvm_position_builder(ctx.builder, entry); }
+    }
+    let allocator <&LLVMValue> = get_or_declare_calloc(ctx);
+    let args <&LLVMValueArgs> = new LLVMValueArgs{};
+    args.v[0] = llvm_const_int(ctx.i64_ty, count + 1, 0);
+    args.v[1] = llvm_const_int(ctx.i64_ty, 8, 0);
+    let raw <&LLVMValue> = llvm_build_call2(ctx.builder, llvm_global_get_value_type(allocator), allocator, args, 2, "fixed.home");
+    delete args;
+    llvm_build_store(ctx.builder, llvm_const_int(ctx.i64_ty, count, 0), raw);
+    let ind <&LLVMIndices> = new LLVMIndices{};
+    ind.i0 = llvm_const_int(ctx.i64_ty, 1, 0);
+    let buffer <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, raw, ind, 1, "fixed.elements");
+    delete ind;
+    if (frame) {
+        if (ctx.owned_box_count >= 8192) {
+            cg_dprintf(2, "finc codegen refusal: aggregate frame has more than 8192 storage sites\n");
+            refuse_and_poison(ctx);
+        } else {
+            if (!ctx.pin_frame_box) { ctx.owned_boxes[ctx.owned_box_count] = raw; }
+            ctx.owned_box_count = ctx.owned_box_count + 1;
+        }
+        llvm_position_builder(ctx.builder, saved);
+    }
+    return buffer;
+}
+
+fun cg_free_fixed_buffer(ctx: &FnContext, buffer: &LLVMValue) <noret> {
+    let live_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "fixed.free");
+    let end_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "fixed.freed");
+    llvm_build_cond_br(ctx.builder, llvm_build_is_not_null(ctx.builder, buffer, "fixed.live"), live_bb, end_bb);
+    llvm_position_builder(ctx.builder, live_bb);
+    let ind <&LLVMIndices> = new LLVMIndices{};
+    ind.i0 = llvm_const_int_of_string(ctx.i64_ty, "-1", 10);
+    let raw <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, buffer, ind, 1, "fixed.base");
+    delete ind;
+    let freer <&LLVMValue> = get_or_declare_free(ctx);
+    let args <&LLVMValueArgs> = new LLVMValueArgs{};
+    args.v[0] = raw;
+    llvm_build_call2(ctx.builder, llvm_global_get_value_type(freer), freer, args, 1, "");
+    delete args;
+    llvm_build_br(ctx.builder, end_bb);
+    llvm_position_builder(ctx.builder, end_bb);
+}
+
+// Entry boxes have frame lifetime but heap addresses. Their nested fields
+// are entry boxes too, so assignment preserves addresses borrowed earlier.
+// Register individual allocations, not SSA loads from conditional paths:
+// all entries dominate all returns, including returns lowered before a
+// later source site. Cleanup is inserted after the complete body is known.
+fun cg_frame_box(ctx: &FnContext, ann: string) <&LLVMValue> {
+    let st <&StructInfo> = cg_value_struct(ctx, ann);
+    if (st == null) { return null; }
+    if (ctx.owned_boxes == null) { ctx.owned_boxes = new [&LLVMValue, 8192]{}; }
+    if (ctx.owned_box_count >= 8192) {
+        cg_dprintf(2, "finc codegen refusal: aggregate frame has more than 8192 storage sites\n");
+        refuse_and_poison(ctx);
+        return null;
+    }
+    let saved <&LLVMBasicBlock> = llvm_get_insert_block(ctx.builder);
+    let entry <&LLVMBasicBlock> = llvm_get_entry_basic_block(ctx.fn_val);
+    let first <&LLVMValue> = llvm_get_first_instruction(entry);
+    if (first != null) { llvm_position_builder_before(ctx.builder, first); }
+    else { llvm_position_builder(ctx.builder, entry); }
+    let allocator <&LLVMValue> = get_or_declare_calloc(ctx);
+    let args <&LLVMValueArgs> = new LLVMValueArgs{};
+    args.v[0] = llvm_const_int(ctx.i64_ty, cg_struct_storage_words(ctx, st), 0);
+    args.v[1] = llvm_const_int(ctx.i64_ty, 8, 0);
+    let box <&LLVMValue> = llvm_build_call2(ctx.builder, llvm_global_get_value_type(allocator), allocator, args, 2, "value.home");
+    delete args;
+    let anchor <&LLVMValue> = llvm_build_alloca(ctx.builder, ctx.i8_ty, "value.anchor");
+    if (!ctx.pin_frame_box) { ctx.owned_boxes[ctx.owned_box_count] = box; }
+    ctx.owned_box_count = ctx.owned_box_count + 1;
+    llvm_position_builder(ctx.builder, saved);
+    let i <int> = 0;
+    while (i < st.field_count && !cg_inline_array_carrier(st)) {
+        let field <&StructFieldInfo> = st.fields[i];
+        if (cg_value_struct(ctx, field.type_annotation) != null || cg_fixed_field_count(field) >= 0) {
+            let child <&LLVMValue> = null;
+            if (cg_fixed_field_count(field) >= 0) {
+                child = cg_fixed_buffer(ctx, cg_fixed_field_count(field), true);
+                let elem_ann <string> = cg_array_element_ann(field.type_annotation);
+                if (cg_value_struct(ctx, elem_ann) != null) {
+                    let ei <int> = 0;
+                    while (ei < cg_fixed_field_count(field)) {
+                        let elem <&LLVMValue> = cg_frame_box(ctx, elem_ann);
+                        llvm_position_builder_before(ctx.builder, anchor);
+                        let elem_slot <&LLVMValue> = cg_fixed_element_slot(ctx, child, ei);
+                        llvm_build_store(ctx.builder, elem, elem_slot);
+                        llvm_position_builder(ctx.builder, saved);
+                        ei = ei + 1;
+                    }
+                }
+            }
+            else { child = cg_frame_box(ctx, field.type_annotation); }
+            llvm_position_builder_before(ctx.builder, anchor);
+            let ind <&LLVMIndices> = new LLVMIndices{};
+            ind.i0 = llvm_const_int(ctx.i64_ty, field.index, 0);
+            let slot <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, box, ind, 1, "value.child.home");
+            delete ind;
+            llvm_build_store(ctx.builder, child, slot);
+            llvm_position_builder(ctx.builder, saved);
+        }
+        i = i + 1;
+    }
+    return box;
+}
+
+fun cg_copy_value_into(ctx: &FnContext, ann: string, dest: &LLVMValue, source: &LLVMValue) <noret> {
+    let st <&StructInfo> = cg_value_struct(ctx, ann);
+    if (st == null || dest == null || source == null) { return; }
+    if (cg_inline_array_carrier(st)) {
+        let copier <&LLVMValue> = get_or_declare_memcpy(ctx);
+        let args <&LLVMValueArgs> = new LLVMValueArgs{};
+        args.v[0] = dest;
+        args.v[1] = source;
+        args.v[2] = llvm_const_int(ctx.i64_ty, 512, 0);
+        llvm_build_call2(ctx.builder, llvm_global_get_value_type(copier), copier, args, 3, "");
+        delete args;
+        return;
+    }
+    let copy_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "value.copy");
+    let end_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "value.copied");
+    let present <&LLVMValue> = llvm_build_is_not_null(ctx.builder, source, "value.present");
+    llvm_build_cond_br(ctx.builder, present, copy_bb, end_bb);
+    llvm_position_builder(ctx.builder, copy_bb);
+    let i <int> = 0;
+    while (i < st.field_count) {
+        let field <&StructFieldInfo> = st.fields[i];
+        let ind <&LLVMIndices> = new LLVMIndices{};
+        ind.i0 = llvm_const_int(ctx.i64_ty, field.index, 0);
+        let source_slot <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, source, ind, 1, "value.from");
+        let to <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, dest, ind, 1, "value.to");
+        delete ind;
+        if (cg_value_struct(ctx, field.type_annotation) != null) {
+            let child <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, source_slot, "value.child");
+            let home <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, to, "value.child.dest");
+            cg_copy_value_into(ctx, field.type_annotation, home, child);
+        } else if (cg_fixed_field_count(field) >= 0) {
+            let buffer <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, source_slot, "fixed.source");
+            let home <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, to, "fixed.dest");
+            let elem_ann <string> = cg_array_element_ann(field.type_annotation);
+            if (cg_value_struct(ctx, elem_ann) != null) {
+                let ei <int> = 0;
+                while (ei < cg_fixed_field_count(field)) {
+                    let from_slot <&LLVMValue> = cg_fixed_element_slot(ctx, buffer, ei);
+                    let to <&LLVMValue> = cg_fixed_element_slot(ctx, home, ei);
+                    let elem <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, from_slot, "fixed.value.source");
+                    let dest <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, to, "fixed.value.dest");
+                    cg_copy_value_into(ctx, elem_ann, dest, elem);
+                    ei = ei + 1;
+                }
+            } else { cg_copy_fixed_bytes(ctx, st, field, home, buffer); }
+        } else {
+            // Copy full representation words, preserving scalar widths and
+            // sharing explicit pointers, strings and dynamic array handles.
+            let word <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, source_slot, "value.word");
+            llvm_build_store(ctx.builder, word, to);
+        }
+        i = i + 1;
+    }
+    llvm_build_br(ctx.builder, end_bb);
+    llvm_position_builder(ctx.builder, end_bb);
+}
+
+fun cg_zero_value_home(ctx: &FnContext, ann: string, box: &LLVMValue) <noret> {
+    let st <&StructInfo> = cg_value_struct(ctx, ann);
+    if (st == null || box == null) { return; }
+    let i <int> = 0;
+    while (i < st.field_count) {
+        let field <&StructFieldInfo> = st.fields[i];
+        let ind <&LLVMIndices> = new LLVMIndices{};
+        ind.i0 = llvm_const_int(ctx.i64_ty, field.index, 0);
+        let slot <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, box, ind, 1, "value.zero.slot");
+        delete ind;
+        if (cg_value_struct(ctx, field.type_annotation) != null) {
+            let child <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, slot, "value.zero.child");
+            cg_zero_value_home(ctx, field.type_annotation, child);
+        } else if (cg_fixed_field_count(field) >= 0) {
+            let child <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, slot, "value.zero.fixed");
+            let elem_ann <string> = cg_array_element_ann(field.type_annotation);
+            if (cg_value_struct(ctx, elem_ann) != null) {
+                let ei <int> = 0;
+                while (ei < cg_fixed_field_count(field)) {
+                    let slot <&LLVMValue> = cg_fixed_element_slot(ctx, child, ei);
+                    let elem <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, slot, "fixed.zero.child");
+                    cg_zero_value_home(ctx, elem_ann, elem);
+                    ei = ei + 1;
+                }
+            } else {
+                let bytes <int> = cg_fixed_field_bytes(ctx, st, field);
+                let offset <int> = 0;
+                while (offset < bytes) {
+                    ind = new LLVMIndices{};
+                    ind.i0 = llvm_const_int(ctx.i64_ty, offset, 0);
+                    let byte <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i8_ty, child, ind, 1, "value.zero.byte");
+                    delete ind;
+                    llvm_build_store(ctx.builder, llvm_const_int(ctx.i8_ty, 0, 0), byte);
+                    offset = offset + 1;
+                }
+            }
+        } else {
+            llvm_build_store(ctx.builder, llvm_const_int(ctx.i64_ty, 0, 0), slot);
+        }
+        i = i + 1;
+    }
+}
+
+// A detached snapshot owns its nested boxes. The caller adopts its value
+// into frame storage then releases these representation buffers, without
+// running semantic destructors on either transfer.
+fun cg_copy_struct_value(ctx: &FnContext, ann: string, source: &LLVMValue) <&LLVMValue> {
+    let st <&StructInfo> = cg_value_struct(ctx, ann);
+    if (st == null || source == null) { return source; }
+    source = coerce_val(ctx, source, ctx.ptr_ty);
+    let copy_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "snapshot.copy");
+    let end_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "snapshot.end");
+    let absent_bb <&LLVMBasicBlock> = llvm_get_insert_block(ctx.builder);
+    llvm_build_cond_br(ctx.builder, llvm_build_is_not_null(ctx.builder, source, "snapshot.present"), copy_bb, end_bb);
+    llvm_position_builder(ctx.builder, copy_bb);
+    let allocator <&LLVMValue> = get_or_declare_calloc(ctx);
+    let args <&LLVMValueArgs> = new LLVMValueArgs{};
+    args.v[0] = llvm_const_int(ctx.i64_ty, cg_struct_storage_words(ctx, st), 0);
+    args.v[1] = llvm_const_int(ctx.i64_ty, 8, 0);
+    let box <&LLVMValue> = llvm_build_call2(ctx.builder, llvm_global_get_value_type(allocator), allocator, args, 2, "value.snapshot");
+    delete args;
+    let copier <&LLVMValue> = get_or_declare_memcpy(ctx);
+    let cargs <&LLVMValueArgs> = new LLVMValueArgs{};
+    cargs.v[0] = box;
+    cargs.v[1] = source;
+    cargs.v[2] = llvm_const_int(ctx.i64_ty, cg_struct_storage_words(ctx, st) * 8, 0);
+    llvm_build_call2(ctx.builder, llvm_global_get_value_type(copier), copier, cargs, 3, "");
+    delete cargs;
+    let i <int> = 0;
+    while (i < st.field_count && !cg_inline_array_carrier(st)) {
+        let field <&StructFieldInfo> = st.fields[i];
+        if (cg_value_struct(ctx, field.type_annotation) != null || cg_fixed_field_count(field) >= 0) {
+            let ind <&LLVMIndices> = new LLVMIndices{};
+            ind.i0 = llvm_const_int(ctx.i64_ty, field.index, 0);
+            let slot <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, box, ind, 1, "snapshot.slot");
+            delete ind;
+            let child <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, slot, "snapshot.child");
+            let fresh <&LLVMValue> = null;
+            if (cg_fixed_field_count(field) >= 0) {
+                fresh = cg_fixed_buffer(ctx, cg_fixed_field_count(field), false);
+                let elem_ann <string> = cg_array_element_ann(field.type_annotation);
+                if (cg_value_struct(ctx, elem_ann) != null) {
+                    let ei <int> = 0;
+                    while (ei < cg_fixed_field_count(field)) {
+                        let from_slot <&LLVMValue> = cg_fixed_element_slot(ctx, child, ei);
+                        let to_slot <&LLVMValue> = cg_fixed_element_slot(ctx, fresh, ei);
+                        let elem <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, from_slot, "fixed.snapshot.source");
+                        let detached <&LLVMValue> = cg_copy_struct_value(ctx, elem_ann, elem);
+                        llvm_build_store(ctx.builder, detached, to_slot);
+                        ei = ei + 1;
+                    }
+                } else { cg_copy_fixed_bytes(ctx, st, field, fresh, child); }
+            } else { fresh = cg_copy_struct_value(ctx, field.type_annotation, child); }
+            llvm_build_store(ctx.builder, fresh, slot);
+        }
+        i = i + 1;
+    }
+    let copied_bb <&LLVMBasicBlock> = llvm_get_insert_block(ctx.builder);
+    llvm_build_br(ctx.builder, end_bb);
+    llvm_position_builder(ctx.builder, end_bb);
+    let result <&LLVMValue> = llvm_build_phi(ctx.builder, ctx.ptr_ty, "snapshot.result");
+    let values <&LLVMValueArgs> = new LLVMValueArgs{};
+    values.v[0] = llvm_const_null(ctx.ptr_ty);
+    values.v[1] = box;
+    let blocks <&LLVMBlockArgs> = new LLVMBlockArgs{};
+    blocks.b0 = absent_bb;
+    blocks.b1 = copied_bb;
+    llvm_add_incoming(result, values, blocks, 2);
+    delete values;
+    delete blocks;
+    return result;
+}
+
+fun cg_write_fixed_field(ctx: &FnContext, st: &StructInfo, field: &StructFieldInfo, home: &LLVMValue, source: &LLVMValue, heap: bool) <noret> {
+    let elem_ann <string> = cg_array_element_ann(field.type_annotation);
+    if (cg_value_struct(ctx, elem_ann) == null) {
+        cg_copy_fixed_bytes(ctx, st, field, home, source);
+        return;
+    }
+    let ei <int> = 0;
+    while (ei < cg_fixed_field_count(field)) {
+        let from_slot <&LLVMValue> = cg_fixed_element_slot(ctx, source, ei);
+        let to_slot <&LLVMValue> = cg_fixed_element_slot(ctx, home, ei);
+        let elem <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, from_slot, "fixed.write.source");
+        if (heap) {
+            let fresh <&LLVMValue> = cg_copy_struct_value(ctx, elem_ann, elem);
+            llvm_build_store(ctx.builder, fresh, to_slot);
+        } else {
+            let dest <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, to_slot, "fixed.write.dest");
+            cg_copy_value_into(ctx, elem_ann, dest, elem);
+        }
+        ei = ei + 1;
+    }
+}
+
+// Explicit heap literals also need real zero values for omitted aggregate
+// fields. A null representation word cannot be indexed as a fixed array.
+// Fill only missing fields; written/defaulted fields already own snapshots.
+fun cg_complete_heap_fields(ctx: &FnContext, ann: string, box: &LLVMValue) <noret> {
+    let st <&StructInfo> = cg_value_struct(ctx, ann);
+    if (st == null || cg_inline_array_carrier(st)) { return; }
+    let i <int> = 0;
+    while (i < st.field_count) {
+        let field <&StructFieldInfo> = st.fields[i];
+        if (cg_value_struct(ctx, field.type_annotation) != null || cg_fixed_field_count(field) >= 0) {
+            let ind <&LLVMIndices> = new LLVMIndices{};
+            ind.i0 = llvm_const_int(ctx.i64_ty, field.index, 0);
+            let slot <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, box, ind, 1, "heap.zero.slot");
+            delete ind;
+            let child <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, slot, "heap.zero.child");
+            let missing_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "heap.zero.missing");
+            let end_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "heap.zero.end");
+            llvm_build_cond_br(ctx.builder, llvm_build_is_null(ctx.builder, child, "heap.zero.absent"), missing_bb, end_bb);
+            llvm_position_builder(ctx.builder, missing_bb);
+            let fresh <&LLVMValue> = null;
+            if (cg_fixed_field_count(field) >= 0) {
+                fresh = cg_fixed_buffer(ctx, cg_fixed_field_count(field), false);
+                let elem_ann <string> = cg_array_element_ann(field.type_annotation);
+                if (cg_value_struct(ctx, elem_ann) != null) {
+                    let ei <int> = 0;
+                    while (ei < cg_fixed_field_count(field)) {
+                        let home <&LLVMValue> = cg_frame_box(ctx, elem_ann);
+                        let elem <&LLVMValue> = cg_copy_struct_value(ctx, elem_ann, home);
+                        let slot <&LLVMValue> = cg_fixed_element_slot(ctx, fresh, ei);
+                        llvm_build_store(ctx.builder, elem, slot);
+                        ei = ei + 1;
+                    }
+                }
+            } else {
+                let home <&LLVMValue> = cg_frame_box(ctx, field.type_annotation);
+                fresh = cg_copy_struct_value(ctx, field.type_annotation, home);
+            }
+            llvm_build_store(ctx.builder, fresh, slot);
+            llvm_build_br(ctx.builder, end_bb);
+            llvm_position_builder(ctx.builder, end_bb);
+        }
+        i = i + 1;
+    }
+}
+
+fun cg_release_value(ctx: &FnContext, ann: string, box: &LLVMValue) <noret> {
+    let st <&StructInfo> = cg_value_struct(ctx, ann);
+    if (st == null || box == null) { return; }
+    let release_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "value.release");
+    let end_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "value.released");
+    llvm_build_cond_br(ctx.builder, llvm_build_is_not_null(ctx.builder, box, "release.present"), release_bb, end_bb);
+    llvm_position_builder(ctx.builder, release_bb);
+    let i <int> = 0;
+    while (i < st.field_count && !cg_inline_array_carrier(st)) {
+        let field <&StructFieldInfo> = st.fields[i];
+        if (cg_value_struct(ctx, field.type_annotation) != null || cg_fixed_field_count(field) >= 0) {
+            let ind <&LLVMIndices> = new LLVMIndices{};
+            ind.i0 = llvm_const_int(ctx.i64_ty, field.index, 0);
+            let slot <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, box, ind, 1, "release.slot");
+            delete ind;
+            let child <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, slot, "release.child");
+            if (cg_fixed_field_count(field) >= 0) {
+                let elem_ann <string> = cg_array_element_ann(field.type_annotation);
+                if (cg_value_struct(ctx, elem_ann) != null) {
+                    let ei <int> = 0;
+                    while (ei < cg_fixed_field_count(field)) {
+                        let slot <&LLVMValue> = cg_fixed_element_slot(ctx, child, ei);
+                        let elem <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, slot, "fixed.release.child");
+                        cg_release_value(ctx, elem_ann, elem);
+                        ei = ei + 1;
+                    }
+                }
+                cg_free_fixed_buffer(ctx, child);
+            }
+            else { cg_release_value(ctx, field.type_annotation, child); }
+        }
+        i = i + 1;
+    }
+    let freer <&LLVMValue> = get_or_declare_free(ctx);
+    let args <&LLVMValueArgs> = new LLVMValueArgs{};
+    args.v[0] = box;
+    llvm_build_call2(ctx.builder, llvm_global_get_value_type(freer), freer, args, 1, "");
+    delete args;
+    llvm_build_br(ctx.builder, end_bb);
+    llvm_position_builder(ctx.builder, end_bb);
+}
+
+// An array handle still shares its user-owned buffer. Struct elements,
+// however, are values in that buffer: they cannot point into the frame
+// that last wrote them. Their boxes are released when the buffer is deleted.
+fun cg_store_value_slot(ctx: &FnContext, ann: string, slot: &LLVMValue, source: &LLVMValue) <noret> {
+    let old <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, slot, "value.slot.old");
+    let live_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "value.slot.live");
+    let new_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "value.slot.new");
+    let end_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "value.slot.end");
+    llvm_build_cond_br(ctx.builder, llvm_build_is_not_null(ctx.builder, old, "value.slot.present"), live_bb, new_bb);
+    llvm_position_builder(ctx.builder, live_bb);
+    cg_copy_value_into(ctx, ann, old, source);
+    llvm_build_br(ctx.builder, end_bb);
+    llvm_position_builder(ctx.builder, new_bb);
+    let fresh <&LLVMValue> = cg_copy_struct_value(ctx, ann, source);
+    llvm_build_store(ctx.builder, fresh, slot);
+    llvm_build_br(ctx.builder, end_bb);
+    llvm_position_builder(ctx.builder, end_bb);
+}
+
+fun cg_release_array_values(ctx: &FnContext, ann: string, buffer: &LLVMValue) <noret> {
+    let elem_ann <string> = cg_array_element_ann(ann);
+    if (cg_value_struct(ctx, elem_ann) == null) { return; }
+    let ind <&LLVMIndices> = new LLVMIndices{};
+    ind.i0 = llvm_const_int_of_string(ctx.i64_ty, "-1", 10);
+    let header <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, buffer, ind, 1, "value.array.header");
+    delete ind;
+    let count <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, header, "value.array.count");
+    let index <&LLVMValue> = llvm_build_alloca(ctx.builder, ctx.i64_ty, "value.array.index");
+    llvm_build_store(ctx.builder, llvm_const_int(ctx.i64_ty, 0, 0), index);
+    let test_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "value.array.test");
+    let body_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "value.array.body");
+    let end_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "value.array.end");
+    llvm_build_br(ctx.builder, test_bb);
+    llvm_position_builder(ctx.builder, test_bb);
+    let i <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, index, "value.array.i");
+    llvm_build_cond_br(ctx.builder, llvm_build_icmp(ctx.builder, llvm_int_ult(), i, count, "value.array.more"), body_bb, end_bb);
+    llvm_position_builder(ctx.builder, body_bb);
+    ind = new LLVMIndices{};
+    ind.i0 = i;
+    let slot <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, buffer, ind, 1, "value.array.slot");
+    delete ind;
+    let child <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, slot, "value.array.child");
+    cg_release_value(ctx, elem_ann, child);
+    llvm_build_store(ctx.builder, llvm_build_add(ctx.builder, i, llvm_const_int(ctx.i64_ty, 1, 0), "value.array.next"), index);
+    llvm_build_br(ctx.builder, test_bb);
+    llvm_position_builder(ctx.builder, end_bb);
+}
+
+// A default dynamic array is a null handle with length zero (ADR 0052),
+// not an allocation. Nonempty and explicitly allocated empty arrays still
+// carry their length in the word before element zero.
+fun cg_array_length(ctx: &FnContext, buffer: &LLVMValue) <&LLVMValue> {
+    let start_bb <&LLVMBasicBlock> = llvm_get_insert_block(ctx.builder);
+    let live_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "array.length.live");
+    let end_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "array.length.end");
+    llvm_build_cond_br(ctx.builder, llvm_build_is_not_null(ctx.builder, buffer, "array.present"), live_bb, end_bb);
+    llvm_position_builder(ctx.builder, live_bb);
+    let ind <&LLVMIndices> = new LLVMIndices{};
+    ind.i0 = llvm_const_int_of_string(ctx.i64_ty, "-1", 10);
+    let header <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, buffer, ind, 1, "array.header");
+    delete ind;
+    let count <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, header, "array.count");
+    let narrow <&LLVMValue> = llvm_build_trunc(ctx.builder, count, ctx.i32_ty, "array.length");
+    llvm_build_br(ctx.builder, end_bb);
+    llvm_position_builder(ctx.builder, end_bb);
+    let result <&LLVMValue> = llvm_build_phi(ctx.builder, ctx.i32_ty, "array.length.result");
+    let values <&LLVMValueArgs> = new LLVMValueArgs{};
+    values.v[0] = llvm_const_int(ctx.i32_ty, 0, 0);
+    values.v[1] = narrow;
+    let blocks <&LLVMBlockArgs> = new LLVMBlockArgs{};
+    blocks.b0 = start_bb;
+    blocks.b1 = live_bb;
+    llvm_add_incoming(result, values, blocks, 2);
+    delete values;
+    delete blocks;
+    return result;
+}
+
+fun cg_free_array(ctx: &FnContext, ann: string, buffer: &LLVMValue) <noret> {
+    let live_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "array.free.live");
+    let end_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "array.free.end");
+    llvm_build_cond_br(ctx.builder, llvm_build_is_not_null(ctx.builder, buffer, "array.free.present"), live_bb, end_bb);
+    llvm_position_builder(ctx.builder, live_bb);
+    cg_release_array_values(ctx, ann, buffer);
+    cg_free_fixed_buffer(ctx, buffer);
+    llvm_build_br(ctx.builder, end_bb);
+    llvm_position_builder(ctx.builder, end_bb);
+}
+
+fun cg_finish_frame(ctx: &FnContext) <noret> {
+    if (ctx.owned_boxes == null) { return; }
+    if (!ctx.poisoned) {
+        let bb <&LLVMBasicBlock> = llvm_get_first_basic_block(ctx.fn_val);
+        let freer <&LLVMValue> = get_or_declare_free(ctx);
+        while (bb != null) {
+            let term <&LLVMValue> = llvm_get_basic_block_terminator(bb);
+            // LLVMRet is opcode 1. Unreachable/abort paths need no release.
+            if (term != null && llvm_get_instruction_opcode(term) == 1) {
+                llvm_position_builder_before(ctx.builder, term);
+                let i <int> = ctx.owned_box_count - 1;
+                while (i >= 0) {
+                    let args <&LLVMValueArgs> = new LLVMValueArgs{};
+                    args.v[0] = ctx.owned_boxes[i];
+                    if (args.v[0] == null) { args.v[0] = llvm_const_null(ctx.ptr_ty); }
+                    llvm_build_call2(ctx.builder, llvm_global_get_value_type(freer), freer, args, 1, "");
+                    delete args;
+                    i = i - 1;
+                }
+            }
+            bb = llvm_get_next_basic_block(bb);
+        }
+    }
+    delete ctx.owned_boxes;
+}
+
 // Whether a parameter takes its struct by value: a nominal struct written
 // without `&`/`*` arrives as the caller's heap-box pointer, so the callee
 // copies the box on entry and member stores stay function-local (C++ passes
@@ -3756,18 +4453,6 @@ fun get_or_declare_malloc(ctx: &FnContext) <&LLVMValue> {
     return malloc_fn;
 }
 
-fun get_or_declare_free(ctx: &FnContext) <&LLVMValue> {
-    let free_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "free");
-    if (free_fn == null) {
-        let f_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
-        f_params.t[0] = ctx.ptr_ty;
-        let f_ty <&LLVMType> = llvm_function_type(ctx.void_ty, f_params, 1, 0);
-        delete f_params;
-        free_fn = llvm_add_function(ctx.module, "free", f_ty);
-    }
-    return free_fn;
-}
-
 fun get_or_declare_printf(ctx: &FnContext) <&LLVMValue> {
     let p_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "printf");
     if (p_fn == null) {
@@ -3927,51 +4612,6 @@ fun cg_blame_is_raise(ctx: &FnContext, cond: &AstNode) <bool> {
     return false;
 }
 
-fun get_fixed_array_extent(type_ann: string) <int> {
-    if (type_ann == null) { return -1; }
-    let len <int> = cast<int>(cg_strlen(type_ann));
-    if (len < 3) { return -1; }
-    let comma_idx <int> = -1;
-    let i <int> = 0;
-    while (i < len) {
-        let ch <string> = substr(type_ann, i, 1);
-        if (cg_str_eq(ch, ",")) {
-            comma_idx = i;
-        }
-        i = i + 1;
-    }
-    if (comma_idx < 0) { return -1; }
-
-    let extent <int> = 0;
-    let has_digits <bool> = false;
-    let j <int> = comma_idx + 1;
-    while (j < len) {
-        let ch <string> = substr(type_ann, j, 1);
-        if (!cg_str_eq(ch, " ") && !cg_str_eq(ch, "]") && !cg_str_eq(ch, ">")) {
-            let d <int> = -1;
-            if (cg_str_eq(ch, "0")) { d = 0; }
-            else if (cg_str_eq(ch, "1")) { d = 1; }
-            else if (cg_str_eq(ch, "2")) { d = 2; }
-            else if (cg_str_eq(ch, "3")) { d = 3; }
-            else if (cg_str_eq(ch, "4")) { d = 4; }
-            else if (cg_str_eq(ch, "5")) { d = 5; }
-            else if (cg_str_eq(ch, "6")) { d = 6; }
-            else if (cg_str_eq(ch, "7")) { d = 7; }
-            else if (cg_str_eq(ch, "8")) { d = 8; }
-            else if (cg_str_eq(ch, "9")) { d = 9; }
-            if (d >= 0) {
-                extent = extent * 10 + d;
-                has_digits = true;
-            }
-        }
-        j = j + 1;
-    }
-    if (has_digits) {
-        return extent;
-    }
-    return -1;
-}
-
 fun struct_has_field(ctx: &FnContext, base_node: &AstNode, field_name: string) <bool> {
     if (field_name == null || base_node == null) { return false; }
     if (base_node.kind == ast_ident()) {
@@ -4006,10 +4646,36 @@ fun struct_has_field(ctx: &FnContext, base_node: &AstNode, field_name: string) <
     return false;
 }
 
+fun cg_deref_array_ann(ctx: &FnContext, node: &AstNode) <string> {
+    if (node == null || node.kind != ast_unary_expr() || !cg_str_eq(node.name, "*")) { return ""; }
+    if (node.left == null) { return ""; }
+    let source <&AstNode> = node.left;
+    let ann <string> = source.resolved_spelling;
+    if (ann == null || cg_strlen(ann) == cast<ulong>(0)) { ann = source.type_annotation; }
+    if (ann == null || cg_strlen(ann) == cast<ulong>(0)) {
+        if (source.kind == ast_ident()) {
+            let variable <&LocalVar> = fn_ctx_find_var(ctx, source.name);
+            if (variable != null) { ann = variable.type_annotation; }
+        } else if (source.kind == ast_member_access()) {
+            ann = cg_member_field_ann(ctx, source.left, source.name);
+        }
+    }
+    ann = cg_trim_spaces(ann);
+    let len <int> = cast<int>(cg_strlen(ann));
+    if (len > 3 && cg_str_eq(substr(ann, 0, 2), "&[") && cg_str_eq(substr(ann, len - 1, 1), "]")) {
+        return substr(ann, 1, len - 1);
+    }
+    if (len > 3 && cg_str_eq(substr(ann, 0, 1), "[") && cg_str_eq(substr(ann, len - 2, 2), "]*")) {
+        return substr(ann, 0, len - 1);
+    }
+    return "";
+}
+
 fun get_index_elem_type(ctx: &FnContext, base_node: &AstNode) <&LLVMType> {
     if (base_node == null) { return ctx.i32_ty; }
     let ty_ann <string> = "";
-    if (base_node.kind == ast_var_decl()) {
+    if (base_node.kind == ast_var_decl() ||
+      (base_node.kind == ast_call_expr() && cg_str_eq(base_node.name, "__fin_array_literal"))) {
         // A literal-initialized fixed array (`let a <[float, 4]> = [...]`)
         // records its element type here: the declaration carries the
         // element spelling, so parse it like an ident's annotation below.
@@ -4020,7 +4686,9 @@ fun get_index_elem_type(ctx: &FnContext, base_node: &AstNode) <&LLVMType> {
         } else if (base_node.type_annotation != null) {
             ty_ann = base_node.type_annotation;
         }
-    } else if (base_node.kind == ast_ident()) {
+      } else if (base_node.kind == ast_unary_expr() && cg_str_eq(base_node.name, "*")) {
+        ty_ann = cg_deref_array_ann(ctx, base_node);
+      } else if (base_node.kind == ast_ident()) {
         let v <&LocalVar> = fn_ctx_find_var(ctx, base_node.name);
         if (v != null) {
             if (v.elem_ty != null) {
@@ -4039,7 +4707,7 @@ fun get_index_elem_type(ctx: &FnContext, base_node: &AstNode) <&LLVMType> {
                 }
             }
         }
-    } else if (base_node.kind == ast_member_access()) {
+      } else if (base_node.kind == ast_member_access()) {
         let f_name <string> = base_node.name;
         // MC1: prefer the receiver's own instantiation (`self.arr` with
         // `self: &ArrBox<int>` reads `[int]`, not the template's `[T]`),
@@ -4103,6 +4771,13 @@ fun get_index_elem_type(ctx: &FnContext, base_node: &AstNode) <&LLVMType> {
             }
         }
         if (!scoped) {
+            let own_ann <string> = cg_chain_spelling(ctx, base_node);
+            if (own_ann != null && cg_strlen(own_ann) > cast<ulong>(0)) {
+                ty_ann = own_ann;
+                scoped = true;
+            }
+        }
+        if (!scoped) {
             let si <int> = 0;
             while (si < ctx.struct_count) {
                 let st <&StructInfo> = ctx.structs[si];
@@ -4123,9 +4798,9 @@ fun get_index_elem_type(ctx: &FnContext, base_node: &AstNode) <&LLVMType> {
                 si = si + 1;
             }
         }
-    } else if (base_node.kind == ast_call_expr() && cg_str_eq(base_node.name, "__fin_array_literal")) {
+      } else if (base_node.kind == ast_call_expr() && cg_str_eq(base_node.name, "__fin_array_literal")) {
         return ctx.i32_ty;
-    }
+      }
 
     if (ty_ann != null && cg_strlen(ty_ann) > cast<ulong>(0)) {
         if (cg_str_eq(ty_ann, "string") || cg_str_eq(ty_ann, "[char]") || cg_str_eq(ty_ann, "char*")) {
@@ -4215,16 +4890,13 @@ fun get_index_elem_type(ctx: &FnContext, base_node: &AstNode) <&LLVMType> {
 // writer stored: literals build from their first element, `new` buffers
 // are filled by C at byte width. One family breaks that agreement: a
 // fixed array field of a generic struct (`items <[T, 3]>` in `Buf<T>`).
-// A `char` literal parses as an int node, so the writer builds i32 while
-// a `[char, N]` reader strides i8; an erased generic reader (`Buf<T>`,
-// whose parameter spelling the parser folds to `void*`) strides
-// pointer-wide while the concrete writer strode i32. Those two sides can
-// never meet at the declared width, so generic-struct integer-kind array
-// fields use 8-byte slots on both sides (loads narrow back on read).
+// An erased generic reader (`Buf<T>`, whose parameter spelling the parser
+// folds to `void*`) strides pointer-wide. Generic array fields use 8-byte
+// slots on both sides, preserving floating-point bits and narrowing loads.
 // Everything else keeps its declared stride.
 fun cg_member_array_wide(ctx: &FnContext, arr_base: &AstNode, elem_ty: &LLVMType) <bool> {
     if (ctx == null || arr_base == null || elem_ty == null) { return false; }
-    if (elem_ty != ctx.i32_ty && elem_ty != ctx.i8_ty && elem_ty != ctx.i1_ty && elem_ty != ctx.ptr_ty) {
+    if (!cg_is_int_llvm(ctx, elem_ty) && elem_ty != ctx.float_ty && elem_ty != ctx.double_ty && elem_ty != ctx.ptr_ty) {
         return false;
     }
     if (arr_base.kind != ast_member_access()) { return false; }
@@ -4273,6 +4945,21 @@ fun cg_member_array_wide(ctx: &FnContext, arr_base: &AstNode, elem_ty: &LLVMType
         fi = fi + 1;
     }
     return false;
+}
+
+fun cg_array_value(ctx: &FnContext, raw: &LLVMValue, elem_ty: &LLVMType) <&LLVMValue> {
+    if (llvm_type_of(raw) == ctx.i64_ty && (elem_ty == ctx.float_ty || elem_ty == ctx.double_ty)) {
+        raw = coerce_val(ctx, raw, ctx.ptr_ty);
+    }
+    return coerce_val(ctx, raw, elem_ty);
+}
+
+fun cg_array_slot(ctx: &FnContext, value: &LLVMValue, elem_ty: &LLVMType, stride_ty: &LLVMType) <&LLVMValue> {
+    value = coerce_val(ctx, value, elem_ty);
+    if (stride_ty == ctx.i64_ty && (elem_ty == ctx.float_ty || elem_ty == ctx.double_ty)) {
+        value = coerce_val(ctx, value, ctx.ptr_ty);
+    }
+    return coerce_val(ctx, value, stride_ty);
 }
 
 // Whether a field annotation is a fixed array over a type parameter
@@ -4349,6 +5036,7 @@ fun cg_apply_array_field_hint(ctx: &FnContext, st_name: string, field_name: stri
             while (fi < st.field_count) {
                 let f <&StructFieldInfo> = st.fields[fi];
                 if (f != null && cg_str_eq(f.name, field_name)) {
+                    field_init.resolved_spelling = f.type_annotation;
                     if (cg_ann_is_param_array(f.type_annotation)) {
                         ctx.arr_hint_auto = true;
                     }
@@ -5487,6 +6175,7 @@ pub fun declare_function(
         sym.name = fn_name;
         sym.fn_val = fn_val;
         sym.fn_ty = fn_type;
+        if (fn_node.left != null) { sym.value_return = fn_node.type_annotation; }
         // PT1 slice 1: scan the declared body once, here, where the AST is
         // still at hand. Eager methods carry no template pointer, so the
         // call-site gate could never recover this afterwards.
@@ -5500,6 +6189,7 @@ pub fun declare_function(
             sym2.name = llvm_sym;
             sym2.fn_val = fn_val;
             sym2.fn_ty = fn_type;
+            sym2.value_return = sym.value_return;
             sym2.has_gen_eq = sym.has_gen_eq;
             sym2.has_gen_ne = sym.has_gen_ne;
             fn_syms[new_count] = sym2;
@@ -5780,10 +6470,13 @@ fun cg_method_cache_sym(ctx: &FnContext, n: &AstNode) <&FnSymbol> {
     if (rec_node.kind == ast_ident()) {
         if (rec_node.name == null || cg_strlen(rec_node.name) == cast<ulong>(0)) { return null; }
         let v <&LocalVar> = fn_ctx_find_var(ctx, rec_node.name);
-        if (v == null || v.type_annotation == null) {
+        if (v != null && v.type_annotation != null) {
+            recv = cg_trim_spaces(v.type_annotation);
+        } else if (rec_node.resolved_spelling != null) {
+            recv = cg_trim_spaces(rec_node.resolved_spelling);
+        } else {
             return null;
         }
-        recv = cg_trim_spaces(v.type_annotation);
     } else if (rec_node.kind == ast_member_access()) {
         recv = cg_member_recv_spelling(ctx, rec_node);
         if (cg_strlen(recv) == cast<ulong>(0)) { return null; }
@@ -7424,7 +8117,26 @@ fun cg_static_cache_sym(ctx: &FnContext, struct_name: string, mshort: string, n:
             free_buffer(kb);
             let hit <&FnSymbol> = fn_ctx_find_fn(ctx, key);
             if (hit != null) { delete s_args; delete s_params; return hit; }
-            let clone <&AstNode> = cg_clone_subst(tmpl, s_params, s_args, scount);
+            let concrete_b <Buffer> = new_buffer(64);
+            concrete_b.write_string(struct_name);
+            concrete_b.write_char('<');
+            concrete_b.write_string(inner);
+            concrete_b.write_char('>');
+            let concrete <string> = concrete_b.to_string();
+            free_buffer(concrete_b);
+            let names <[string]> = new [string, 128]{};
+            let values <[string]> = new [string, 128]{};
+            let ci <int> = 0;
+            while (ci < scount) {
+                names[ci] = s_params[ci];
+                values[ci] = s_args[ci];
+                ci = ci + 1;
+            }
+            names[scount] = "Self";
+            values[scount] = concrete;
+            let clone <&AstNode> = cg_clone_subst(tmpl, names, values, scount + 1);
+            delete names;
+            delete values;
             delete s_args;
             delete s_params;
             if (clone == null) { return null; }
@@ -7800,6 +8512,9 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
     if (n == null) { return null; }
 
     if (n.kind == ast_literal_int()) {
+        if (n.type_annotation != null && cg_str_eq(n.type_annotation, "char")) {
+            return llvm_const_int(ctx.i8_ty, n.int_val, 0);
+        }
         // Float literals arrive as int nodes with the annotation carrying
         // float-ness (no float literal kind in ast::std yet). When the
         // parser preserves the written text in str_val, lower the exact
@@ -7924,6 +8639,12 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                     // `return &G` lower to null and refuse downstream.
                     let gv_addr <&LLVMValue> = llvm_get_named_global(ctx.module, n.left.name);
                     if (gv_addr != null) {
+                        let static_name <Buffer> = new_buffer(64);
+                        static_name.write_string(n.left.name);
+                        static_name.write_string(".buf");
+                        let static_box <&LLVMValue> = llvm_get_named_global(ctx.module, static_name.to_string());
+                        free_buffer(static_name);
+                        if (static_box != null) { return static_box; }
                         return gv_addr;
                     }
                 } else if (n.left.kind == ast_index_expr()) {
@@ -7960,6 +8681,9 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         if (cg_str_eq(n.name, "*")) {
             let ptr_val <&LLVMValue> = lower_expr(ctx, n.left);
             if (ptr_val != null) {
+                if (cg_strlen(cg_deref_array_ann(ctx, n)) > cast<ulong>(0)) {
+                    return llvm_build_load2(ctx.builder, ctx.ptr_ty, ptr_val, "deref_array");
+                }
                 let load_ty <&LLVMType> = ctx.i32_ty;
                 let deref_count <int> = 1;
                 let cur_inner <&AstNode> = n.left;
@@ -8387,7 +9111,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             delete ind;
             let raw <&LLVMValue> = llvm_build_load2(ctx.builder, stride_ty, gep, "arr_elem");
             if (stride_ty == elem_ty) { return raw; }
-            return coerce_val(ctx, raw, elem_ty);
+            return cg_array_value(ctx, raw, elem_ty);
         }
         return null;
     }
@@ -8584,26 +9308,12 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                   cg_strlen(cg_member_inst_arr_ann(ctx, base_node, base_node.name)) > cast<ulong>(0)) {
                     if (base_val != null) {
                         let buf_r <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, base_val, "ref_arr");
-                        let ind_r <&LLVMIndices> = new LLVMIndices{};
-                        ind_r.i0 = llvm_const_int_of_string(ctx.i64_ty, "-1", 10);
-                        let gep_r <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, buf_r, ind_r, 1, "arr_len_p");
-                        delete ind_r;
-                        let len64_r <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, gep_r, "arr_len");
-                        return llvm_build_trunc(ctx.builder, len64_r, ctx.i32_ty, "arr_len32");
+                        return cg_array_length(ctx, buf_r);
                     }
                     return llvm_const_int(ctx.i32_ty, 0, 0);
                   }
                 if (base_val != null) {
-                    // The header word before element 0: a full-width -1 the
-                    // int-carrying const cannot spell (it arrives zero
-                    // extended and scales to +34359738360), so the string
-                    // form carries it.
-                    let ind <&LLVMIndices> = new LLVMIndices{};
-                    ind.i0 = llvm_const_int_of_string(ctx.i64_ty, "-1", 10);
-                    let gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, base_val, ind, 1, "arr_len_p");
-                    delete ind;
-                    let len64 <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, gep, "arr_len");
-                    return llvm_build_trunc(ctx.builder, len64, ctx.i32_ty, "arr_len32");
+                    return cg_array_length(ctx, base_val);
                 }
 
                 return llvm_const_int(ctx.i32_ty, 0, 0);
@@ -8677,19 +9387,8 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 let box <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, gep, "iface_box");
                 return llvm_build_load2(ctx.builder, f_iface.fat_ptr_ty, box, n.name);
             }
-            // A fixed-array member (`[T, N]` with a literal extent) lays its
-            // N elements end to end at the field slot, so a reader that
-            // indexes the member needs the slot ADDRESS (the element base),
-            // not a load of slot 0's content. No preexisting member in the
-            // tree carries such an extent; the generic wide-slot shape keeps
-            // the loaded-pointer path below exactly as before.
-            let m_ann <string> = cg_member_field_ann(ctx, n.left, n.name);
-            if (cg_strlen(m_ann) > cast<ulong>(0) && get_fixed_array_extent(m_ann) >= 0) {
-                let m_elem <&LLVMType> = get_index_elem_type(ctx, n.left);
-                if (m_elem != null && !cg_member_array_wide(ctx, n.left, m_elem)) {
-                    return gep;
-                }
-            }
+            let carrier <&StructInfo> = cg_value_struct(ctx, cg_strip_markers(cg_chain_spelling(ctx, n.left)));
+            if (cg_inline_array_carrier(carrier)) { return gep; }
             return llvm_build_load2(ctx.builder, fld_ty, gep, n.name);
         }
         return null;
@@ -8830,6 +9529,13 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                             rhs = cg_value_to_iface_slot(ctx, rhs, v.ty, n.right);
                             rhs = coerce_val(ctx, rhs, v.ty);
                         }
+                        // Copy into the same home, preserving both value
+                        // independence and previously borrowed addresses.
+                        if (cg_value_struct(ctx, v.type_annotation) != null) {
+                            if (v.value_box == null) { v.value_box = cg_frame_box(ctx, v.type_annotation); }
+                            cg_copy_value_into(ctx, v.type_annotation, v.value_box, rhs);
+                            rhs = v.value_box;
+                        }
                         llvm_build_store(ctx.builder, rhs, v.val);
                         // Wave-5 slice 1: a whole-binding store rebinds to
                         // live (the checker revives after both sides). The
@@ -8848,7 +9554,22 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                             let gv_ty <&LLVMType> = llvm_global_get_value_type(gv);
                             if (gv_ty != null) {
                                 rhs = coerce_val(ctx, rhs, gv_ty);
-                                llvm_build_store(ctx.builder, rhs, gv);
+                                let static_name <Buffer> = new_buffer(64);
+                                static_name.write_string(n.left.name);
+                                static_name.write_string(".buf");
+                                let static_box <&LLVMValue> = llvm_get_named_global(ctx.module, static_name.to_string());
+                                free_buffer(static_name);
+                                if (static_box != null && gv_ty == ctx.ptr_ty) {
+                                    // Constant scalar-field struct globals own
+                                    // static buffers, never a callee-frame box.
+                                    let copier <&LLVMValue> = get_or_declare_memcpy(ctx);
+                                    let args <&LLVMValueArgs> = new LLVMValueArgs{};
+                                    args.v[0] = static_box;
+                                    args.v[1] = rhs;
+                                    args.v[2] = coerce_val(ctx, llvm_size_of(llvm_global_get_value_type(static_box)), ctx.i64_ty);
+                                    llvm_build_call2(ctx.builder, llvm_global_get_value_type(copier), copier, args, 3, "");
+                                    delete args;
+                                } else { llvm_build_store(ctx.builder, rhs, gv); }
                             }
                         }
                     }
@@ -9070,8 +9791,13 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                                 let gep <&LLVMValue> = llvm_build_gep2(ctx.builder, stride_ty, arr_val, ind, 1, "arr_gep");
                                 delete ind;
                                 rhs = fn_value_to_ptr(ctx, n.right, rhs);
-                                rhs = coerce_val(ctx, rhs, stride_ty);
-                                llvm_build_store(ctx.builder, rhs, gep);
+                                let elem_ann <string> = cg_array_element_ann(cg_chain_spelling(ctx, n.left.left));
+                                if (cg_value_struct(ctx, elem_ann) != null) {
+                                    cg_store_value_slot(ctx, elem_ann, gep, rhs);
+                                } else {
+                                    rhs = cg_array_slot(ctx, rhs, elem_ty, stride_ty);
+                                    llvm_build_store(ctx.builder, rhs, gep);
+                                }
                             }
                         }
                     }
@@ -9106,12 +9832,39 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                             } else {
                                 rhs = cg_coerce_field_int(ctx, rhs, n.right, fld_ty);
                             }
-                            llvm_build_store(ctx.builder, rhs, gep);
+                            let field_ann <string> = cg_chain_spelling(ctx, n.left);
+                            if (cg_value_struct(ctx, field_ann) != null) {
+                                cg_store_value_slot(ctx, field_ann, gep, rhs);
+                            } else if (get_fixed_array_extent(field_ann) >= 0) {
+                                let owner <&StructInfo> = cg_ensure_struct_instance(ctx, cg_chain_spelling(ctx, n.left.left));
+                                let fi <int> = 0;
+                                while (owner != null && fi < owner.field_count) {
+                                    let field <&StructFieldInfo> = owner.fields[fi];
+                                    if (cg_str_eq(field.name, n.left.name)) {
+                                        let home <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, gep, "field.fixed.home");
+                                        cg_write_fixed_field(ctx, owner, field, home, rhs, false);
+                                        break;
+                                    }
+                                    fi = fi + 1;
+                                }
+                            } else {
+                                llvm_build_store(ctx.builder, rhs, gep);
+                            }
                         }
                     }
                 } else if (n.left.kind == ast_unary_expr() && cg_str_eq(n.left.name, "*")) {
                     let ptr_val <&LLVMValue> = lower_expr(ctx, n.left.left);
                     if (ptr_val != null && rhs != null) {
+                        let target_ann <string> = cg_chain_spelling(ctx, n.left.left);
+                        let alen <int> = cast<int>(cg_strlen(target_ann));
+                        if (alen > 1) {
+                            if (cg_str_eq(substr(target_ann, 0, 1), "&")) { target_ann = substr(target_ann, 1, alen - 1); }
+                            else if (cg_str_eq(substr(target_ann, alen - 1, 1), "*")) { target_ann = substr(target_ann, 0, alen - 1); }
+                            if (cg_value_struct(ctx, target_ann) != null) {
+                                cg_copy_value_into(ctx, target_ann, ptr_val, rhs);
+                                return rhs;
+                            }
+                        }
                         let is_null <&LLVMValue> = llvm_build_is_null(ctx.builder, ptr_val, "p_null");
                         let cur_bb <&LLVMBasicBlock> = llvm_get_insert_block(ctx.builder);
                         let alloc_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "auto_alloc");
@@ -9182,6 +9935,14 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                           }
                         return res;
                     }
+                    let global <&LLVMValue> = llvm_get_named_global(ctx.module, n.left.name);
+                    if (global != null) {
+                        let global_ty <&LLVMType> = llvm_global_get_value_type(global);
+                        let cur <&LLVMValue> = llvm_build_load2(ctx.builder, global_ty, global, n.left.name);
+                        let res <&LLVMValue> = apply_compound_op(ctx, n.name, cur, rhs);
+                        llvm_build_store(ctx.builder, res, global);
+                        return res;
+                    }
                 } else if (n.left.kind == ast_index_expr()) {
                     let arr_val <&LLVMValue> = lower_expr(ctx, n.left.left);
                     let idx_val <&LLVMValue> = lower_expr(ctx, n.left.right);
@@ -9198,8 +9959,9 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                         let gep <&LLVMValue> = llvm_build_gep2(ctx.builder, stride_ty, arr_val, ind, 1, "arr_gep");
                         delete ind;
                         let cur <&LLVMValue> = llvm_build_load2(ctx.builder, stride_ty, gep, "elem");
+                        cur = cg_array_value(ctx, cur, elem_ty);
                         let res <&LLVMValue> = apply_compound_op(ctx, n.name, cur, rhs);
-                        llvm_build_store(ctx.builder, res, gep);
+                        llvm_build_store(ctx.builder, cg_array_slot(ctx, res, elem_ty, stride_ty), gep);
                         return res;
                     }
                 } else if (n.left.kind == ast_member_access()) {
@@ -9937,6 +10699,12 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             let first_val <&LLVMValue> = lower_expr(ctx, n.left);
             if (first_val == null) { return null; }
             let slot_ty <&LLVMType> = llvm_type_of(first_val);
+            if (n.resolved_spelling != null && cg_strlen(n.resolved_spelling) > cast<ulong>(0) &&
+              cg_str_eq(substr(n.resolved_spelling, 0, 1), "[")) {
+                slot_ty = get_index_elem_type(ctx, n);
+                first_val = coerce_val(ctx, first_val, slot_ty);
+              }
+            let literal_elem_ty <&LLVMType> = slot_ty;
             if (ctx.arr_hint_auto) {
                 if (slot_ty == ctx.i32_ty || slot_ty == ctx.i8_ty || slot_ty == ctx.i1_ty || slot_ty == ctx.ptr_ty) {
                     slot_ty = ctx.i64_ty;
@@ -9978,6 +10746,13 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             ind0.i0 = llvm_const_int(ctx.i64_ty, 0, 0);
             let gep0 <&LLVMValue> = llvm_build_gep2(ctx.builder, slot_ty, arr_ptr, ind0, 1, "elem_gep");
             delete ind0;
+            let value_elem_ann <string> = cg_array_element_ann(n.resolved_spelling);
+            if (cg_value_struct(ctx, value_elem_ann) == null) {
+                value_elem_ann = get_node_struct_name(ctx, n.left);
+            }
+            if (cg_value_struct(ctx, value_elem_ann) != null) {
+                first_val = cg_copy_struct_value(ctx, value_elem_ann, first_val);
+            }
             llvm_build_store(ctx.builder, first_val, gep0);
 
             let cur_elem <&AstNode> = n.left.right;
@@ -9985,11 +10760,14 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             while (cur_elem != null) {
                 let el_val <&LLVMValue> = lower_expr(ctx, cur_elem);
                 if (el_val != null) {
-                    el_val = coerce_val(ctx, el_val, slot_ty);
+                    el_val = cg_array_slot(ctx, el_val, literal_elem_ty, slot_ty);
                     let ind <&LLVMIndices> = new LLVMIndices{};
                     ind.i0 = llvm_const_int(ctx.i64_ty, idx, 0);
                     let elem_gep <&LLVMValue> = llvm_build_gep2(ctx.builder, slot_ty, arr_ptr, ind, 1, "elem_gep");
                     delete ind;
+                    if (cg_value_struct(ctx, value_elem_ann) != null) {
+                        el_val = cg_copy_struct_value(ctx, value_elem_ann, el_val);
+                    }
                     llvm_build_store(ctx.builder, el_val, elem_gep);
                 }
                 idx = idx + 1;
@@ -10012,16 +10790,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             return raw;
         }
         if (cg_str_eq(n.name, "__fin_struct_init")) {
-            let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
-            let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
-            let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
-            c_args.v[0] = llvm_const_int(ctx.i64_ty, 1, 0);
-            // Same fixed heap-struct buffer as struct_alloc: 1024 fits the
-            // largest struct (64 words); raise together, never apart.
-            c_args.v[1] = llvm_const_int(ctx.i64_ty, 1024, 0);
-            let st_ptr <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "st_buf");
-            delete c_args;
-
+            let st_ptr <&LLVMValue> = null;
             let st_name <string> = n.type_annotation;
             if (st_name == null || cg_strlen(st_name) == cast<ulong>(0) || cg_str_eq(st_name, "Self")) {
                 let v_self <&LocalVar> = fn_ctx_find_var(ctx, "self");
@@ -10090,6 +10859,22 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             // Bare or unknown spellings answer the template (or null), and
             // the loops below fall back to the declared field type.
             let lit_inst <&StructInfo> = cg_ensure_struct_instance(ctx, gate_spell);
+            if (n.int_val == 1) {
+                let allocator <&LLVMValue> = get_or_declare_calloc(ctx);
+                let a <&LLVMValueArgs> = new LLVMValueArgs{};
+                a.v[0] = llvm_const_int(ctx.i64_ty, 1, 0);
+                a.v[1] = llvm_const_int(ctx.i64_ty, 1024, 0);
+                st_ptr = llvm_build_call2(ctx.builder, llvm_global_get_value_type(allocator), allocator, a, 2, "struct.heap");
+                delete a;
+            } else {
+                st_ptr = cg_frame_box(ctx, gate_spell);
+                if (st_ptr == null) {
+                    cg_dprintf(2, "finc codegen refusal: aggregate literal storage for '%s' is unknown\n", gate_spell);
+                    refuse_and_poison(ctx);
+                    return null;
+                }
+            }
+            if (n.int_val != 1) { cg_zero_value_home(ctx, gate_spell, st_ptr); }
             let f_cur <&AstNode> = n.left;
             while (f_cur != null) {
                 let saved_hint <bool> = ctx.arr_hint_auto;
@@ -10147,6 +10932,44 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 ind.i0 = llvm_const_int(ctx.i64_ty, f_idx, 0);
                 let f_gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, st_ptr, ind, 1, "f_gep");
                 delete ind;
+                let field_ann <string> = "";
+                if (lit_inst != null) {
+                    let fi <int> = 0;
+                    while (fi < lit_inst.field_count) {
+                        let fld <&StructFieldInfo> = lit_inst.fields[fi];
+                        if (cg_str_eq(fld.name, f_cur.name)) { field_ann = fld.type_annotation; break; }
+                        fi = fi + 1;
+                    }
+                }
+                if (cg_value_struct(ctx, field_ann) != null) {
+                    if (n.int_val == 1) {
+                        f_val = cg_copy_struct_value(ctx, field_ann, f_val);
+                    } else {
+                        let field_home <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, f_gep, "literal.child.home");
+                        cg_copy_value_into(ctx, field_ann, field_home, f_val);
+                        f_val = field_home;
+                    }
+                }
+                if (lit_inst != null) {
+                    let fi <int> = 0;
+                    while (fi < lit_inst.field_count) {
+                        let fld <&StructFieldInfo> = lit_inst.fields[fi];
+                        if (cg_str_eq(fld.name, f_cur.name) && cg_fixed_field_count(fld) >= 0) {
+                            let home <&LLVMValue> = null;
+                            if (n.int_val == 1) { home = cg_fixed_buffer(ctx, cg_fixed_field_count(fld), false); }
+                            else { home = llvm_build_load2(ctx.builder, ctx.ptr_ty, f_gep, "literal.fixed.home"); }
+                            cg_write_fixed_field(ctx, lit_inst, fld, home, f_val, n.int_val == 1);
+                            if (f_cur.left != null && f_cur.left.kind == ast_call_expr() &&
+                              (cg_str_eq(f_cur.left.name, "__fin_array_literal") || cg_str_eq(f_cur.left.name, "__fin_alloc_array"))) {
+                                cg_release_array_values(ctx, fld.type_annotation, f_val);
+                                cg_free_fixed_buffer(ctx, f_val);
+                              }
+                            f_val = home;
+                            break;
+                        }
+                        fi = fi + 1;
+                    }
+                }
                 llvm_build_store(ctx.builder, f_val, f_gep);
                 f_cur = f_cur.right;
             }
@@ -10218,9 +11041,47 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                     d_ind.i0 = llvm_const_int(ctx.i64_ty, d_idx, 0);
                     let d_gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, st_ptr, d_ind, 1, "f_gep");
                     delete d_ind;
+                    let default_ann <string> = d_fld.type_annotation;
+                    if (lit_inst != null) {
+                        let di <int> = 0;
+                        while (di < lit_inst.field_count) {
+                            let df <&StructFieldInfo> = lit_inst.fields[di];
+                            if (cg_str_eq(df.name, d_fld.name)) { default_ann = df.type_annotation; break; }
+                            di = di + 1;
+                        }
+                    }
+                    if (cg_value_struct(ctx, default_ann) != null) {
+                        if (n.int_val == 1) { d_val = cg_copy_struct_value(ctx, default_ann, d_val); }
+                        else {
+                            let home <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, d_gep, "default.child.home");
+                            cg_copy_value_into(ctx, default_ann, home, d_val);
+                            d_val = home;
+                        }
+                    }
+                    if (lit_inst != null) {
+                        let di <int> = 0;
+                        while (di < lit_inst.field_count) {
+                            let df <&StructFieldInfo> = lit_inst.fields[di];
+                            if (cg_str_eq(df.name, d_fld.name) && cg_fixed_field_count(df) >= 0) {
+                                let home <&LLVMValue> = null;
+                                if (n.int_val == 1) { home = cg_fixed_buffer(ctx, cg_fixed_field_count(df), false); }
+                                else { home = llvm_build_load2(ctx.builder, ctx.ptr_ty, d_gep, "default.fixed.home"); }
+                                cg_write_fixed_field(ctx, lit_inst, df, home, d_val, n.int_val == 1);
+                                if (d_fld.default_init.kind == ast_call_expr() &&
+                                  (cg_str_eq(d_fld.default_init.name, "__fin_array_literal") || cg_str_eq(d_fld.default_init.name, "__fin_alloc_array"))) {
+                                    cg_release_array_values(ctx, df.type_annotation, d_val);
+                                    cg_free_fixed_buffer(ctx, d_val);
+                                  }
+                                d_val = home;
+                                break;
+                            }
+                            di = di + 1;
+                        }
+                    }
                     llvm_build_store(ctx.builder, d_val, d_gep);
                 }
             }
+            if (n.int_val == 1) { cg_complete_heap_fields(ctx, gate_spell, st_ptr); }
             return st_ptr;
         }
         // `@move(x)` is the identity at runtime: moving changes
@@ -10741,6 +11602,10 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                     return dealloc_res;
                 }
 
+                if (cg_value_struct(ctx, st_name) != null) {
+                    cg_release_value(ctx, st_name, p_val);
+                    return p_val;
+                }
                 let free_fn <&LLVMValue> = get_or_declare_free(ctx);
                 let f_fn_ty <&LLVMType> = llvm_global_get_value_type(free_fn);
                 let f_args <&LLVMValueArgs> = new LLVMValueArgs{};
@@ -10749,11 +11614,9 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 // allocation base, not the element pointer. Anything else
                 // frees exactly as before.
                 if (st_name != null && cg_strlen(st_name) > cast<ulong>(0) && cg_str_eq(substr(st_name, 0, 1), "[")) {
-                    let ind_db <&LLVMIndices> = new LLVMIndices{};
-                    ind_db.i0 = llvm_const_int_of_string(ctx.i64_ty, "-1", 10);
-                    let base_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, p_val, ind_db, 1, "arr_base");
-                    delete ind_db;
-                    f_args.v[0] = base_ptr;
+                    delete f_args;
+                    cg_free_array(ctx, st_name, p_val);
+                    return llvm_const_null(ctx.ptr_ty);
                 } else {
                     f_args.v[0] = p_val;
                 }
@@ -11473,15 +12336,14 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         }
 
         if (is_ctor) {
-            let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
-            let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
-            let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
-            c_args.v[0] = llvm_const_int(ctx.i64_ty, 1, 0);
-            // Same fixed heap-struct buffer as struct_alloc: 1024 fits the
-            // largest struct (64 words); raise together, never apart.
-            c_args.v[1] = llvm_const_int(ctx.i64_ty, 1024, 0);
-            ctor_st_ptr = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "ctor_obj");
-            delete c_args;
+            let ctor_ann <string> = cg_ctor_ann(n);
+            if (cg_value_struct(ctx, ctor_ann) == null) { ctor_ann = n.name; }
+            ctor_st_ptr = cg_frame_box(ctx, ctor_ann);
+            if (ctor_st_ptr == null) {
+                cg_dprintf(2, "finc codegen refusal: constructor storage for '%s' is unknown\n", n.name);
+                refuse_and_poison(ctx);
+                return null;
+            }
 
             args.v[0] = ctor_st_ptr;
             arg_count = 1;
@@ -11661,6 +12523,23 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         delete args;
         if (is_ctor) {
             return ctor_st_ptr;
+        }
+        let return_ann <string> = "";
+        let ri <int> = 0;
+        while (ri < ctx.fn_sym_count) {
+            let rsym <&FnSymbol> = ctx.fn_syms[ri];
+            if (rsym != null && rsym.fn_val == callee && rsym.value_return != null && cg_strlen(rsym.value_return) > cast<ulong>(0)) {
+                return_ann = rsym.value_return;
+                break;
+            }
+            ri = ri + 1;
+        }
+        if (ret_t == ctx.ptr_ty && cg_value_struct(ctx, return_ann) != null) {
+            let home <&LLVMValue> = cg_frame_box(ctx, return_ann);
+            cg_copy_value_into(ctx, return_ann, home, call_res);
+            cg_release_value(ctx, return_ann, call_res);
+            let present <&LLVMValue> = llvm_build_is_not_null(ctx.builder, call_res, "result.present");
+            call_res = llvm_build_select(ctx.builder, present, home, llvm_const_null(ctx.ptr_ty), "result.value");
         }
         // A bool callee can leave undefined high bits in the i1 result
         // (LLVM folds e.g. `icmp eq (urem x, 2), 1` to the low bit, which
@@ -12130,13 +13009,13 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
     return null;
 }
 
-// ADR 0052 (zero-init) for the stage's pointer-based shapes: a null word is
-// not a zero value here. Fixed/dynamic arrays, structs and prototypes are
-// read through the pointer the slot holds, so the no-initializer path
-// allocates a zeroed buffer (calloc, mirroring __fin_alloc_array /
-// __fin_alloc_struct / the prototype literal header) instead of storing
-// null. Scalars, pointers, nullables and enums keep the null store: for
-// those the null word already reads back as zero/absent on both backends.
+// ADR 0052 (zero-init) for the stage's pointer-based shapes. A dynamic
+// array's zero value is a null handle; length and deletion accept null.
+// Fixed arrays, structs and prototypes need addressable zero storage,
+// so their no-initializer paths allocate buffers instead. Struct values
+// normally use their frame homes before reaching this fallback helper.
+// Scalars, pointers, nullables and enums keep the null store: for those
+// the null word reads back as zero/absent on both backends.
 // Returns true when it stored, false when the caller should store null.
 fun cg_zero_uninit_buffer(ctx: &FnContext, ty_ann: string, ty: &LLVMType, alloca: &LLVMValue) <bool> {
     if (ctx == null || alloca == null || ty == null) { return false; }
@@ -12152,8 +13031,8 @@ fun cg_zero_uninit_buffer(ctx: &FnContext, ty_ann: string, ty: &LLVMType, alloca
         let slots <int> = ext + 1;
         let hdr_n <int> = ext;
         if (ext < 0) {
-            slots = 2;
-            hdr_n = 0;
+            llvm_build_store(ctx.builder, llvm_const_null(ctx.fat_ptr_ty), alloca);
+            return true;
         }
         let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
         let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
@@ -12241,6 +13120,10 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
         if (stmt.left != null && stmt.left.kind == ast_prototype_literal()) {
             ty_ann = "prototype";
         }
+        if (stmt.left != null && stmt.left.kind == ast_call_expr() && cg_str_eq(stmt.left.name, "__fin_array_literal") &&
+          cg_strlen(ty_ann) > cast<ulong>(0) && cg_str_eq(substr(ty_ann, 0, 1), "[")) {
+            stmt.left.resolved_spelling = ty_ann;
+          }
         let init_fn_ty <&LLVMType> = init_fn_type(ctx, stmt.left);
         // Block-scope shadowing (ADR 0011): an inner `let` for a name bound
         // in an outer scope gets a fresh slot instead of reusing the outer
@@ -12251,7 +13134,8 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
         let outer_v <&LocalVar> = null;
         let shadow_init <&LLVMValue> = null;
         let have_shadow_init <bool> = false;
-        if (v != null && v.scope_depth != ctx.current_scope_depth) {
+        if ((v != null && v.scope_depth != ctx.current_scope_depth) ||
+          (v == null && llvm_get_named_global(ctx.module, stmt.name) != null)) {
             outer_v = v;
             if (stmt.left != null) {
                 let saved_want0 <string> = ctx.call_want;
@@ -12269,7 +13153,7 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
                 }
             }
             v = null;
-        }
+          }
         if (v != null) {
             alloca = v.val;
             ty = v.ty;
@@ -12296,6 +13180,7 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
             // plus region) and resolve its `#[slaveof]` tie, if any.
             // Hoisted vars are fixed up here, at their lowering point in
             // source order, so a referent declared before reads resolved.
+            v.active = true;
             v.scope_depth = ctx.current_scope_depth;
             v.tie_region = ctx.region_depth;
             let tie_master_box <[int]> = new [int, 1]{};
@@ -12352,16 +13237,10 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
                             refuse_and_poison(ctx);
                             llvm_build_unreachable(ctx.builder);
                             return;
-                        } else if (ty == ctx.i8_ty && (v_ty == ctx.i32_ty || v_ty == ctx.i64_ty)) {
-                            init_val = llvm_build_trunc(ctx.builder, init_val, ctx.i8_ty, "v_tr8");
-                        } else if (ty == ctx.i16_ty && (v_ty == ctx.i32_ty || v_ty == ctx.i64_ty)) {
-                            init_val = llvm_build_trunc(ctx.builder, init_val, ctx.i16_ty, "v_tr16");
+                        } else if (cg_is_int_llvm(ctx, ty) && cg_is_int_llvm(ctx, v_ty)) {
+                            init_val = coerce_val(ctx, init_val, ty);
                         } else if (ty == ctx.i1_ty && v_ty != ctx.i1_ty) {
                             init_val = to_condition_i1(ctx, init_val);
-                        } else if (ty == ctx.i32_ty && v_ty == ctx.i64_ty) {
-                            init_val = llvm_build_trunc(ctx.builder, init_val, ctx.i32_ty, "v_tr32");
-                        } else if (ty == ctx.i64_ty && (v_ty == ctx.i32_ty || v_ty == ctx.i8_ty || v_ty == ctx.i16_ty)) {
-                            init_val = llvm_build_zext(ctx.builder, init_val, ctx.i64_ty, "v_z64");
                         } else if (ty == ctx.ptr_ty && v_ty != ctx.ptr_ty) {
                             init_val = coerce_val(ctx, init_val, ctx.ptr_ty);
                         } else if (v_ty == ctx.ptr_ty && (ty == ctx.i32_ty || ty == ctx.i64_ty || ty == ctx.i8_ty || ty == ctx.i1_ty)) {
@@ -12376,6 +13255,18 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
                         }
                     }
                     init_val = fn_value_to_ptr(ctx, stmt.left, init_val);
+                    // A binding owns stable representation storage. Copy
+                    // the initializer's value, never its box identity.
+                    if (cg_value_struct(ctx, ty_ann) != null) {
+                        if (v.value_box == null) {
+                            let saved_pin <bool> = ctx.pin_frame_box;
+                            ctx.pin_frame_box = v.tie_kind == 1;
+                            v.value_box = cg_frame_box(ctx, ty_ann);
+                            ctx.pin_frame_box = saved_pin;
+                        }
+                        cg_copy_value_into(ctx, ty_ann, v.value_box, init_val);
+                        init_val = v.value_box;
+                    }
                     llvm_build_store(ctx.builder, init_val, alloca);
                 }
             }
@@ -12442,7 +13333,16 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
             // the pointer, where a null word segfaults and the C++ value
             // representation reads zero (ADR 0052): they get a zeroed buffer.
             if (alloca != null && ty != null) {
-                if (!cg_zero_uninit_buffer(ctx, ty_ann, ty, alloca)) {
+                if (cg_value_struct(ctx, ty_ann) != null) {
+                    if (v.value_box == null) {
+                        let saved_pin <bool> = ctx.pin_frame_box;
+                        ctx.pin_frame_box = v.tie_kind == 1;
+                        v.value_box = cg_frame_box(ctx, ty_ann);
+                        ctx.pin_frame_box = saved_pin;
+                    }
+                    cg_zero_value_home(ctx, ty_ann, v.value_box);
+                    llvm_build_store(ctx.builder, v.value_box, alloca);
+                } else if (!cg_zero_uninit_buffer(ctx, ty_ann, ty, alloca)) {
                     llvm_build_store(ctx.builder, llvm_const_null(ty), alloca);
                 }
             }
@@ -12501,16 +13401,10 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
                     llvm_build_unreachable(ctx.builder);
                     return;
                   } else if (fn_ret_ty != v_ty) {
-                    if (fn_ret_ty == ctx.i8_ty && (v_ty == ctx.i32_ty || v_ty == ctx.i64_ty)) {
-                        val = llvm_build_trunc(ctx.builder, val, ctx.i8_ty, "ret_tr8");
-                    } else if (fn_ret_ty == ctx.i16_ty && (v_ty == ctx.i32_ty || v_ty == ctx.i64_ty)) {
-                        val = llvm_build_trunc(ctx.builder, val, ctx.i16_ty, "ret_tr16");
+                    if (cg_is_int_llvm(ctx, fn_ret_ty) && cg_is_int_llvm(ctx, v_ty)) {
+                        val = coerce_val(ctx, val, fn_ret_ty);
                     } else if (fn_ret_ty == ctx.i1_ty && v_ty != ctx.i1_ty) {
                         val = to_condition_i1(ctx, val);
-                    } else if (fn_ret_ty == ctx.i32_ty && v_ty == ctx.i64_ty) {
-                        val = llvm_build_trunc(ctx.builder, val, ctx.i32_ty, "ret_tr32");
-                    } else if (fn_ret_ty == ctx.i64_ty && (v_ty == ctx.i32_ty || v_ty == ctx.i8_ty || v_ty == ctx.i16_ty)) {
-                        val = llvm_build_zext(ctx.builder, val, ctx.i64_ty, "ret_z64");
                     } else if (v_ty == ctx.ptr_ty && (fn_ret_ty == ctx.i32_ty || fn_ret_ty == ctx.i64_ty || fn_ret_ty == ctx.i8_ty)) {
                         // A pointer-valued return into an integer slot narrows
                         // (ptrtoint+trunc), mirroring the initializer rule:
@@ -12526,6 +13420,10 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
                         val = coerce_val(ctx, val, fn_ret_ty);
                     }
                   }
+                // Snapshot before semantic cleanup, independently of the
+                // callee's frame homes. The caller owns this detached value.
+                // Pointer returns stay borrowed and are never copied.
+                val = cg_copy_struct_value(ctx, ctx.value_return, val);
                 emit_scope_cleanups(ctx, 0);
                 llvm_build_ret(ctx.builder, val);
             } else if (!ctx.poisoned) {
@@ -12622,6 +13520,7 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
 
         let prev_break <&LLVMBasicBlock> = ctx.break_bb;
         let prev_continue <&LLVMBasicBlock> = ctx.continue_bb;
+        let prev_cleanup <int> = ctx.loop_cleanup_from;
         ctx.break_bb = exit_bb;
         ctx.continue_bb = cond_bb;
 
@@ -12656,6 +13555,7 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
         }
 
         llvm_position_builder(ctx.builder, body_bb);
+        ctx.loop_cleanup_from = ctx.var_count;
         // Wave-5 slice 4: the loop body is its own control-flow region --
         // a tie declared inside cannot drain past the back-edge (the slot
         // may never have been constructed where the master dies).
@@ -12672,6 +13572,7 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
 
         ctx.break_bb = prev_break;
         ctx.continue_bb = prev_continue;
+        ctx.loop_cleanup_from = prev_cleanup;
 
         llvm_position_builder(ctx.builder, exit_bb);
         return;
@@ -12694,6 +13595,7 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
 
         let prev_break <&LLVMBasicBlock> = ctx.break_bb;
         let prev_continue <&LLVMBasicBlock> = ctx.continue_bb;
+        let prev_cleanup <int> = ctx.loop_cleanup_from;
         ctx.break_bb = exit_bb;
         ctx.continue_bb = step_bb;
 
@@ -12723,6 +13625,7 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
         }
 
         llvm_position_builder(ctx.builder, body_bb);
+        ctx.loop_cleanup_from = ctx.var_count;
         if (stmt.extra != null && stmt.extra.right != null) {
             // Wave-5 slice 4: the for body is its own region, like a while
             // body (the header init above and the step below hold no
@@ -12749,6 +13652,7 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
 
         ctx.break_bb = prev_break;
         ctx.continue_bb = prev_continue;
+        ctx.loop_cleanup_from = prev_cleanup;
 
         llvm_position_builder(ctx.builder, exit_bb);
         ctx.current_scope_depth = for_prev_scope;
@@ -12760,12 +13664,14 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
     }
     if (stmt.kind == ast_break_stmt()) {
         if (ctx.break_bb != null && llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) == null) {
+            emit_scope_cleanups(ctx, ctx.loop_cleanup_from);
             llvm_build_br(ctx.builder, ctx.break_bb);
         }
         return;
     }
     if (stmt.kind == ast_continue_stmt()) {
         if (ctx.continue_bb != null && llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) == null) {
+            emit_scope_cleanups(ctx, ctx.loop_cleanup_from);
             llvm_build_br(ctx.builder, ctx.continue_bb);
         }
         return;
@@ -13756,7 +14662,7 @@ fun collect_var_allocas(ctx: &FnContext, node: &AstNode) <noret> {
     if (ctx.poisoned) { return; }
     if (node.kind == ast_var_decl()) {
         let v <&LocalVar> = fn_ctx_find_var(ctx, node.name);
-        if (v == null) {
+        if (v == null && llvm_get_named_global(ctx.module, node.name) == null) {
             let ty_ann <string> = node.type_annotation;
             // ENGA slice 1: prefer the checker's resolved spelling for the
             // slot type (`Collection<A>` with `type A = int` allocates as
@@ -13780,6 +14686,8 @@ fun collect_var_allocas(ctx: &FnContext, node: &AstNode) <noret> {
             }
             let alloca <&LLVMValue> = llvm_build_alloca(ctx.builder, ty, node.name);
             fn_ctx_add_var(ctx, node.name, alloca, ty, ty_ann);
+            let hoisted <&LocalVar> = fn_ctx_find_var(ctx, node.name);
+            if (hoisted != null) { hoisted.active = false; }
             if (pre_fn_ty != null) {
                 let nv <&LocalVar> = fn_ctx_find_var(ctx, node.name);
                 if (nv != null) {
@@ -13882,6 +14790,28 @@ pub fun lower_fun_decl(
     let void_t <&LLVMType> = llvm_void_type();
     let ptr_t <&LLVMType> = llvm_pointer_type(llvm_i8_type(), 0);
 
+    let value_return_ann <string> = fn_node.type_annotation;
+    if (cg_str_eq(value_return_ann, "Self")) {
+        let si <int> = 0;
+        while (si < struct_count) {
+            let st <&StructInfo> = structs[si];
+            let name_len <int> = cast<int>(cg_strlen(st.name));
+            if (cast<int>(cg_strlen(fn_name)) > name_len && cg_str_eq(substr(fn_name, 0, name_len), st.name)) {
+                let sep <string> = substr(fn_name, name_len, 1);
+                if (cg_str_eq(sep, "_") || cg_str_eq(sep, ".")) { value_return_ann = st.name; break; }
+            }
+            si = si + 1;
+        }
+    }
+    let own_sym_idx <int> = 0;
+    while (own_sym_idx < fn_sym_count) {
+        let own_sym <&FnSymbol> = fn_syms[own_sym_idx];
+        if (own_sym != null && own_sym.fn_val == fn_val) {
+            own_sym.value_return = value_return_ann;
+        }
+        own_sym_idx = own_sym_idx + 1;
+    }
+
     let entry_bb <&LLVMBasicBlock> = llvm_append_basic_block(fn_val, "entry");
     llvm_position_builder(builder, entry_bb);
 
@@ -13922,6 +14852,7 @@ pub fun lower_fun_decl(
     ctx.tied_moved = new [int, 1024]{};
     ctx.tied_count = 0;
     ctx.ret_iface = find_interface(ctx, fn_node.type_annotation);
+    ctx.value_return = value_return_ann;
     // Declared generics for this body (triage #6b): the function's own
     // `<...>` text, or "" when str_val carries an attribute/operator
     // payload. Struct/enum parameters ride on ctx.structs/enums instead.
@@ -13994,24 +14925,14 @@ pub fun lower_fun_decl(
                 // By-value struct parameters arrive as the caller's heap-box
                 // pointer; copy the box on entry so member stores stay
                 // function-local (d01/d03: `p.a = 50` must not reach the
-                // caller, while `&`-parameters keep aliasing). Same fixed
-                // heap-struct buffer as struct_alloc (1024).
-                let bc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
-                let bc_ty <&LLVMType> = llvm_global_get_value_type(bc_fn);
-                let bc_args <&LLVMValueArgs> = new LLVMValueArgs{};
-                bc_args.v[0] = llvm_const_int(ctx.i64_ty, 1, 0);
-                bc_args.v[1] = llvm_const_int(ctx.i64_ty, 1024, 0);
-                let fresh <&LLVMValue> = llvm_build_call2(builder, bc_ty, bc_fn, bc_args, 2, "byval_copy");
-                delete bc_args;
-                let mc_fn <&LLVMValue> = get_or_declare_memcpy(ctx);
-                let mc_ty <&LLVMType> = llvm_global_get_value_type(mc_fn);
-                let mc_args <&LLVMValueArgs> = new LLVMValueArgs{};
-                mc_args.v[0] = fresh;
-                mc_args.v[1] = p_val;
-                mc_args.v[2] = llvm_const_int(ctx.i64_ty, 1024, 0);
-                llvm_build_call2(builder, mc_ty, mc_fn, mc_args, 3, "");
-                delete mc_args;
+                // caller, while `&`-parameters keep aliasing). The copy is
+                // the same type-directed one a declaration makes, so a
+                // nested struct field is a value here too.
+                let fresh <&LLVMValue> = cg_frame_box(ctx, p_cur.type_annotation);
+                cg_copy_value_into(ctx, p_cur.type_annotation, fresh, p_val);
                 llvm_build_store(builder, fresh, alloca);
+                let copied_param <&LocalVar> = fn_ctx_find_var(ctx, p_cur.name);
+                if (copied_param != null) { copied_param.value_box = fresh; }
             }
             let pv <&LocalVar> = fn_ctx_find_var(ctx, p_cur.name);
             if (pv != null && p_cur.type_annotation != null) {
@@ -14111,6 +15032,8 @@ pub fun lower_fun_decl(
             llvm_build_ret_void(builder);
         }
     }
+
+    cg_finish_frame(ctx);
 
     let was_poisoned <bool> = ctx.poisoned;
     // Not verified once anything has been refused: a body that resumed past
@@ -14668,6 +15591,7 @@ fun lower_dtor_claim(
         emit_scope_cleanups(ctx, 0);
         llvm_build_ret_void(builder);
     }
+    cg_finish_frame(ctx);
     return ctx.poisoned;
 }
 
@@ -14758,6 +15682,7 @@ fun lower_dealloc_claim(
         emit_scope_cleanups(ctx, 0);
         llvm_build_ret_void(builder);
     }
+    cg_finish_frame(ctx);
     return ctx.poisoned;
 }
 

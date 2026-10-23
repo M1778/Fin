@@ -124,14 +124,29 @@ pub struct IrFunction {
       blocks <[IrBlock]>,
       block_count <int> = 0,
       next_temp <int> = 0,
+      temp_names <[string]>,
+      temp_capacity <int> = 0,
 
     pub:
+      // The returned name is borrowed until free_ir_function releases it.
       fun fresh_temp(self: &Self) <string> {
+        if (self.next_temp >= self.temp_capacity) {
+            let capacity <int> = self.next_temp * 2;
+            if (capacity < 16) { capacity = 16; }
+            let names <[string]> = new [string, capacity]{};
+            for (let i <int> = 0; i < self.next_temp; i++) {
+                names[i] = self.temp_names[i];
+            }
+            if (self.temp_capacity > 0) { delete self.temp_names; }
+            self.temp_names = names;
+            self.temp_capacity = capacity;
+        }
         let buf <string> = ir_calloc(cast<ulong>(16), cast<ulong>(1));
         let digits <[char]> = new [char, 16]{};
         digits[0] = '%';
         digits[1] = 't';
         let val <int> = self.next_temp;
+        self.temp_names[self.next_temp] = buf;
         self.next_temp++;
         if (val == 0) {
             digits[2] = '0';
@@ -185,13 +200,17 @@ pub fun new_ir_function(name: string, return_type: string) <IrFunction> {
     };
 }
 
-// Releases an IrFunction and all its blocks.
+// Releases blocks and fresh_temp names. Supplied strings stay caller-owned.
 #[export]
 pub fun free_ir_function(func: IrFunction) <noret> {
     for (let i <int> = 0; i < func.block_count; i++) {
         delete func.blocks[i].instructions;
     }
     delete func.blocks;
+    for (let i <int> = 0; i < func.next_temp; i++) {
+        ir_free(func.temp_names[i]);
+    }
+    if (func.temp_capacity > 0) { delete func.temp_names; }
 }
 
 // Instruction constructors

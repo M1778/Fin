@@ -25,15 +25,15 @@
 // - `deeptest4` (struct `==`): held ruling ADR 0036, declared-only and never
 //   synthesized, so neither compiler produces a runnable. Explicit skip.
 // - Aspirational samples (e.g. `deeptest2`): not normative; out of scope.
-// - A sample the reference (C++) build refuses (no `main`, or a reference
-//   refusal): not runnable by definition, skipped. A C++ crash would skip
-//   here but is already red in MatchesCompilerBehaviour's exit-code contract.
+// - Listed declaration-only samples: no `main`, so their expected refusal
+//   skips. Every other reference build failure, including a crash, fails.
 
 #include <gtest/gtest.h>
 
 #include <filesystem>
 #include <fstream>
 #include <regex>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -324,14 +324,46 @@ RunAgreement checkRunAgreement(const std::string& stem, const Proc& cpp, const P
 
 enum class BuildVerdict {
     BothBuild,            // run comparison decides
-    ReferenceRefuses,     // C++ refuses: not runnable, skip (no-main, reference refusal)
+    ReferenceRefuses,     // an explicitly listed reference refusal, with the expected diagnostic
+    UnexpectedReferenceFailure,
     ToleratedRefusal,     // C++ builds, stage refuses, sample allowlisted
     UnlistedDivergence,   // C++ builds, stage refuses, nobody allowlisted it
     StaleAllowlist,       // stage builds a sample the allowlist says it refuses
 };
 
-BuildVerdict checkBuildAgreement(const std::string& stem, bool cppBuilt, bool stageBuilt) {
-    if (!cppBuilt) return BuildVerdict::ReferenceRefuses;
+const char* expectedReferenceRefusal(const std::string& sample) {
+    if (sample == "deeptest4.fin") {
+        return "error: codegen: an undeclared operator '==' on struct 'Data' is not lowered yet";
+    }
+    const char* declarationSamples[] = {
+        "deeptest3.fin", "extern_as.fin", "literal_interface.fin", "macro_definitions.fin",
+        "macros.fin", "macros2.fin", "stdlib/error.fin", "stdlib/hashmap.fin",
+        "stdlib/memory.fin", "stdlib/outcome.fin", "stdlib/prototypes.fin",
+        "stdlib/typing.fin", "struct_methods.fin",
+    };
+    for (const auto* declaration : declarationSamples) {
+        if (sample == declaration) return "error: this program has no 'main'";
+    }
+    return nullptr;
+}
+
+BuildVerdict checkBuildAgreement(const std::string& sample, bool cppBuilt, bool stageBuilt,
+                                 int cppExit = 0, const std::string& cppErr = "") {
+    if (!cppBuilt) {
+        const char* expected = expectedReferenceRefusal(sample);
+        if (cppExit != 1 || !expected) return BuildVerdict::UnexpectedReferenceFailure;
+        std::istringstream diagnostics(cppErr);
+        std::string line;
+        int errors = 0;
+        while (std::getline(diagnostics, line)) {
+            if (line.rfind("error:", 0) != 0) continue;
+            if (line != expected) return BuildVerdict::UnexpectedReferenceFailure;
+            ++errors;
+        }
+        return errors == 1 ? BuildVerdict::ReferenceRefuses
+                           : BuildVerdict::UnexpectedReferenceFailure;
+    }
+    const std::string stem = fs::path(sample).stem().string();
     if (stageBuilt) {
         return lookupAllow(stem, "stage-build-refusal") != nullptr ? BuildVerdict::StaleAllowlist
                                                                    : BuildVerdict::BothBuild;
@@ -529,14 +561,45 @@ TEST(StageAgreementLogic, SimplePointersAgreesOnAbortClass) {
 TEST(StageAgreementLogic, BuildVerdictsRouteEveryShape) {
     EXPECT_EQ(checkBuildAgreement("loops", true, true), BuildVerdict::BothBuild);
     // Neither builds (deeptest4's held ruling, or no `main`): not runnable.
-    EXPECT_EQ(checkBuildAgreement("deeptest4", false, false), BuildVerdict::ReferenceRefuses);
-    EXPECT_EQ(checkBuildAgreement("macros", false, false), BuildVerdict::ReferenceRefuses);
+    EXPECT_EQ(checkBuildAgreement("deeptest4.fin", false, false, 1,
+                                  "error: codegen: an undeclared operator '==' on struct 'Data' is not lowered yet\n"),
+              BuildVerdict::ReferenceRefuses);
+    EXPECT_EQ(checkBuildAgreement("macros.fin", false, false, 1,
+                                  "error: this program has no 'main'\n"),
+              BuildVerdict::ReferenceRefuses);
     // A refusal nobody listed is the failure this suite exists for.
     EXPECT_EQ(checkBuildAgreement("loops", true, false), BuildVerdict::UnlistedDivergence);
     // MM1 fixed the stage: former refusals now build like the reference.
     EXPECT_EQ(checkBuildAgreement("complex", true, true), BuildVerdict::BothBuild);
     EXPECT_EQ(checkBuildAgreement("interfaces", true, true), BuildVerdict::BothBuild);
     EXPECT_EQ(checkBuildAgreement("loops", true, true), BuildVerdict::BothBuild);
+}
+
+TEST(StageAgreementLogic, AReferenceFailureInARunnableSampleIsNotSkipped) {
+    EXPECT_NE(checkBuildAgreement("loops", false, false), BuildVerdict::ReferenceRefuses);
+    EXPECT_NE(checkBuildAgreement("loops", false, true), BuildVerdict::ReferenceRefuses);
+}
+
+TEST(StageAgreementLogic, AReferenceExclusionRequiresItsExpectedFailure) {
+    const std::string noMain = "error: this program has no 'main'\n";
+    EXPECT_EQ(checkBuildAgreement("macros.fin", false, false, 1, noMain),
+              BuildVerdict::ReferenceRefuses);
+    EXPECT_NE(checkBuildAgreement("loops.fin", false, false, 1, noMain),
+              BuildVerdict::ReferenceRefuses);
+    EXPECT_NE(checkBuildAgreement("stdlib/macros.fin", false, false, 1, noMain),
+              BuildVerdict::ReferenceRefuses);
+    for (int exit : {-1, 0, 2, 139}) {
+        EXPECT_NE(checkBuildAgreement("macros.fin", false, false, exit, noMain),
+                  BuildVerdict::ReferenceRefuses);
+    }
+    EXPECT_NE(checkBuildAgreement("macros.fin", false, false, 1,
+                                  "error: codegen: unexpected refusal\n"),
+              BuildVerdict::ReferenceRefuses);
+    EXPECT_NE(checkBuildAgreement("macros.fin", false, false, 1,
+                                  noMain + "error: codegen: unexpected refusal\n"),
+              BuildVerdict::ReferenceRefuses);
+    EXPECT_NE(checkBuildAgreement("deeptest4.fin", false, false, 1, noMain),
+              BuildVerdict::ReferenceRefuses);
 }
 
 // ---------------------------------------------------------------------------
@@ -672,27 +735,23 @@ class Stage3Agreement : public ::testing::TestWithParam<Sample> {};
 
 void checkAgreementForStage(const std::string& path, const std::string& stem,
                             const std::string& stageBin, const std::string& exeTag) {
-    // Held ruling ADR 0036: struct `==` is declared-only, never synthesized.
-    // Neither compiler produces a runnable; compile-only, already covered.
-    if (stem == "deeptest4") {
-        GTEST_SKIP() << "held ruling (ADR 0036): struct `==` is refused by design; out of scope";
-    }
-
     // Same tree for both compilers (stage resolves packages via CWD).
     ScopedRepoRoot repoRoot;
     if (!repoRoot.ok()) FAIL() << "cannot chdir to the repo root; stage imports would misresolve";
 
-    // Reference build (C++). A refusal here means not runnable: no `main`, or
-    // a reference-side refusal. A C++ crash would also land here, but that is
-    // already red in MatchesCompilerBehaviour's exit-code contract.
+    // Reference build (C++). Only the listed no-main and held-equality
+    // refusals skip; an unexpected refusal or crash fails this gate.
     const fs::path cppExe = uniqueTempPath("stageagree_cpp");
     const FincRun cppBuild = runFinc({path, "--color=never", "-o", cppExe.string()});
     const bool cppBuilt = cppBuild.exitCode == 0 && fs::exists(cppExe);
+    const std::string sample = fs::path(path).lexically_relative(samplesDir()).generic_string();
     if (!cppBuilt) {
         removeIfExists(cppExe);
-        const std::string firstErr = cppBuild.err.substr(0, cppBuild.err.find('\n'));
-        GTEST_SKIP() << "reference (C++) build refuses " << stem << " (exit " << cppBuild.exitCode
-                     << "); not runnable; first stderr line: " << firstErr;
+        ASSERT_EQ(checkBuildAgreement(sample, false, false, cppBuild.exitCode, cppBuild.err),
+                  BuildVerdict::ReferenceRefuses)
+            << "unexpected reference (C++) build failure for " << sample
+            << " (exit " << cppBuild.exitCode << "):\n" << cppBuild.err;
+        GTEST_SKIP() << sample << ": " << expectedReferenceRefusal(sample);
     }
 
     // Stage build, serialized: the stage cross-links concurrent `-o` builds
@@ -705,11 +764,16 @@ void checkAgreementForStage(const std::string& path, const std::string& stem,
     }
     const bool stageBuilt = stageBuild.exited && stageBuild.exitCode == 0 && fs::exists(stageExe);
 
-    switch (checkBuildAgreement(stem, cppBuilt, stageBuilt)) {
+    switch (checkBuildAgreement(sample, cppBuilt, stageBuilt)) {
         case BuildVerdict::ReferenceRefuses:
             removeIfExists(cppExe);
             removeIfExists(stageExe);
             GTEST_SKIP() << "reference refuses; not runnable";
+            break;
+        case BuildVerdict::UnexpectedReferenceFailure:
+            removeIfExists(cppExe);
+            removeIfExists(stageExe);
+            FAIL() << "unexpected reference (C++) build failure for " << sample;
             break;
         case BuildVerdict::ToleratedRefusal: {
             const AllowEntry* e = lookupAllow(stem, "stage-build-refusal");

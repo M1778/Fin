@@ -15,21 +15,21 @@ executable. The examples below mark those boundaries.
 
 | Module | Main declarations | Application boundary |
 | --- | --- | --- |
-| [stdio](../../lib/std/stdio.fin) | `printf`, `Printable`, printing helpers, `Stream`, `File`, `IOResult<T>` | Ambient `printf` runs; concrete-typed helpers such as `println_str` and `print_bool` build and run; other helper calls and payload results have backend limits |
+| [stdio](../../lib/std/stdio.fin) | `printf`, `Printable`, printing helpers, `Stream`, `File`, `IOResult<T>` | Typed and Printable output preserves literal text and separates stdout/stderr; Windows stderr uses UCRT. File operations use native 64-bit seek APIs; the int-sized `File::size` API returns -1 for unrepresentable extents. Buffered write and close errors return false |
 | [strings](../../lib/std/strings.fin) | Length, byte comparison, search, transforms, splitting/joining | `len`, `split_str`, `replace`, and other imports build and run; allocating calls return owned storage requiring caller cleanup |
 | [math](../../lib/std/math.fin) | Numeric helpers, integer algorithms | Check each imported call before using it in an executable |
-| [collection](../../lib/std/collection.fin) | `Collection<T>`, `CollectionError`, `coll!` | The concrete integer example below runs; buffer cleanup is incomplete; `from_prototype` stores entries via `push`, so `coll![...]` builds a populated collection |
-| [hashmap](../../lib/std/hashmap.fin) | `HashMap<K,V>`, `HashMapError`, `map!` | Erased/custom-hasher paths and method emission have limits; `from_prototype` stores entries via `__set`, so `map!{...}` builds a populated map |
+| [collection](../../lib/std/collection.fin) | `Collection<T>`, `CollectionError`, `coll!` | Geometric growth and checked method indices; `free_collection()` releases backing storage and permits reuse. Stored allocations remain caller-owned. `from_prototype` and `coll!` populate entries |
+| [hashmap](../../lib/std/hashmap.fin) | `HashMap<K,V>`, `HashMapError`, `map!` | Open addressing with content-based string keys. `free_hashmap()` releases internal containers and permits reuse; key/value allocations remain caller-owned. Shallow copies share storage |
 | [types](../../lib/std/types.fin) | Numeric aliases, `Number`, `Any`, `number2str` | Alias/bound declarations do not imply working dynamic values or conversion helpers |
-| [typing](../../lib/std/typing.fin) | `Result<T,E>`, `IResult` | Generic payload enums do not build |
+| [typing](../../lib/std/typing.fin) | `Result<T,E>`, `IResult` | Concrete generic payload enums lower as tagged unions (ADR 0041); verify the specific helper method required by an application |
 | [outcome](../../lib/std/outcome.fin) | `Outcome<T>`, free-function constructors `Ok<T>`/`Err<T>`, `is_ok`/`is_err`/`unwrap_or`/`expect` | The struct form builds and runs today (`Ok::<int>(80)`, `Err::<int>(msg)`, field reads and methods probed live); bare struct literals only, `new Outcome{...}` refuses; `expect` aborts on an Err and never returns; `message` is caller-owned |
 | [enums](../../lib/std/enums.fin) | `Enum`, `EnumType`, `getkeyid`, `keyidof`, `enum_from!` | The draft pair now runs on real values (`getkeyid(Fruit::Plum)` is 2, `keyidof(Pear)` is 1 -- the value's tag, ADR 0041; the spelling's id) and `enum_from!(v) <string>` names a value's member: `enum_from!(Fruit::Plum)` answers Plum as a constant (the member spelling draws the name the bare spelling draws), a runtime variable re-assigned between two prints answers Pear then Plum -- dispatch, not a fold (the ADR 0058 hash is the fold-shaped sibling) -- and a payloaded `R::Ok(5)`/`R::Err(17)` pair answers Ok and Err, the tag at element 0 with the payload out of view; a raw `int` refuses (`'enum_from' on a int is not lowered yet`) where getkeyid passes one through, because a name has no member to name without an enum, and the boxed `EnumType` refuses exactly like getkeyid's box refusal today (one shared gap); the helper is compiler-implemented like `format!` (ADR 0023 step 6 -- a registered macro cannot see the member list) with the signature declared in the module (`@define enum_from!(value: EnumType) <string>;`) and resolving with no import; byte-identical across finc, stage1/2/3 on every pin; ADR 0059 |
 | [operators](../../lib/std/operators.fin) | `Add`, `Equal`, `Index`, `IndexAssign`, other operator interfaces | Some declared operators have no expression grammar or use erased results |
 | [error](../../lib/std/error.fin) | `Error`, message/code accessors | Error values do not enable catchable exceptions |
-| [stdptr](../../lib/std/stdptr.fin) | `rptr<T>`, `wptr<T>`, `OwnershipError` | Incomplete execution/safety paths; no borrow checker |
+| [stdptr](../../lib/std/stdptr.fin) | `rptr<T>`, `wptr<T>`, `OwnershipError` | Explicit strong/weak release and per-handle released guards (ADR 0039 amendment). Weak handles retain counters after the value dies. Heap siblings, including the initial restrict snapshot, require release then deletion through an owning local pointer. Copies alias storage without incrementing counts; raw fields and concurrent use require caller discipline |
 | [networking](../../lib/std/networking.fin) | `Socket` (dial/serve/accept_conn/send_text/recv_bytes/local_port/shutdown), `TcpStream` (connect/write/read/close), `TcpListener` (bind/accept/local_port/close), `http_get` | connect/listen/accept/read/write/close run on loopback (the bundled sample ends to end plus pins in `Soundness_SyncNet`, echo and refusal and an against-test-peer `http_get`); explicit byte counts on `write`/`read`, failures `blame` and name the call; dotted-quad addresses only -- a hostname refuses as "cannot parse the address as a dotted quad", no TLS, `http_get` caps at 4096 bytes |
-| [sync](../../lib/std/sync.fin) | `Thread::spawn`/`join` over pthreads, `Mutex<T>` (create/lock/unlock), `Channel<T>` (create/shared/send/recv) | The bundled sample runs a worker thread and a blocking channel end to end on all three compilers (pins in `Soundness_SyncNet` keep a mutex counter at a deterministic `2000` and channel FIFO/refusal); `recv` answers `Outcome<T>` whose `Err` arm is closed in v0; captures work on the reference compiler only, Windows links refuse with the named `sync_*` symbols, self-deadlock is undetected in v0 |
-| [time](../../lib/std/time.fin) | `now`, `sleep_sec`/`sleep_ms`, `diff_sec`, `Instant`, `Duration`, `format_rfc3339`/`parse_rfc3339` | `Instant` is a monotonic ns clock (Linux id 1, macOS id 6); RFC3339 is UTC `YYYY-MM-DDTHH:MM:SSZ` with caller-owned storage freed by `free_rfc3339`; Windows has no `clock_gettime` |
+| [sync](../../lib/std/sync.fin) | `Thread::spawn`/`join`, `Mutex<T>`, `Channel<T>` | POSIX threads or Windows native thread/SRW APIs. The entry adapter carries Fin callbacks through an explicit C context; captures work on the reference compiler, while the self-host compiler requires noncapturing bodies. Join, mutex counter, channel FIFO, and TCP integration have executable regressions. Self-deadlock is not detected |
+| [time](../../lib/std/time.fin) | `now`, `sleep_sec`/`sleep_ms`, `diff_sec`, `Instant`, `Duration`, RFC3339 helpers | `Instant` uses POSIX monotonic clocks or Windows QueryPerformanceCounter; Windows sleeps use Sleep. UTC RFC3339 results are caller-owned and released with `free_rfc3339`. Native platform execution is a release gate |
 | [ascii](../../lib/std/ascii.fin) | `is_alpha`, `is_digit`, classification predicates, `to_upper`/`to_lower`, `digit_value`/`hex_value` | Pure predicates build and run (`is_alpha('a')`, `is_digit('3')` probed live); no allocation, no cleanup |
 | [bits](../../lib/std/bits.fin) | `bit_and`/`bit_or`/`bit_xor`/`bit_not`, get/set/clear/toggle, `popcount`, `bit_length`, leading/trailing zeros, `is_power_of_two`, rotations | Arithmetic lowering builds and runs (`bit_and(6, 3) == 2`, `popcount(7) == 3` probed live); the grammar has no `&`/`|`/`^` operators, so use these helpers |
 | [encoding](../../lib/std/encoding.fin) | `hex_encode`/`hex_decode`, `base64_encode`/`base64_decode`, `free_encoded` | Hex and Base64 round-trips build and run (`hex_encode("Hi") == "4869"`, `base64_encode("Hi") == "SGk="` probed live); results are caller-owned, release with `free_encoded` |
@@ -39,15 +39,15 @@ executable. The examples below mark those boundaries.
 | [buffer](../../lib/std/buffer.fin) | `Buffer`, `new_buffer`/`new_string_builder`, `free_buffer`/`free_string`, `write_*`, `length`, `to_string` | `new_buffer` with `write_string` and `length` builds and runs; the buffer owns heap storage, release with `free_buffer` |
 | [deque](../../lib/std/deque.fin) | `Deque<T>`, `Queue<T>`, `Stack<T>`, push/pop at both ends, `get`, `len`, `is_empty` | `push_back`/`push_front`/`pop_back`/`pop_front`/`get` build and run (int deque probed live); no buffer destructor, process exit reclaims demo storage |
 | [path](../../lib/std/path.fin) | `join`, `basename`, `dirname`, `extname`, `stem`, `normalize`, `is_absolute`/`is_relative`, `free_path` | `join`/`basename`/`stem`/`normalize` build and run (`normalize("/a/./b/../c") == "/a/c"` probed live); results are caller-owned, release with `free_path` |
-| [env](../../lib/std/env.fin) | `getenv`/`setenv` externals, `get_env`, `has_env`, `set_env`, `unset_env` | `set_env(name, value)`, `get_env`, and `has_env` build and run (two-argument `set_env` probed live); consumed by `finc/driver` |
+| [env](../../lib/std/env.fin) | `getenv`/`setenv`, `get_env`, `has_env`, `set_env`, `unset_env` | POSIX environment calls or Windows UCRT. Windows set_env rejects empty values without deleting the previous value; use unset_env for removal. Getters borrow environment storage |
 | [log](../../lib/std/log.fin) | `Level` (`Debug`/`Info`/`Warn`/`Error` statics with `.rank`), `Logger`, `init`/`init_json`, `timestamps`, `debug`/`info`/`warn`/`error` | All four levels filter and both modes build and run (`LOG_LEVEL=debug` no-init emit and `init(Level::Error())` silence probed live); `LOG_LEVEL` outside `debug|info|warn|error` blames naming the value; everything goes to stderr and never stdout (pins in `Soundness_Log`); a plain `enum Level` refuses in codegen, so the members are statics (recorded in the module header) |
-| [process](../../lib/std/process.fin) | `run_command`, `exec_command`, `ProcessResult`, `is_success`, `free_process_result` | `run_command("true") == 0` and `exec_command("echo hi")` build and run; release results with `free_process_result`; consumed by `finc/driver` |
+| [process](../../lib/std/process.fin) | `run_command`, `exec_command`, `ProcessResult`, `is_success`, `free_process_result` | Uses system and POSIX popen/pclose or Windows _popen/_pclose. Status retains the native encoding; free captured results with free_process_result |
 | [mem](../../lib/std/mem.fin) | `Allocator`, `Arena`, `Pool<T>`, `LibcAlloc`, `NullAlloc`, typed routes `arena_block`/`mem_release`, raw routes `mem_malloc_bytes`/`mem_grow_bytes`/`mem_free_bytes`, `null_alloc` | Byte arena, slot pool, libc wrapper, and typed routes build and run (`arena_block::<int>(&a, 1024)` + `mem_release::<int>`, `arena_bytes` bump, pool recycle probed live); the issue's `arena.alloc::<int>` member spelling is refused (`Method 'alloc' not found in type 'Arena'`) and typed routes plus interface-value dispatch refuse at stage codegen, so all-compiler programs keep to the concrete structs; every handout names its owner (arena slab dies with `destroy()`, fresh blocks are caller-owned, release with `mem_release`); no alignment, no byte-to-typed recast |
 | [testing](../../lib/std/testing.fin) | `assert_true`/`assert_false`, `assert_eq/ne_*`, `assert_null`/`assert_not_null`, `check`, `for_all`, `shrink`, `bench` | Assertions build and run (`assert_eq_int(1 + 1, 2, ...)` probed live); failures blame, they do not raise catchable errors; `for_all(seed, n, gen, prop)` runs `gen(seed + i)` for i in 0..n-1, silent while it holds, and blames naming the first failing input plus the minimally failing one, which `shrink` also answers on its own (the smallest failing input in the halving chain -- 100 against a property failing from 8 up names 12, pinned in `Soundness_Testing` and the bundled sample); `bench` refuses honestly ("ns/op needs sub-second timing (issue #59); sec resolution lies about the magnitude"), because a whole-second timing would print a magnitude it does not know; `*_test.fin` programs run under `tools/fintest` (`fintest --file <path>` ctest lanes, seed dir `fintest/`), and the libFuzzer parser harness recipe lives in `fuzz/parse_fuzz.cpp`'s header, Clang-only, #84's |
 | [token](../../lib/std/token.fin) | `tok_*()`, `kw_*()`, `is_keyword`, `token_name`, `Token` | Kind helpers and `Token` values build and run (`tok_ident() == 2`, `token_name` probed live); use the `tok_*()`/`kw_*()` functions because the `TOKEN_*`/`KW_*` consts resolve but are refused in codegen (`the name 'TOKEN_EOF' is not lowered yet`); consumed by `finc/driver` and `finc/parser` |
 | [scanner](../../lib/std/scanner.fin) | `Scanner`, `new_scanner`, `free_scanner`, `peek`/`peek_next`/`advance` | `new_scanner` with `peek` builds and runs (`peek("let x = 1;") == 'l'` probed live); release with `free_scanner`; consumed by `finc/driver` |
 | [parse](../../lib/std/parse.fin) | `prec_*()`, `binary_precedence`, `unary_precedence`, `is_right_associative`, `TokenStream` (`check`/`match_token`/`expect`/`position`/`seek`), the `lit`/`alt`/`many`/`seq` combinators | Precedence helpers build and run; the combinators are consumable spellings over the same stream machinery (`lit` = match, `many` = repeated `alt`, `seq` = all-or-rewind), consumed by `cdk.fin`'s grammar and `finc/parser` |
-| [cdk](../../lib/std/cdk.fin) | `cdk_scan`/`cdk_parse`/`cdk_lower`/`cdk_emit_text`/`cdk_eval_ir`, `calc_compile` (`Outcome<string>`), `calc_eval`, `CdkTokens`/`CdkParse`/`CdkGrammar`, `free_cdk_tokens` | The write-a-language-in-200-lines demo: scanner::std's `scan_token` (never re-lexed) -> parse::std's TokenStream + combinators -> ast::std makers -> ir::std instructions (`fresh_temp` dests, `IrBlock::emit`) -> `calc_eval("2 + 3 * 4") == 14` through the interpreter; `calc_compile` answers the emitted text (pin byte-exact in the sample: `%t0 = const_int 2` ... `ret %t4`); refuse arms are `Outcome::Err` naming the parse stage -- never a blame; v0 boundaries recorded in the module header: emit is cdk's own transcription (emitter::std's CEmitter stops at prologue/fn_header), errors are cdk wordings not yet diag::std's jsonl bag, temp-name strings are process-end leaks at demo scale; readers take the IrFunction by value because the stage crash-reads an array field through a struct pointer parameter (scalar reads and stores through the pointer lower fine) |
+| [cdk](../../lib/std/cdk.fin) | `cdk_scan`/`cdk_parse`/`cdk_lower`/`cdk_emit_text`/`cdk_eval_ir`, `calc_compile` (`Outcome<string>`), `calc_eval`, `CdkTokens`/`CdkParse`/`CdkGrammar`, `free_cdk_tokens` | Composes scanner, parser, AST, and IR modules; `calc_eval("2 + 3 * 4") == 14`; `calc_compile` returns caller-owned text. `calc_compile` parse failures return `Outcome::Err`; `calc_eval` blames on malformed input or invalid division. Temporary tokens, ASTs, and IR names are freed. Emission and diagnostic wording remain CDK-specific. |
 | [reflect](../../lib/std/reflect.fin) | `@type_name`, `@type_size`, `@field_count`, `@field_offset` -- the reflected intrinsics the module is the home of | Answers are CONSTANTS folded from the facts the compiler lowers with: `@type_size(Point{int, long})` is 16 with `y` at 8 and field count 2, pinned in the sample so a layout-model change breaks it; the argument is a type's name written where a type belongs (the `@implements` contextual reading), a payloadless enum answers as the int its tag is; `@field_offset` takes the field LITERAL (a runtime string cannot name a field at compile time), which is also why `fields_of` waits on a runtime string owner rather than shipping half-built; payloaded enums refuse all four (members, not fields -- the member ops come with `enum_from!`), interfaces refuse (a fat value with no owning layout), a type parameter folds at the call's turbofish on the C++ side and refuses on the stage side (one erased body); ADR 0057 |
 | [derive](../../lib/std/derive.fin) | `derive_hash(x)` -- the explicit derive the module is the home of | The call mixes a struct value's fields in declaration order with FNV-1a 64 (`h = 14695981039346656037`; per byte of each field's VALUE, least-significant first, `h = (h ^ byte) * 1099511628211` mod 2^64), so padding never enters and equal field values hash equal under any layout that keeps their order -- which is why the two backends answer the same number even though they lay objects out differently (C++ DataLayout-packed boxes, stage pointer-width field slots); integers ride their two's-complement bytes zero-extended (`int` 4, `long` 8, `bool`/`char` 1), float and double their IEEE bit patterns, a nested struct recurses, an empty struct stays the basis alone, a payloadless enum's tag mixes as the int it is; `Type` binds from the value argument (`derive_hash(p)` with `p` a Point needs no turbofish, the Phase B wrapper route); every kind the walk does not lower refuses naming the field and the kind -- string, array, pointer, nullable, interface, any, union, fn, payloaded enum, deeper than sixteen -- never silently skipping; ADR 0058 |
 | [ast](../../lib/std/ast.fin) | `ast_*()`, `node_kind_name`, `AstNode`, `make_*` makers, `free_ast` | Kind helpers, `make_literal_int`, and `free_ast` build and run; consumed by `finc/driver`, `finc/parser`, `finc/checker`, and `finc/codegen` |
@@ -56,14 +56,19 @@ executable. The examples below mark those boundaries.
 | [typesys](../../lib/std/typesys.fin) | `type_kind_*()`, `Type`, `make_primitive_type`, pointer/array/struct makers, `free_type` | `make_primitive_type(type_kind_int(), ...)` with `is_numeric` builds and runs; release with `free_type`; no `finc/` consumer yet |
 | [diag](../../lib/std/diag.fin) | `diag_*()`, `level_name`, `Diagnostic`, `DiagnosticBag`, `format_*`, `format_snippet`, `free_diag_str` | `level_name(diag_error()) == "error"` and `format_error` build and run; release formatted strings with `free_diag_str`; consumed by `finc/parser` and `finc/checker` |
 | [emitter](../../lib/std/emitter.fin) | `CEmitter`, `new_c_emitter`, `free_c_emitter`, `emit_*` | `new_c_emitter` with `emit_prologue` and `emit_fn_header` builds and runs; always build via `new_c_emitter` and release with `free_c_emitter`; no `finc/` consumer yet |
-| [ir](../../lib/std/ir.fin) | `ir_*()` opcodes, `ir_opcode_name`, `IrInstruction`, `IrBlock`, `IrFunction`, `make_ir_*`, `new_ir_function`, `free_ir_function` | Opcode helpers with `make_ir_const_int`/`make_ir_binop` build and run; no `finc/` consumer yet |
+| [ir](../../lib/std/ir.fin) | `ir_*()` opcodes, `ir_opcode_name`, `IrInstruction`, `IrBlock`, `IrFunction`, `make_ir_*`, `new_ir_function`, `free_ir_function` | Opcode helpers and instruction builders run. `fresh_temp` names are borrowed until `free_ir_function`, which releases names and block storage; caller-supplied instruction strings remain caller-owned. No `finc/` consumer yet. |
 | [argparse](../../lib/std/argparse.fin) | `FlagDef`, `OptionDef`, `ArgParser`, `new/free_arg_parser`, `add_flag`/`add_option`, `parse`, `get_flag`/`get_option`, positionals | `new_arg_parser` with `add_flag`, `parse`, and `get_flag` builds and runs; flag spelling is literal (`verbose`, not `--verbose`) and unmatched dash-args fail `parse`; release with `free_arg_parser` |
-| [fs](../../lib/std/fs.fin) | `file_exists`, `remove_file`, `file_size`, `read_to_string`, `write_string`, `append_string`, `free_file_content`, `copy_file`, `create_dir`, `remove_dir`, `rename_path`, `is_dir`, `is_file`, `mk_tmp_dir`, `mkdir_p`, `walk_dir` | Every declared call builds and runs (`Soundness_Fs` pins the tmpdir round trip and the missing-path shapes); `read_to_string` is nullable, denullify with `?`; missing files are routine (null / `-1` / empty walk), the deliberate contrast with networking's diagnostic ruling; release with `free_file_content` (reads), `free_str` (paths, `mk_tmp_dir`, walk entries -- `delete` the array); `mkdir_p` walks `substr` prefixes, and `walk_dir` copies each dirent through `memcpy` into a `[char]` buffer and reads the name at the Linux x86-64 glibc offsets (name at byte 19, `d_reclen` at 16..17) because the library has no pointer arithmetic; consumed by `finc/driver` and `finc/checker` |
-| [cli](../../lib/std/cli.fin) | `Arg`, `Command` (`create`/`arg`/`sub`), `Match` (`get`/`is_set`/`positional`), `free_match`, `parse_args()`, `get_env_or`, `exit_with` | The bundled sample parses, defaults, and dispatches a subcommand end to end; help and version print to stdout and `exit(0)` inside `parse_args`; unknown options and missing values answer `Err` naming the token; `parse_args()` takes no argv (it reads `/proc/self/cmdline`), Linux-only, 4 KiB cap; subcommand option scoping is v0-off (the root's option table parses all args); the issue's flat `[Command]` field refuses in codegen, so subs live in `[&Command]` (recorded in the module header) |
+| [fs](../../lib/std/fs.fin) | `file_exists`, `remove_file`, `file_size`, `read_to_string`, `write_string`, `append_string`, `free_file_content`, `copy_file`, `create_dir`, `remove_dir`, `rename_path`, `is_dir`, `is_file`, `mk_tmp_dir`, `mkdir_p`, `walk_dir` | `Soundness_Fs` runs the tmpdir round trip, distinct temporary directories, and missing-path behavior; `read_to_string` is nullable, denullify with `?`; missing files return null / `-1` / an empty walk. Release reads with `free_file_content`, paths and walk entries with `free_str`, and the walk array with `delete`. Directory records use target-selected POSIX layouts or Win32 directory APIs. Windows paths use the system code page, matching narrow C file I/O; UTF-8 and extended-length Windows paths are not promised. Consumed by `finc/driver` and `finc/checker` |
+| [cli](../../lib/std/cli.fin) | `Arg`, `Command`, `Match`, `parse`/`parse_args`, `free_match`, `free_parse_result`, `free_command` | `parse(args)` excludes argv0 and copies argument text. `parse_args()` reads the full native argument list on Linux, macOS, and Windows; empty arguments and -- are preserved. Tables grow with input. Free results with free_parse_result and registration tables with free_command; registered strings and child pointers remain caller-owned. Subcommands use the root option table; --name=value and grouped short options are not implemented |
 | [serde](../../lib/std/serde.fin) | `Encode`, `Decode` interfaces | The contract resolves through the import a tool writes and `Outcome<Self>` answers inside the interface body; runtime dispatch flows through json::std's free `decode_T` spelling because interface-method dispatch does not lower yet (derives beyond `derive_hash`, ADR 0058, wait on the R3 `==` decision -- reflect-derive-plan §6 records the state); the bundled sample pins the issue's own round trip and the refusal-is-`Err` rule |
 | [json](../../lib/std/json.fin) | `json_encode/decode_int/str/bool/float`, `json_encode/decode_int_array`, `json_encode/decode_intmap/strmap`, `json_escape`, `json_join2/3/4` | All scalar round-trips, the `[int]` pair, and the two prototype maps build and run (sorted key order pinned byte-exact in `Soundness_Json` and the bundled sample); refusals answer `Err` naming the kind; every returned string is fresh, release with `free_str`; v0 is int32 ints, ASCII-only `\u` escapes, no UTF-8 encoding, and the int-array decode caps at 64 elements (all recorded in the module header); the map decode paths answer `Outcome<HashMap<string, T>>` and build and run on the stage compilers too (the earlier stage-allowlist is gone, not pending) |
 | [btreemap](../../lib/std/btreemap.fin) | `BTreeMap` (`new_btree_map`, `len`, `insert`, `remove`, `find`, `key_at`, `value_at`, `free_btree_map`) | The ordered map: two parallel arrays kept sorted under the caller's `less <fn(K, K) -> bool>` comparator, so index order IS sorted order in every compiler at every opt level -- the determinism rule codegen iteration needs, and the reason nothing here is a hash; ordering is the caller's (the same function-field-not-bind reasoning HashMap's header records); `insert` answers true for a new key, false when it replaced; the stored words are the caller's and `free_btree_map` frees only the arrays; O(n) insert is honest v0 (this is spine search, not balancing); spell the instantiation on the receiver (`<BTreeMap<string, int>>`), an `<auto>` receiver is refused by the stage checkers (recorded in the module header) |
 | [intern](../../lib/std/intern.fin) | `Interner` (`new_interner`, `intern`, `resolve`, `size`, `free_interner`) | Same text, same id: a `[string]` sweep answered by strings::std `compare`, so equality is content, not a pointer word or a hash -- a `concat`-computed copy of a stored text lands on the stored id (the bundled sample pins it); ids are the array index, stable for the interner's lifetime (append-only); O(n) `intern` is honest v0, buckets are a stretch; `intern` stores its own `clone` (free the caller's string), `resolve` answers the interner's string, release everything with `free_interner` and never `free_str` a resolve result |
+
+`fs::std`'s `copy_file` preserves embedded NUL bytes and supports copying a file
+onto itself. It reads the source before opening the destination, so memory use
+is proportional to the source size. `read_to_string` returns null on an incomplete
+read; `copy_file` returns false on an incomplete write or failed close.
 
 Self-host relevance: `finc/driver` consumes `token`, `scanner`, `ast`, `printer`,
 `buffer`, `fs`, `process`, and `env`; `finc/parser` consumes `token`, `parse`,
@@ -168,12 +173,10 @@ fun main() <noret> {
 ```
 
 The implementation uses open addressing. Its default string hash and equality
-use pointer identity, unlike builtin prototype string keys. Reconstructed strings
-with equal bytes are not interchangeable keys. Supplying only a content hash does
-not repair pointer equality. `with_hasher(fn(any) -> int)` also depends on incomplete
-erased-call support.
-
-Growth can retain old storage; removed slots retain key/value storage.
+compare contents (ADR 0049), so reconstructed equal strings address the same key.
+`free_hashmap()` releases the table and its internal containers; it does not free
+allocations owned by keys or values. Shallow map copies alias storage, so choose
+one owner for cleanup.
 `from_prototype` stores each pair through `__set`, so `map!{...}` builds a
 populated map holding the written entries.
 
@@ -219,29 +222,35 @@ limits; the existence of a function does not add checked arithmetic to the langu
 ## Files, streams, and results
 
 `Stream` is an in-memory `[char]` buffer with `seek`, `tell`, `remaining`, `rewind`,
-`read`, `read_all`, `write`, `expand`, and `capacity` methods. `File` **is declared**
+`read`, `read_all`, `write`, `expand`, `capacity`, and `free_stream` methods.
+It owns the buffer passed to its constructor. `free_stream()` releases that
+buffer, resets the stream, and permits reuse. Copies share the buffer; assign
+one owner for cleanup. Invalid lengths and writes exceeding the input array blame.
+`File` is declared
 and exposes static `exists`, `size`, `read_all`, `write_text`, `append_text`,
 `remove`, and `open`. For example, `write_text(path: string, text: string, count: int)`
 requires the byte count; it does not infer it from the string.
 
-These file APIs are not a verified end-to-end path merely because their
-declarations are available: the `copy_file` import builds and runs, but check
-any other `File` call by building before relying on it. A direct C
-FFI operation is often the smallest executable path until those imports lower.
+`File` imports lower through the completed `Stream` declaration. File sizes that
+exceed the int-sized API return -1; `write_text` and `append_text` report buffered
+write and close failures. `read_all` measures and reads through one handle,
+preserves embedded NUL bytes, adds a final terminator, and blames on incomplete
+reads or lengths that leave no room for that terminator. `fs::std` supplies
+additional path and binary-copy APIs.
 
 `typing::std` declares `Result<T,E>` with `Ok`/`Err`; `stdio::std` declares
 `IOResult<T>`. Their implementation blocks contain methods including `unwrap`,
-`unwrap_or`, `expect`, `select`, `is_ok`, and `is_err`. The methods exist, but
-payload enum code generation is still missing. Use an explicit status and concrete
-data when recoverable errors must run today.
+`unwrap_or`, `expect`, `select`, `is_ok`, and `is_err`. Payload enum code generation is implemented, including generic instantiations.
+Check the chosen helper's behavior through an executable; declarations alone do
+not establish its error handling or ownership.
 
 ## Threads and channels
 
 `sync::std` is the one place the library puts concurrency: `Thread::spawn(body)`
-starts a real OS thread over `pthread_create` (the body is a `fn() => noret`
-passed as the start routine; state crosses by capture on the reference
-compiler, or through shared storage a caller arranges), and `join` closes the
-timing hole. A missed spawn blames rather than returning a broken handle.
+starts a real OS thread through pthreads or Windows `_beginthreadex`. A native
+entry adapter receives an explicit heap context containing the Fin callback;
+state crosses by capture on the reference compiler, or through shared storage
+on either compiler. `join` waits for completion and closes the native handle. A missed spawn blames rather than returning a broken handle.
 
 The bundled sample `tests/samples/stdlib/sync.fin` runs a worker thread and a
 bounded channel end to end: the worker sends through a module-level channel
@@ -257,8 +266,15 @@ pair; and `Channel<T>` is bounded and blocking (`send` answers `false` when
 full, `recv` waits). Boundaries worth knowing before designing around it:
 lambdas that capture are reference-compiler-only until the self-host stage
 gains upvalues; a thread that locks its own mutex waits forever -- no
-try-lock, no detection in v0; lock metadata is never destroyed; and there is
-no thread-safe `delete`.
+try-lock or deadlock detection; and there is no thread-safe `delete`.
+
+After all users have finished, call `free_mutex()` on an unlocked mutex or
+`free_channel()` on a channel with no waiting receivers. These release the
+native lock and internal buffers. Repeating cleanup on the same object is safe;
+later operations blame. Copies share storage, so choose one cleanup owner.
+Stored values remain caller-owned. A heap channel from `Channel::shared` also
+needs `delete` after `free_channel()`. Channels use bounded head/tail indices,
+so both enqueue and dequeue take constant time.
 
 ## Networking
 
@@ -269,7 +285,9 @@ backlog)`, accept with `accept`, and move bytes with `write`/`read`, both
 explicit byte counts like `File`'s. Failures `blame` and name the call:
 connection refused, cannot bind, cannot parse the address. `http_get` is the
 newcomer's demo of the whole surface: blocking HTTP/1.0 over raw sockets, no
-TLS, capped at 4096 bytes.
+TLS, capped at 4096 bytes. It releases its request and receive buffers;
+the returned response string belongs to the caller and can be released with
+`free_str` from `strings::std`.
 
 The bundled sample `tests/samples/stdlib/networking.fin` builds an ephemeral
 listener on loopback, dials it, sends four bytes, and echoes them back along
@@ -326,14 +344,19 @@ run-agreement harness; `tests/samples/stdlib/serde.fin` pins the contract.
 
 `rptr<T>` declares `get`, `set`, `alias`, `readonly_view`, `weak`, `own`, `borrow`,
 `giveback`, `release`, `refs`, and `borrows`. `get()` returns `&T`, not `T`.
-`wptr<T>` is non-owning. The library's checks cannot prevent dangling raw pointers,
-and a released handle can still contain pointers to freed counters. Do not read,
-release again, or inspect a weak handle after its counter storage has died.
+`wptr<T>` retains the counters without retaining the value. After the last strong
+release, `is_alive()` returns false and `get()` blames. Release each weak handle
+explicitly; the last weak release frees counters once no strong handles remain.
+Repeated release and guarded access through a released handle blame before reading
+freed storage. Raw pointer fields remain unchanged and bypass these guards.
 
-Treat these APIs as incomplete library work, not automatic memory safety.
-The language's ordinary destructor support does not imply that this library's
-ownership protocol is complete. For a small application, use explicit allocation,
-a clear owner, and one cleanup path.
+Construction creates a strong readonly `restrict` snapshot on the heap. Store it
+in a local pointer, release it, then delete that pointer; do the same for heap
+handles returned by `alias`, `own`, `borrow`, and `readonly_view`. Give back an
+active borrow before release. Ordinary copies share storage without increasing
+the count, so use `alias()` for an independently releasable strong handle.
+Destructors do not perform this cleanup, and concurrent access needs caller
+synchronization. See ADR 0039 for the full lifecycle.
 
 ## Write a language in a few hundred lines
 
@@ -373,10 +396,15 @@ Refuse shapes are `Outcome::Err` naming the parse stage -- `calc:
 expected an expression` for a dangling operator, `calc: expected ')'`
 for an unclosed paren, `calc: unexpected input after the expression`
 for junk on the tail -- because malformed source is a kit's routine
-input, never a blame. The v0 boundaries are in the module header: emit
+input. `calc_eval` returns an integer, so it blames on malformed input,
+division by zero, or signed division overflow. The remaining boundaries are in the module header: emit
 is cdk's own transcription (emitter::std's CEmitter stops at
 prologue/fn_header, the stretch the issue marks), errors are cdk
-wordings rather than diag::std's jsonl bag, and `fresh_temp`'s name
-strings are demo-scale process-end leaks. The bundled sample
+wordings rather than diag::std's jsonl bag. `calc_eval` and `calc_compile`
+release their temporary tokens, ASTs, and IR storage. A successful
+`calc_compile` result is caller-owned text; release it with `free`.
+Callers using `cdk_lower` directly release the returned function with
+`free_ir_function`; names returned by `fresh_temp` remain valid until then.
+The bundled sample
 `tests/samples/stdlib/cdk.fin` pins the eval facts, the exact emitted
 text, and the Err wordings on all three compilers.

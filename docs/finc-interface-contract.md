@@ -1,7 +1,7 @@
 # The `finc` interface, contract 3
 
 This is the command-line interface used by `finn` and other tools. It describes
-the current compiler, `0.4.0 (contract 3)`. ADR 0009 records the contract's design;
+the 1.0 compiler, `1.0.0 (contract 3)`. ADR 0009 records the contract's design;
 `tests/test_cli.cpp` and `tests/test_codegen.cpp` check its behavior.
 
 `finc file.fin` checks source. Add `-o app` to build an executable or `-c` to emit
@@ -11,7 +11,7 @@ an object. Code generation requires a build with the LLVM backend enabled.
 
 ```
 $ finc --version
-finc 0.4.0 (contract 3)
+finc 1.0.0 (contract 3)
 ```
 
 Format: `finc <semver> (contract <int>)`, one line, on **stdout**, exit `0`. The two numbers move

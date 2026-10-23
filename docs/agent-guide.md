@@ -1,7 +1,7 @@
 # Writing working Fin programs
 
 Give this file to an AI agent working on a Fin application. It describes the
-compiler in this repository, version 0.4.0. Use `finc --version` to identify your
+compiler in this repository, targeting version 1.0.0. Use `finc --version` to identify your
 binary; a version number alone does not identify the source revision of a local
 build. Fin syntax resembles several languages but does not follow all their rules.
 
@@ -86,16 +86,17 @@ Keep that order when translating code from another language.
 
 ## Behavior that changes application design
 
-- **Strings:** `string` holds a pointer to NUL-terminated bytes. General `==`
-  compares string addresses. `strings::std`'s `equals` compares bytes and
-  builds, as does a C `strcmp` declaration. `string` indexing and
+- **Strings:** `string` holds a pointer to NUL-terminated bytes. `==` and `!=`
+  compare contents (ADR 0049); `== null` tests absence. `strings::std`'s
+  `equals` also compares bytes. `string` indexing and
   `.length` are not the same operations as array indexing and length.
 - **Memory:** `[T]`, pointers, and interface references can share storage. Copying
   an array handle does not copy its elements. Keep the owner alive and free an
   allocation once. Value structs with destructors clean up at scope exit; copying
   an owning struct can therefore double-free its resources. There is no borrow checker.
-- **Generics:** concrete unbounded generics produce specialized code. Erasure
-  through `any`, `object`, or `Castable` is not a general runtime container mechanism.
+- **Generics:** concrete unbounded generics produce specialized code. `any`
+  boxes values and checks their exact type when unboxing; this does not imply
+  general dynamic dispatch through `object` or `Castable`.
   Import the exact type or interface name an API uses; `Any` and `any` differ.
 - **Errors:** `blame bool, "message"` aborts on failure. Runtime exception handling
   is incomplete: a `catch` does not recover from `blame`. Use explicit status values
@@ -114,12 +115,13 @@ Keep that order when translating code from another language.
 
 | Feature | Current boundary / application pattern |
 | --- | --- |
-| `match`, async/await | No language implementation. Use explicit branches and synchronous calls. |
+| `match` | Dispatches over enum members, nullable presence, and integer/string/bool constants. Arms must be exhaustive; constant matches require a wildcard. Guards are not implemented (ADR 0050). |
+| async/await | No language implementation. Use synchronous calls. |
 | Capturing lambdas | A lambda may read an enclosing local; nested functions cannot. The self-host stage refuses captures, so pass state as an explicit parameter when a stage-compatible program matters. |
 | Default arguments | Frontend accepts omitted trailing defaults; supply arguments explicitly for executable calls. |
-| Payload or generic enums | A plain payload enum builds as a tagged union (ADR 0041); a generic one (`Result<T,E>`) is refused in codegen. |
-| `any` / `object` values | Opaque storage is not working boxing or dynamic dispatch. Prefer concrete types. |
-| General nullable values | Parse/type-check support is broader than runtime support. Check the exact form before using it. |
+| Payload or generic enums | Payload enums lower as tagged unions, including concrete generic instantiations (ADR 0041). Payloads can cross Fin function calls. |
+| `any` / `object` values | `any` supports value boxing, exact-type unboxing, and equality. A mismatched unbox blames; `object` is not a promise of general dynamic dispatch. |
+| Nullable values | Value types use payload/presence pairs; pointers and strings use null, and functions use a nullable closure pair (ADR 0040 amendment NL-A). Denullifying absence blames. |
 | Dynamic array indexing | Runtime bounds checks are not automatic. Check the index or use a library method that asserts bounds. |
 | Bitwise `&`, `\|`, `^` | Binary expression forms lower on int operands; `&` still takes an address and `\|` forms a constraint set. |
 | `format!` | Works for literal format strings with `{}` and scalar arguments; no aggregate formatting or format specifiers. Returned storage needs ownership. |

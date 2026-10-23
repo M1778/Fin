@@ -2,13 +2,14 @@
 
 ## Supported Versions
 
-Fin (`finc`) is pre-1.0 and under active development. Security fixes are
-provided on the current release line only.
+Security fixes for Fin (`finc`) are provided on the current release line only.
+This tree is the 1.0.0 release candidate; release validation is tracked in
+`docs/HANDOFF.md`.
 
 | Version | Supported |
 | ------- | --------- |
-| 0.4.x (current, `master`) | Yes |
-| < 0.4.0 | No - please upgrade and re-test |
+| 1.0.x | Yes |
+| < 1.0.0 | Upgrade and re-test when 1.0.0 is released |
 
 There are no LTS branches. If you are pinned to an older tree, the fix
 will still land on `master` first; backports are best-effort at the

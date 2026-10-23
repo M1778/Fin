@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <regex>
 #include <string>
 #include <vector>
 
@@ -216,10 +218,6 @@ std::vector<CorpusCase> corpusCases() {
     if (fs::exists(root)) {
         for (const auto& e : fs::directory_iterator(root)) {
             if (e.is_directory()) {
-                // generic_string (the Corpus.cpp convention): a case dir that
-                // keeps native separators on Windows gets JSON-escaped into
-                // `\\` in the output, and the @DIR@ substitution below would
-                // never match the needle. One separator family, both sides.
                 out.push_back({e.path().generic_string(),
                                e.path().filename().string()});
             }
@@ -239,7 +237,47 @@ std::string readFileText(const fs::path& p) {
     return ss.str();
 }
 
+std::string normalizeCorpusOutput(const std::string& output, const std::string& dir) {
+    const std::string separator = R"((/|\\\\))";
+    std::string pattern;
+    for (size_t i = 0; i < dir.size(); ++i) {
+        const unsigned char c = dir[i];
+        if (c == '/' || c == '\\') {
+            pattern += separator;
+        } else if (i == 0 && dir.size() > 1 && dir[1] == ':' && std::isalpha(c)) {
+            pattern += '[';
+            pattern += static_cast<char>(std::tolower(c));
+            pattern += static_cast<char>(std::toupper(c));
+            pattern += ']';
+        } else {
+            if (std::string(R"(\.^$|()[]{}*+?)").find(c) != std::string::npos)
+                pattern += '\\';
+            pattern += c;
+        }
+    }
+    return std::regex_replace(replaceAll(output, "\r", ""),
+                              std::regex("(" + pattern + "|@DIR@)" + separator),
+                              "@DIR@/");
+}
+
 } // namespace
+
+TEST(ContractCorpus, CasePathsReplayAcrossPlatformSpellings) {
+    const std::string expected =
+        R"({"file":"@DIR@/input.fin","message":"could not read file: @DIR@/absent.fin","help":"keep \\n and \"quotes\"; D:/other\\file"})" "\n";
+    const std::vector<std::pair<std::string, std::string>> spellings = {
+        {"/a/Fin/tests/case", "/a/Fin/tests/case/"},
+        {"D:/a/Fin/tests/case", R"(D:/a/Fin/tests\\case/)"},
+        {R"(D:\a\Fin\tests\case)", R"(d:/a\\Fin/tests\\case\\)"},
+        {"d:/a/Fin/tests/case", R"(D:\\a\\Fin\\tests\\case\\)"},
+        {"D:/a/Fin/tests/case", R"(@DIR@\\)"},
+    };
+    for (const auto& [dir, prefix] : spellings) {
+        SCOPED_TRACE(prefix);
+        const std::string actual = replaceAll(expected, "@DIR@/", prefix);
+        EXPECT_EQ(normalizeCorpusOutput(actual, dir), expected);
+    }
+}
 
 TEST(ContractCorpus, EveryCaseReplaysAgainstTheRealCompiler) {
     auto cases = corpusCases();
@@ -257,9 +295,9 @@ TEST(ContractCorpus, EveryCaseReplaysAgainstTheRealCompiler) {
         SCOPED_TRACE(c.name);
         auto r = runFinc(args);
         EXPECT_EQ(r.out, "") << "stdout is reserved";
-        const std::string actual = replaceAll(replaceAll(r.err, "\r", ""), c.dir, "@DIR@");
+        const std::string actual = normalizeCorpusOutput(r.err, c.dir);
         const std::string expected =
-            replaceAll(readFileText(dir / "expected.jsonl"), "\r", "");
+            normalizeCorpusOutput(readFileText(dir / "expected.jsonl"), c.dir);
         EXPECT_EQ(actual, expected)
             << c.name << " diverged from the corpus. If only the message text moved,"
             << " regenerate with tests/tools/contract_corpus_regen.sh; if the schema"

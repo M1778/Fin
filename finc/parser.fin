@@ -848,7 +848,9 @@ pub struct Parser {
                 }
                 delete chars;
             }
-            return make_literal_int(c_val, cur.line, cur.col);
+            let character <&AstNode> = make_literal_int(c_val, cur.line, cur.col);
+            character.type_annotation = "char";
+            return character;
         }
 
         // Null literal
@@ -964,6 +966,7 @@ pub struct Parser {
                 let alloc_node <&AstNode> = new AstNode{};
                 alloc_node.kind = ast_call_expr();
                 alloc_node.name = "__fin_struct_init";
+                alloc_node.int_val = 1;
                 alloc_node.type_annotation = st_tok.text;
                 alloc_node.left = f_head;
                 alloc_node.line = cur.line;
@@ -1114,6 +1117,7 @@ pub struct Parser {
                     let alloc_node <&AstNode> = new AstNode{};
                     alloc_node.kind = ast_call_expr();
                     alloc_node.name = "__fin_struct_init";
+                    alloc_node.int_val = 1;
                     alloc_node.type_annotation = type_name;
                     alloc_node.left = f_head;
                     alloc_node.line = cur.line;
@@ -3213,25 +3217,14 @@ pub struct Parser {
             }
             let elem_tok <Token> = self.stream.advance();
             self.expect(tok_rbracket(), "expected ']' in array parameter type");
-            if (is_ptr) {
-                let l <int> = cast<int>(p_strlen(elem_tok.text));
-                let b <Buffer> = new_buffer(l + 4);
-                b.write_string("[&");
-                b.write_string(elem_tok.text);
-                b.write_char(']');
-                let res <string> = b.to_string();
-                free_buffer(b);
-                return res;
-            }
-            if (p_str_eq(elem_tok.text, "int")) { return "int*"; }
-            if (p_str_eq(elem_tok.text, "char")) { return "char*"; }
-            // `[string]` keeps its brackets so `main(args: [string])` is
-            // distinguishable from `&string` (which is `string*`): the
-            // argv surface is `[string]` only, never a C pointer shape.
-            if (p_str_eq(elem_tok.text, "string")) { return "[string]"; }
             let l <int> = cast<int>(p_strlen(elem_tok.text));
-            let res <string> = p_calloc(cast<ulong>(l + 2), cast<ulong>(1));
-            p_snprintf(res, cast<ulong>(l + 2), "%s*", elem_tok.text);
+            let b <Buffer> = new_buffer(l + 4);
+            b.write_char('[');
+            if (is_ptr) { b.write_char('&'); }
+            b.write_string(elem_tok.text);
+            b.write_char(']');
+            let res <string> = b.to_string();
+            free_buffer(b);
             return res;
         }
         if (self.stream.check(tok_lt()) || self.stream.check(tok_lbrace())) {
