@@ -70,7 +70,9 @@ std::vector<std::string> defaultLinkLibs() {
     if (!keg.empty()) return {"-L" + keg, "-lLLVM", "-lm"};
     return {"-lLLVM", "-lm"};
 #elif defined(_WIN32)
-    return {"ws2_32.lib"};
+    // -l asks clang to pass the library name to the native linker, which
+    // searches SDK LIB paths. A bare ws2_32.lib is a local input filename.
+    return {"-lws2_32"};
 #else
     return {"-Wl,--as-needed", llvmLib, "-lm"};
 #endif

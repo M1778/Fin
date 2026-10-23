@@ -61,6 +61,15 @@ listed. More recent successful CI runs belong to PR/dispatch revisions
 `c259e5a` (run 39795608686) and `9852289` (39741770240), not this uncommitted
 candidate. They are not evidence that the candidate's six native lanes passed.
 
+**Candidate CI follow-up (2026-10-24):** `cc7f166` is pushed only to
+`issue-101-asan-type-leaks`; run 40026847877 passed Linux x86_64/arm64 and macOS
+arm64, while both Windows lanes failed. Logs identified the bare `ws2_32.lib`
+linker input and `sync.fin`'s unsupported `#c_ifndef` cleanup guard. The follow-up
+uses `-lws2_32` and supported `#c_ifdef`/`#c_else`, with regressions. Its local
+selector/callback/sync gate passed 27 tests; docs passed 74 examples. Corrected
+native CI is required before using candidate artifacts as six-platform proof.
+The initial macOS x86_64 and sanitizer jobs were still running at this update.
+
 **Release:** remote tag **`v0.4.0` already exists** at **`14547b4`**. Its release run
 **39419160854** failed on musl, both Windows platforms, and both macOS platforms;
 publish was skipped. `gh release list` returned no releases. The earlier handoff's

@@ -348,7 +348,9 @@ fun init_lock() <[long]> {
 
 fun free_lock(m: [long]) <noret> {
     if (&m[0] == null) { return; }
-    #c_ifndef FIN_TARGET_WINDOWS
+    #c_ifdef FIN_TARGET_WINDOWS
+    // SRW locks have no destroy operation; only their buffer is released.
+    #c_else
     blame sync_mutex_destroy(&m[0]) == 0, "cannot destroy a mutex";
     #c_endif
     delete m;

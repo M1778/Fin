@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -366,6 +367,20 @@ TEST(LinkCommand, FinLdflagsReplacesTheDefaultLibraries) {
     const std::vector<std::string> expected{"cc", "a.o", "-o",  "a.out",
                                             "-L/opt/custom", "-lcustom"};
     EXPECT_EQ(fin::linkCommand({"a.o"}, "a.out"), expected);
+}
+#endif
+
+#ifdef _WIN32
+TEST(LinkCommand, WindowsSocketLibraryUsesTheDriverSearchOption) {
+    const char* old = std::getenv("FIN_LDFLAGS");
+    const bool existed = old != nullptr;
+    const std::string saved = old ? old : "";
+    ASSERT_EQ(_putenv_s("FIN_LDFLAGS", ""), 0);
+    const auto command = fin::linkCommand({"a.o"}, "a.exe");
+    EXPECT_NE(std::find(command.begin(), command.end(), "-lws2_32"), command.end());
+    EXPECT_EQ(std::find(command.begin(), command.end(), "ws2_32.lib"), command.end())
+        << "a bare .lib filename is resolved as an input file, not through SDK LIB paths";
+    EXPECT_EQ(_putenv_s("FIN_LDFLAGS", existed ? saved.c_str() : ""), 0);
 }
 #endif
 

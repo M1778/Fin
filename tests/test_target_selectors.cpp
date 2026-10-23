@@ -205,3 +205,17 @@ TEST(TargetSelectors, AnImportedModuleSelectsTheSameBranchAsItsImporter) {
     EXPECT_EQ(text, std::to_string(expectedOs) + " " + std::to_string(expectedArch) + "\n")
         << "the imported module selected a different branch than the host";
 }
+
+TEST(TargetSelectors, WindowsSyncCleanupDoesNotRequireAPosixDestructor) {
+    const fs::path source = fs::path(testsDir()).parent_path() / "lib/std/sync.fin";
+    std::ifstream file(source);
+    ASSERT_TRUE(file.good());
+    const std::string contents((std::istreambuf_iterator<char>(file)),
+                               std::istreambuf_iterator<char>());
+    fin::Preprocessor pp;
+    const auto windows = pp.process("#cdef FIN_TARGET_WINDOWS\n" + contents);
+    EXPECT_EQ(windows.find("sync_mutex_destroy"), std::string::npos)
+        << "SRW locks need no pthread_mutex_destroy declaration or call";
+    EXPECT_NE(windows.find("delete m;"), std::string::npos)
+        << "the lock buffer must still be released";
+}
