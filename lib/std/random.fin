@@ -25,18 +25,35 @@ pub fun seed_now() <noret> {
     c_srand(cast<uint>(t));
 }
 
+// Export the C function directly: a Fin wrapper named rand would define
+// the same symbol that c_rand imports and collide with it.
 #[export]
-pub fun rand() <int> {
-    return c_rand();
+#[llvm_name="rand"]
+@define rand() <int>;
+
+// C rand supplies at least 15 bits on the supported runtimes: MSVC uses
+// RAND_MAX=32767, while the POSIX runtimes use 2147483647. Their domains
+// are multiples of 32768 and 4, so these digits add no modulo bias. Three
+// draws cover every 32-bit word even on Windows; one draw cannot do that.
+priv fun random_word() <long> {
+    let high <long> = cast<long>(c_rand() % 32768);
+    let middle <long> = cast<long>(c_rand() % 32768);
+    let low <long> = cast<long>(c_rand() % 4);
+    return high * 131072 + middle * 4 + low;
 }
 
 #[export]
 pub fun random_int(min: int, max: int) <int> {
     if (min >= max) { return min; }
-    let r <int> = c_rand();
-    if (r < 0) { r = -r; }
-    let range <int> = (max - min) + 1;
-    return min + (r % range);
+    // Widen before subtracting: the inclusive full-int span is 2^32,
+    // which is zero in int arithmetic (ADR 0054). Reject the incomplete
+    // final bucket rather than biasing the result with a plain modulo.
+    let range <long> = cast<long>(max) - cast<long>(min) + cast<long>(1);
+    let domain <long> = 4294967296;
+    let limit <long> = domain - (domain % range);
+    let word <long> = random_word();
+    while (word >= limit) { word = random_word(); }
+    return cast<int>(cast<long>(min) + (word % range));
 }
 
 #[export]

@@ -31,6 +31,15 @@ Bare unqualified names in the macro body are rejected to prevent accidental capt
 Quotes currently contain one expression. Arbitrary statement-generating macros
 and the larger compiler-event design are separate capabilities.
 
+Macro names are identifiers, not reserved statement keywords. `blame !(value)`
+and `return !(value)` use ordinary unary negation; parentheses after `!` do not
+turn those keywords into macro names. Genuine `name!(...)` calls still expand,
+and unknown identifier macro names still report `Undefined macro`. Whitespace,
+line comments, and nested block comments may separate the name from `!` and `!`
+from its opening delimiter, including dotted calls and bracket/braced arguments.
+Comment and string contents are not expanded; consumed comment newlines preserve
+following diagnostic line numbers.
+
 ## Bracket-shaped arguments and imports
 
 `macro![a, b]` passes one prototype with integer keys; `macro!{"key" => value}`

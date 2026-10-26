@@ -169,9 +169,23 @@ fun main() <noret> {
 ```
 
 Lookup uses keys; `.0`/`.1` use positions to select the two arrays. String keys
-compare bytes, unlike general string `==`. `get`/indexing a missing key aborts;
-use `contains` first when absence is expected. `try_get` needs nullable runtime
-support and is currently refused. `delete prototype[key]` removes an entry.
+compare contents, as ordinary string `==` does (ADR 0049). `get`/indexing a missing
+key aborts; use `contains` first when absence is expected. `try_get` needs nullable
+runtime support and is currently refused. `delete &prototype[key]` removes an entry.
+
+The self-hosted stage currently supports integer and string keys for subscripts,
+stores, `delete &p[key]`, and `p.rm(key)`, including mixed integer/string entries.
+Per-entry key tags guard content comparisons: separately allocated equal strings
+match, integer words are not treated as text pointers, and null keys do not trigger
+byte reads. Erasure updates both half-lengths and preserves surviving entries.
+Incompatible or erased key-projection writes are explicitly refused rather than
+guessed. Concrete key halves support local aliases initialized from a projection
+or another such alias; deleting the owning key half also releases its tag buffer.
+Passing, casting, or returning key buffers is refused because those paths do not
+preserve the stage's buffer layout and tag metadata.
+A borrowed half does not survive buffer growth or deletion; raw-pointer mutation
+is not borrow-checked. This does not establish stage support for `get`, `contains`,
+`remove`, or every key/value type supported by the reference compiler.
 
 Current lookup scans entries. It is not a promise of hash-table performance or a
 stable ordering contract. A nominal `HashMap` is a separate library type; conversion

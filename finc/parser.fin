@@ -372,6 +372,7 @@ pub struct Parser {
             let t <Token> = self.stream.advance();
             return true;
         }
+        if (self.consume_error_token(expected_desc)) { return false; }
         let cur <Token> = self.stream.peek();
         if (kind == tok_semicolon()) {
             // Missing `;` is only noticed at the next token (usually `}`

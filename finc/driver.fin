@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // finc/driver.fin: Compiler driver pipeline and command-line execution.
 
-import { Token, tok_eof, token_name } from token::std;
+import { Token, tok_eof, tok_ident, token_name, lookup_keyword } from token::std;
 import { Scanner, new_scanner, free_scanner } from scanner::std;
 import { AstNode, free_ast, ast_fun_decl } from ast::std;
 import { format_stmt } from printer::std;
@@ -1388,15 +1388,24 @@ priv struct Mx {
         while (!self.mx_eof() && self.mx_peek() != '\n') { self.mx_advance(); }
       }
 
-      fun mx_skip_block_comment(self: &Self) <noret> {
-        while (!self.mx_eof()) {
-            if (self.mx_peek() == '*' && self.mx_peek_at(1) == '/') {
-                self.mx_advance();
-                self.mx_advance();
-                break;
-            }
-            self.mx_advance();
+      fun mx_block_comment_end(self: &Self, start: int) <int> {
+        let p <int> = start + 2;
+        let depth <int> = 1;
+        while (p < self.n && depth > 0) {
+            if (p + 1 < self.n && self.bytes[p] == '/' && self.bytes[p + 1] == '*') {
+                depth++; p = p + 2;
+            } else if (p + 1 < self.n && self.bytes[p] == '*' && self.bytes[p + 1] == '/') {
+                depth--; p = p + 2;
+            } else { p++; }
         }
+        if (depth > 0) { return -1; }
+        return p;
+      }
+
+      fun mx_skip_block_comment(self: &Self) <noret> {
+        let end <int> = self.mx_block_comment_end(self.pos - 2);
+        if (end < 0) { end = self.n; }
+        while (self.pos < end) { self.mx_advance(); }
       }
 
       fun mx_skip_ws_comments(self: &Self) <noret> {
@@ -2098,9 +2107,8 @@ priv struct Mx {
                 self.mx_copy_to(e);
             }
             else if (c == '/' && self.mx_peek_at(1) == '*') {
-                let e2 <int> = self.pos + 2;
-                while (e2 + 1 < self.n && !(self.bytes[e2] == '*' && self.bytes[e2 + 1] == '/')) { e2++; }
-                if (e2 + 1 < self.n) { e2 = e2 + 2; } else { e2 = self.n; }
+                let e2 <int> = self.mx_block_comment_end(self.pos);
+                if (e2 < 0) { e2 = self.n; }
                 self.mx_copy_to(e2);
             }
             else if (c == '"' || c == '\'') {
@@ -2210,6 +2218,26 @@ priv struct Mx {
         }
       }
 
+      // Look ahead without changing the cursor/line: expanded invocations
+      // account for the consumed newlines at their existing padding seam.
+      // An unterminated comment stays in the source for scanner diagnostics.
+      fun mx_trivia_end(self: &Self, start: int) <int> {
+        let p <int> = start;
+        while (p < self.n) {
+            let c <char> = self.bytes[p];
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { p++; }
+            else if (c == '/' && p + 1 < self.n && self.bytes[p + 1] == '/') {
+                p = p + 2;
+                while (p < self.n && self.bytes[p] != '\n' && self.bytes[p] != '\r') { p++; }
+            } else if (c == '/' && p + 1 < self.n && self.bytes[p + 1] == '*') {
+                let end <int> = self.mx_block_comment_end(p);
+                if (end < 0) { return p; }
+                p = end;
+            } else { break; }
+        }
+        return p;
+      }
+
       fun mx_try_invocation(self: &Self) <bool> {
         let start <int> = self.pos;
         let start_line <int> = self.line;
@@ -2220,19 +2248,17 @@ priv struct Mx {
             while (p < self.n && mx_is_ident_char(self.bytes[p])) { p++; }
         }
         let name <string> = from_chars(self.bytes, start, p - start);
-        // `operator` is a keyword, never a macro name: `pub operator !() <T>;`
-        // declares a negation operator. The C++ grammar builds a macro call
-        // only from an expression, and a bare `operator` is not one (an
-        // `operator!(x)` in expression position is a syntax error there).
-        if (drv_str_eq(name, "operator")) {
+        // Reserved tokens are not identifier macro names. In particular,
+        // `blame !(value)` and `return !(value)` begin a statement followed
+        // by unary negation, while `operator !()` declares an operator.
+        // Use the scanner's keyword table rather than a second word list.
+        if (lookup_keyword(name) != tok_ident()) {
             self.mx_copy_to(p);
             return true;
         }
-        let j <int> = p;
-        while (j < self.n && (self.bytes[j] == ' ' || self.bytes[j] == '\t' || self.bytes[j] == '\r' || self.bytes[j] == '\n')) { j++; }
+        let j <int> = self.mx_trivia_end(p);
         if (j < self.n && self.bytes[j] == '!' && (j + 1 >= self.n || self.bytes[j + 1] != '=')) {
-            let k <int> = j + 1;
-            while (k < self.n && (self.bytes[k] == ' ' || self.bytes[k] == '\t' || self.bytes[k] == '\r' || self.bytes[k] == '\n')) { k++; }
+            let k <int> = self.mx_trivia_end(j + 1);
             if (k < self.n && (self.bytes[k] == '(' || self.bytes[k] == '[' || self.bytes[k] == '{')) {
                 return self.mx_expand_invocation(start, start_line, name, k, self.bytes[k]);
             }

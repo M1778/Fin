@@ -3,6 +3,10 @@
 //
 // Matches C++'s `<deque>`, `<queue>`, and `<stack>`, and Python's `collections.deque`.
 // Implemented via a dynamic circular buffer with amortized O(1) push/pop at both ends.
+// clear() retains capacity; free_deque/free_queue/free_stack release the
+// backing buffer, reset to empty, and allow lazy reuse. Disposal is explicit
+// and idempotent for one owner: copies share the buffer, so do not free both.
+// Pointer/string element payloads remain caller-owned; no destructor is added.
 
 namespace std {
 
@@ -129,6 +133,16 @@ pub struct Deque<T> {
         self.tail = 0;
         self.filled = 0;
       }
+
+      fun free_deque(self: &Self) <noret> {
+        if (self._arr != null) { delete self._arr; }
+        let empty <[T]>;
+        self._arr = empty;
+        self.head = 0;
+        self.tail = 0;
+        self.filled = 0;
+        self.cap = 0;
+      }
 }
 
 #[export]
@@ -160,6 +174,10 @@ pub struct Queue<T> {
       fun clear(self: &Self) <noret> {
         self.inner.clear();
       }
+
+      fun free_queue(self: &Self) <noret> {
+        self.inner.free_deque();
+      }
 }
 
 #[export]
@@ -190,6 +208,10 @@ pub struct Stack<T> {
 
       fun clear(self: &Self) <noret> {
         self.inner.clear();
+      }
+
+      fun free_stack(self: &Self) <noret> {
+        self.inner.free_deque();
       }
 }
 

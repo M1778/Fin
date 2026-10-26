@@ -2384,3 +2384,432 @@ TEST(Soundness_BundledStdlib, EveryModuleChecksCleanStandalone) {
     }
     EXPECT_TRUE(sawAny) << "no .fin files under " << libDir.string();
 }
+
+TEST(Soundness_Random, RandBuildsAndRepeatsTheSeededSequence) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    const std::string source = R"FIN(
+import { seed, rand, random_int, random_float, random_bool } from random::std;
+fun main() <noret> {
+    seed(cast<uint>(42));
+    let first <int> = rand();
+    let second <int> = rand();
+    blame first >= 0 && second >= 0;
+    seed(cast<uint>(42));
+    blame rand() == first && rand() == second;
+    for (let i <int> = 0; i < 256; i++) {
+        let number <int> = random_int(-7, 11);
+        blame number >= -7 && number <= 11;
+        let fraction <float> = random_float();
+        blame fraction >= 0.0 && fraction < 1.0;
+        random_bool();
+    }
+    printf("seeded random ok\n");
+}
+)FIN";
+    for (const std::string level : {"-O0", "-O2"}) {
+        SCOPED_TRACE(level);
+        EXPECT_EQ(buildAndRun(source, {level}), "seeded random ok\n");
+    }
+}
+
+TEST(Soundness_BTreeMap, MissingComparatorBlamesInsteadOfCallingNull) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    for (const std::string operation : {"insert(2, 7)", "find(1)", "remove(1)"}) {
+        SCOPED_TRACE(operation);
+        const std::string source =
+            "import { BTreeMap } from btreemap::std;\n"
+            "fun main() <noret> {\n"
+            "    let values <BTreeMap<int, int>> = BTreeMap::<int, int>{};\n"
+            "    values.insert(1, 5);\n"
+            "    values." + operation + ";\n}\n";
+        for (const std::string level : {"-O0", "-O2"}) {
+            SCOPED_TRACE(level);
+            const std::string result = buildAndRun(source, {level});
+            EXPECT_EQ(result.find("program exited non-zero"), 0u) << result;
+            EXPECT_NE(result.find("BTreeMap needs a comparator; use new_btree_map"),
+                      std::string::npos) << result;
+        }
+    }
+}
+
+TEST(Soundness_BTreeMap, ComparatorConstructionKeepsOrderingAndCleanup) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    const std::string source = R"FIN(
+import { BTreeMap } from btreemap::std;
+fun main() <noret> {
+    let values <BTreeMap<int, int>> = BTreeMap::<int, int>::new_btree_map(
+        (a: int, b: int) <bool> => a < b);
+    blame values.insert(3, 30);
+    blame values.insert(1, 10);
+    blame values.insert(2, 20);
+    blame !values.insert(2, 21);
+    blame values.key_at(0) == 1 && values.key_at(2) == 3;
+    blame values.find(2) == 1 && values.value_at(1) == 21;
+    blame values.remove(2) && values.find(2) == -1;
+    values.free_btree_map();
+    printf("ordered map ok\n");
+}
+)FIN";
+    for (const std::string level : {"-O0", "-O2"}) {
+        SCOPED_TRACE(level);
+        EXPECT_EQ(buildAndRun(source, {level}), "ordered map ok\n");
+    }
+}
+
+TEST(Soundness_Random, InclusiveRangesCoverTheFullIntDomainWithoutOverflow) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    const std::string source = R"FIN(
+import { seed, random_int } from random::std;
+fun main() <noret> {
+    seed(cast<uint>(42));
+    blame random_int(-2147483648, -2147483648) == -2147483648;
+    blame random_int(2147483647, 2147483647) == 2147483647;
+    blame random_int(7, -7) == 7;
+    let first <int> = random_int(-2147483648, 2147483647);
+    seed(cast<uint>(42));
+    blame random_int(-2147483648, 2147483647) == first;
+    let negative <bool> = false;
+    let positive <bool> = false;
+    let high <bool> = false;
+    for (let i <int> = 0; i < 1024; i++) {
+        let whole <int> = random_int(-2147483648, 2147483647);
+        if (whole < 0) { negative = true; }
+        if (whole > 0) { positive = true; }
+        let crossing <int> = random_int(-2147483648, 0);
+        blame crossing <= 0;
+        let upper <int> = random_int(0, 2147483647);
+        blame upper >= 0;
+        if (upper > 1073741823) { high = true; }
+        let bottom <int> = random_int(-2147483648, -2147483647);
+        blame bottom == -2147483648 || bottom == -2147483647;
+        let top <int> = random_int(2147483646, 2147483647);
+        blame top == 2147483646 || top == 2147483647;
+        let ordinary <int> = random_int(-7, 11);
+        blame ordinary >= -7 && ordinary <= 11;
+    }
+    blame negative && positive && high;
+    printf("random ranges ok\n");
+}
+)FIN";
+    for (const std::string level : {"-O0", "-O2"}) {
+        SCOPED_TRACE(level);
+        EXPECT_EQ(buildAndRun(source, {level}), "random ranges ok\n");
+    }
+}
+
+TEST(Soundness_Random, FifteenBitRuntimeCoversEndpointsAndRejectsIncompleteBuckets) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    const fs::path dir = uniqueTempPath("fin_random_runtime");
+    fs::create_directories(dir);
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { std::error_code ec; fs::remove_all(path, ec); }
+    } cleanup{dir};
+    const fs::path input = dir / "main.fin";
+    const fs::path native = dir / "random.c";
+    const fs::path object = dir / "main.o";
+    const fs::path executable = dir / "program.exe";
+    const fs::path output = dir / "output.txt";
+    const fs::path error = dir / "error.txt";
+    {
+        std::ofstream file(input);
+        file << R"FIN(
+import { random_int } from random::std;
+@define fin_random_draws() <int>;
+fun main() <noret> {
+    blame random_int(-2147483648, 2147483647) == -2147483648;
+    blame random_int(-2147483648, 2147483647) == 2147483647;
+    blame random_int(0, 2147483647) == 2147483647;
+    blame random_int(0, 2) == 2;
+    blame fin_random_draws() == 15;
+    blame random_int(2147483647, 2147483647) == 2147483647;
+    blame random_int(7, -7) == 7;
+    blame fin_random_draws() == 15;
+    printf("random endpoints and rejection ok\n");
+}
+)FIN";
+    }
+    {
+        std::ofstream file(native);
+        // Each source value fits the Windows C runtime's RAND_MAX. The
+        // fourth word is 2^32-1: it belongs to the rejected tail for span 3.
+        file << R"C(
+static const int draws[] = {
+    0, 0, 0,
+    32767, 32767, 3,
+    32767, 32767, 3,
+    32767, 32767, 3,
+    0, 0, 2
+};
+static int consumed;
+int rand(void) {
+    if (consumed >= 15) return 0;
+    return draws[consumed++];
+}
+int fin_random_draws(void) { return consumed; }
+)C";
+    }
+    for (const std::string level : {"-O0", "-O2"}) {
+        SCOPED_TRACE(level);
+        const auto compiled = runFinc({input.string(), level, "-c", "-o", object.string()},
+                                      {{"FIN_LIBS", ""}});
+        ASSERT_EQ(compiled.exitCode, 0) << stripAnsi(compiled.err);
+        ASSERT_EQ(fin::runProcess(fin::linkCommand({object.string(), native.string()},
+                                                  executable.string()),
+                                  output.string(), error.string()), 0)
+            << readProcessOutput(error.string());
+        ASSERT_EQ(fin::runProcess({executable.string()}, output.string(), error.string()), 0)
+            << readProcessOutput(error.string());
+        EXPECT_EQ(readProcessOutput(output.string()), "random endpoints and rejection ok\n");
+    }
+}
+
+TEST(Soundness_Encoding, Base64RejectsMalformedPaddingStructure) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    const std::string source = R"FIN(
+import { base64_decode, free_encoded } from encoding::std;
+fun main(args: [string]) <noret> {
+    let decoded <string> = base64_decode(args[0]);
+    free_encoded(decoded);
+    printf("accepted\n");
+}
+)FIN";
+    const std::vector<std::string> malformed = {
+        "=WFu", "T=Fu", "TW=u", "TQ=A", "====", "A===", "===A", "==AA",
+        "TWFu====", "TQ==TQ==", "TWE=TWFu", "TWFuTW=u", "TWFuTQ=A"
+    };
+    for (const std::string level : {"-O0", "-O2"}) {
+        SCOPED_TRACE(level);
+        for (const auto& value : malformed) {
+            SCOPED_TRACE(value);
+            const std::string result = buildAndRun(source, {level}, {value});
+            EXPECT_EQ(result.find("program exited non-zero"), 0u) << result;
+            EXPECT_NE(result.find("invalid base64 padding"), std::string::npos) << result;
+        }
+    }
+}
+
+TEST(Soundness_Encoding, Base64ValidTailsPreserveDecodedBytesAndTerminator) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    const fs::path dir = uniqueTempPath("fin_base64_bytes");
+    fs::create_directories(dir);
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { std::error_code ec; fs::remove_all(path, ec); }
+    } cleanup{dir};
+    const fs::path input = dir / "main.fin";
+    const fs::path native = dir / "bytes.c";
+    const fs::path object = dir / "main.o";
+    const fs::path executable = dir / "program.exe";
+    const fs::path output = dir / "output.txt";
+    const fs::path error = dir / "error.txt";
+    {
+        std::ofstream file(input);
+        file << R"FIN(
+import { base64_decode, free_encoded } from encoding::std;
+@define fin_b64_matches(bytes: string, index: int) <int>;
+fun check(encoded: string, index: int) <noret> {
+    let decoded <string> = base64_decode(encoded);
+    blame fin_b64_matches(decoded, index) == 1;
+    free_encoded(decoded);
+}
+fun main() <noret> {
+    let absent <string>;
+    check(absent, 0);
+    check("", 0);
+    check("TQ==", 1);
+    check("TWE=", 2);
+    check("TWFu", 3);
+    check("Zm9vYg==", 4);
+    check("Zm9vYmE=", 5);
+    check("Zm9vYmFy", 6);
+    check("/w==", 7);
+    check("/wA=", 8);
+    check("/wAB", 9);
+    // Structural validity is separate from canonical unused pad bits.
+    check("TR==", 1);
+    check("TWF=", 2);
+    printf("base64 byte tails ok\n");
+}
+)FIN";
+    }
+    {
+        std::ofstream file(native);
+        file << R"C(
+#include <string.h>
+int fin_b64_matches(const unsigned char* bytes, int index) {
+    static const unsigned char expected[][7] = {
+        {0}, {'M',0}, {'M','a',0}, {'M','a','n',0},
+        {'f','o','o','b',0}, {'f','o','o','b','a',0},
+        {'f','o','o','b','a','r',0}, {255,0}, {255,0,0}, {255,0,1,0}
+    };
+    static const unsigned sizes[] = {1,2,3,4,5,6,7,2,3,4};
+    if (!bytes || index < 0 || index >= 10) return 0;
+    return memcmp(bytes, expected[index], sizes[index]) == 0;
+}
+)C";
+    }
+    for (const std::string level : {"-O0", "-O2"}) {
+        SCOPED_TRACE(level);
+        const auto compiled = runFinc({input.string(), level, "-c", "-o", object.string()},
+                                      {{"FIN_LIBS", ""}});
+        ASSERT_EQ(compiled.exitCode, 0) << stripAnsi(compiled.err);
+        ASSERT_EQ(fin::runProcess(fin::linkCommand({object.string(), native.string()}, executable.string()),
+                                  output.string(), error.string()), 0)
+            << readProcessOutput(error.string());
+        ASSERT_EQ(fin::runProcess({executable.string()}, output.string(), error.string()), 0)
+            << readProcessOutput(error.string());
+        EXPECT_EQ(readProcessOutput(output.string()), "base64 byte tails ok\n");
+    }
+}
+
+namespace {
+
+// Supplemental Windows-branch execution on POSIX uses a child-local DBCS
+// fixture. Native Windows uses its real active code page instead. Both routes
+// compile the public path operations, without changing the compiler's target.
+std::string selectedWindowsPathRun(const std::string& body, const std::string& level) {
+    const fs::path dir = uniqueTempPath("fin_windows_paths");
+    fs::create_directories(dir);
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { std::error_code ec; fs::remove_all(path, ec); }
+    } cleanup{dir};
+    const fs::path input = dir / "main.fin";
+    const fs::path native = dir / "dbcs.c";
+    const fs::path object = dir / "main.o";
+    const fs::path executable = dir / "program.exe";
+    const fs::path output = dir / "output.txt";
+    const fs::path error = dir / "error.txt";
+    {
+        std::ifstream module(fs::path(testsDir()).parent_path() / "lib/std/path.fin");
+        if (!module.good()) return "missing path module";
+        std::ofstream file(input);
+        file << "#cdef FIN_TARGET_WINDOWS\n" << module.rdbuf() << '\n' << body;
+    }
+    {
+        std::ofstream file(native);
+        file << R"C(
+#ifndef _WIN32
+int IsDBCSLeadByteEx(unsigned cp, unsigned char byte) {
+    (void)cp;
+    return byte == 0x83;
+}
+#endif
+const char* fin_path_byte_fixture(int index) {
+    static const unsigned char values[][24] = {
+        {0x83,0x5c,0},
+        {'C',':',0x5c,'w','o','r','k',0x5c,0x83,0x5c,0},
+        {0x83,0x5c,'/','c','h','i','l','d',0},
+        {'C',':',0x5c,0x83,0x5c,0x5c,'.','.',0x5c,'f','i','l','e',0}
+    };
+    return index >= 0 && index < 4 ? (const char*)values[index] : "";
+}
+)C";
+    }
+    const auto compiled = runFinc({input.string(), level, "-c", "-o", object.string()},
+                                  {{"FIN_LIBS", ""}});
+    if (compiled.exitCode != 0) return "compile failed: " + stripAnsi(compiled.err);
+    const int linked = fin::runProcess(fin::linkCommand({object.string(), native.string()},
+                                                       executable.string()),
+                                      output.string(), error.string());
+    if (linked != 0) return "link failed: " + readProcessOutput(error.string());
+    const int status = fin::runProcess({executable.string()}, output.string(), error.string());
+    return status == 0 ? readProcessOutput(output.string())
+                       : "program exited non-zero: " + readProcessOutput(error.string());
+}
+
+} // namespace
+
+TEST(Soundness_Path, WindowsPrefixesAndDbcsTrailBytesRemainIntact) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    const std::string body = R"FIN(
+import { equals } from strings::std;
+@define IsDBCSLeadByteEx(cp: uint, byte: char) <int>;
+@define fin_path_byte_fixture(index: int) <string>;
+fun expect(actual: string, expected: string) <noret> {
+    blame equals(actual, expected);
+    free_path(actual);
+}
+fun main() <noret> {
+    blame is_absolute("C:\\work\\file.txt");
+    blame is_absolute("\\\\server\\share");
+    blame !is_absolute("C:child") && !is_absolute("\\child");
+    expect(basename("C:\\work\\file.txt"), "file.txt");
+    expect(dirname("C:\\work\\file.txt"), "C:\\work");
+    expect(join("D:\\base", "C:\\work\\file.txt"), "C:\\work\\file.txt");
+    expect(join("C:\\base", "\\child"), "C:\\child");
+    expect(join("C:\\base", "c:child"), "c:\\base/child");
+    expect(join("C:\\base", "D:child"), "D:child");
+    expect(join("C:", "child"), "C:child");
+    expect(basename("\\\\server\\share\\"), "\\\\server\\share");
+    expect(dirname("\\\\server\\share\\file"), "\\\\server\\share");
+    expect(extname("\\\\server\\share.name\\"), "");
+    expect(stem("\\\\server\\share.name\\"), "\\\\server\\share.name");
+    expect(normalize("C:a\\..\\..\\b"), "C:../b");
+    expect(normalize("\\\\server\\share\\a\\..\\..\\b"), "//server/share/b");
+    expect(basename("\\\\"), "\\");
+    expect(dirname("\\\\"), "\\");
+    expect(normalize("\\\\"), "/");
+    // CP932's 0x83 0x5c character ends in a byte that resembles a separator.
+    // Exercise it only when the native ACP recognizes its lead byte. The
+    // supplemental POSIX shim always selects it without changing host ACP.
+    if (IsDBCSLeadByteEx(cast<uint>(0), cast<char>(131)) != 0) {
+        let name <string> = fin_path_byte_fixture(0);
+        let input <string> = fin_path_byte_fixture(1);
+        expect(basename(input), name);
+        expect(dirname(input), "C:\\work");
+        expect(join(name, "child"), fin_path_byte_fixture(2));
+        expect(normalize(fin_path_byte_fixture(3)), "C:/file");
+    }
+    printf("Windows path prefixes ok\n");
+}
+)FIN";
+    for (const std::string level : {"-O0", "-O2"}) {
+        SCOPED_TRACE(level);
+        EXPECT_EQ(selectedWindowsPathRun(body, level), "Windows path prefixes ok\n");
+    }
+}
+
+TEST(Soundness_Path, WindowsNamespacesAndIncompleteUncHaveNamedRefusals) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    const std::vector<std::pair<std::string, std::string>> cases = {
+        {R"(\\\\?\\C:\\file)", "Windows path namespace is not supported"},
+        {R"(\\\\.\\pipe\\name)", "Windows path namespace is not supported"},
+        {"//?/C:/file", "Windows path namespace is not supported"},
+        {R"(\\\\server)", "incomplete UNC path"},
+        {"//server/", "incomplete UNC path"},
+        {"///server/share", "incomplete UNC path"},
+    };
+    for (const auto& [path, diagnostic] : cases) {
+        SCOPED_TRACE(path);
+        for (const std::string operation : {"is_absolute", "basename", "dirname", "normalize"}) {
+            SCOPED_TRACE(operation);
+            const std::string body = "fun main() <noret> { " + operation + "(\"" + path + "\"); }\n";
+            for (const std::string level : {"-O0", "-O2"}) {
+                SCOPED_TRACE(level);
+                const std::string result = selectedWindowsPathRun(body, level);
+                EXPECT_EQ(result.find("program exited non-zero:"), 0u) << result;
+                EXPECT_NE(result.find(diagnostic), std::string::npos) << result;
+            }
+        }
+    }
+}

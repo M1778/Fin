@@ -2,7 +2,10 @@
 // Encodings: Hex and Base64 encoding/decoding.
 //
 // Matches Python's `base64` and `binascii` modules, providing standard
-// RFC 4648 Base64 and lowercase hexadecimal representations.
+// RFC 4648 Base64 and lowercase hexadecimal representations. Base64
+// requires contiguous terminal padding in its last quartet; unused pad
+// bits remain permissive. Results are NUL-terminated strings, not a
+// length-carrying interface for decoded binary payloads.
 
 #[stdimport] %{
 import { free_str } from strings::std;
@@ -203,6 +206,12 @@ pub fun base64_decode(b64_str: string) <string> {
     let pad <int> = 0;
     if (n >= 1 && chars[n - 1] == '=') { pad++; }
     if (n >= 2 && chars[n - 2] == '=') { pad++; }
+    // At most two '=' bytes form a contiguous suffix in the last
+    // quartet. Any earlier '=' is leading, discontinuous, nonterminal
+    // or excess padding; reject it before allocating decoded storage.
+    for (let index <int> = 0; index < n - pad; index++) {
+        blame chars[index] != '=', "invalid base64 padding";
+    }
     let out_len <int> = (n / 4) * 3 - pad;
     let out_buf <[char]> = new [char, out_len + 1]{};
     let i <int> = 0;

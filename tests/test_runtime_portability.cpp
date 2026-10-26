@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -53,6 +55,8 @@ fun main() <noret> {
     blame start.elapsed_ns() >= 10000000;
     let deadline <Instant> = Instant::deadline_after_ms(0);
     blame deadline.is_expired();
+    let future <Instant> = Instant::deadline_after_ms(10000);
+    blame future.nanos >= start.nanos + 10000000000 && !future.is_expired();
     let epoch <string> = format_rfc3339(0);
     blame equals(epoch, "1970-01-01T00:00:00Z");
     blame parse_rfc3339(epoch) == 0;
@@ -135,4 +139,91 @@ fun main() <noret> {
 }
 )FIN";
     EXPECT_EQ(buildRuntimeAndRun(source), "process ok\n");
+}
+
+TEST(Soundness_RuntimePortability, DeadlineOffsetsAreCheckedAgainstTheClockRange) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    namespace fs = std::filesystem;
+    using namespace fin::testing;
+    const fs::path dir = uniqueTempPath("fin_deadline_bounds");
+    fs::create_directories(dir);
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { std::error_code ec; fs::remove_all(path, ec); }
+    } cleanup{dir};
+    const fs::path input = dir / "main.fin";
+    const fs::path native = dir / "clock.c";
+    const fs::path object = dir / "main.o";
+    const fs::path executable = dir / "program.exe";
+    const fs::path output = dir / "output.txt";
+    const fs::path error = dir / "error.txt";
+    {
+        std::ofstream file(native);
+        // The clock leaves exactly 2,775,807 representable nanoseconds.
+        // 2ms is valid; 3ms overflows addition without overflowing ms*1e6.
+        file << R"C(
+#ifdef _WIN32
+int __stdcall QueryPerformanceFrequency(long long* frequency) {
+    *frequency = 1000000000LL;
+    return 1;
+}
+int __stdcall QueryPerformanceCounter(long long* ticks) {
+    *ticks = 9223372036852000000LL;
+    return 1;
+}
+#else
+#include <time.h>
+int clock_gettime(clockid_t id, struct timespec* result) {
+    (void)id;
+    result->tv_sec = 9223372036LL;
+    result->tv_nsec = 852000000;
+    return 0;
+}
+#endif
+)C";
+    }
+    const std::vector<std::pair<std::string, std::string>> cases = {
+        {R"FIN(
+let zero <Instant> = Instant::deadline_after_ms(0);
+let one <Instant> = Instant::deadline_after_ms(1);
+let two <Instant> = Instant::deadline_after_ms(2);
+blame zero.nanos == 9223372036852000000;
+blame one.nanos == 9223372036853000000;
+blame two.nanos == 9223372036854000000;
+blame zero.is_expired() && !one.is_expired() && !two.is_expired();
+printf("deadline bounds ok\n");
+)FIN", ""},
+        {"Instant::deadline_after_ms(-1);", "a deadline offset is nonnegative"},
+        {"Instant::deadline_after_ms(9223372036855);", "deadline exceeds the Instant nanosecond range"},
+        {"Instant::deadline_after_ms(3);", "deadline exceeds the Instant nanosecond range"},
+    };
+    for (const auto& [body, diagnostic] : cases) {
+        SCOPED_TRACE(body);
+        {
+            std::ofstream file(input);
+            file << "import { Instant } from time::std;\nfun main() <noret> {\n"
+                 << body << "\n}\n";
+        }
+        for (const std::string level : {"-O0", "-O2"}) {
+            SCOPED_TRACE(level);
+            const auto compiled = runFinc({input.string(), level, "-c", "-o", object.string()},
+                                          {{"FIN_LIBS", ""}});
+            ASSERT_EQ(compiled.exitCode, 0) << stripAnsi(compiled.err);
+            ASSERT_EQ(fin::runProcess(fin::linkCommand({object.string(), native.string()},
+                                                      executable.string()),
+                                      output.string(), error.string()), 0)
+                << readProcessOutput(error.string());
+            const int status = fin::runProcess({executable.string()}, output.string(), error.string());
+            if (diagnostic.empty()) {
+                EXPECT_EQ(status, 0) << readProcessOutput(error.string());
+                EXPECT_EQ(readProcessOutput(output.string()), "deadline bounds ok\n");
+            } else {
+                EXPECT_NE(status, 0);
+                EXPECT_NE(readProcessOutput(error.string()).find(diagnostic), std::string::npos)
+                    << readProcessOutput(error.string());
+            }
+        }
+    }
 }

@@ -725,6 +725,134 @@ fun main() <noret> {
 }
 #endif
 
+TEST_P(StageValueOwnership, DequeDisposalReleasesWrappedStorageAndAllowsReuse) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable checks need the LLVM backend";
+#endif
+    const std::string compiler = valueCompiler(GetParam());
+    if (!std::filesystem::exists(compiler)) GTEST_SKIP() << "Compiler missing: " << compiler;
+    checkValueProgram(compiler, R"FIN(
+import { Deque } from deque::std;
+fun main() <noret> {
+    for (let round <int> = 0; round < 64; round++) {
+        let values <Deque<int>> = Deque::<int>{};
+        values.free_deque();
+        values.free_deque();
+        blame values.len() == 0 && values.capacity() == 0;
+        for (let i <int> = 0; i < 8; i++) { values.push_back(i); }
+        for (let i <int> = 0; i < 5; i++) { blame values.pop_front() == i; }
+        for (let i <int> = 8; i < 40; i++) { values.push_back(i); }
+        blame values.len() == 35 && values.get(0) == 5 && values.get(34) == 39;
+        let capacity <int> = values.capacity();
+        values.clear();
+        blame values.is_empty() && values.capacity() == capacity;
+        values.push_front(7);
+        values.push_back(11);
+        blame values.peek_front() == 7 && values.peek_back() == 11;
+        values.free_deque();
+        values.free_deque();
+        blame values.is_empty() && values.capacity() == 0;
+        values.push_front(19);
+        values.push_back(23);
+        blame values.pop_back() == 23 && values.pop_front() == 19;
+        values.free_deque();
+        let heap <&Deque<int>> = new Deque::<int>{};
+        heap.push_back(round);
+        heap.free_deque();
+        heap.free_deque();
+        delete heap;
+    }
+    printf("deque disposal ok\n");
+}
+)FIN", "deque disposal ok\n"
+#ifdef __linux__
+    , true, true
+#endif
+    );
+}
+
+TEST_P(StageValueOwnership, QueueAndStackDisposalDelegateAndPreserveOrdering) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable checks need the LLVM backend";
+#endif
+    const std::string compiler = valueCompiler(GetParam());
+    if (!std::filesystem::exists(compiler)) GTEST_SKIP() << "Compiler missing: " << compiler;
+    checkValueProgram(compiler, R"FIN(
+import { Queue, Stack } from deque::std;
+fun main() <noret> {
+    for (let round <int> = 0; round < 64; round++) {
+        let queue <Queue<int>> = Queue::<int>{};
+        let stack <Stack<int>> = Stack::<int>{};
+        queue.free_queue();
+        queue.free_queue();
+        stack.free_stack();
+        stack.free_stack();
+        for (let i <int> = 0; i < 32; i++) { queue.push(i); stack.push(i); }
+        blame queue.peek() == 0 && stack.peek() == 31;
+        for (let i <int> = 0; i < 32; i++) {
+            blame queue.pop() == i && stack.pop() == 31 - i;
+        }
+        queue.push(7);
+        stack.push(9);
+        queue.free_queue();
+        stack.free_stack();
+        blame queue.is_empty() && stack.is_empty();
+        queue.free_queue();
+        stack.free_stack();
+        queue.push(17);
+        stack.push(19);
+        blame queue.pop() == 17 && stack.pop() == 19;
+        queue.free_queue();
+        stack.free_stack();
+    }
+    printf("queue stack disposal ok\n");
+}
+)FIN", "queue stack disposal ok\n"
+#ifdef __linux__
+    , true, true
+#endif
+    );
+}
+
+TEST_P(StageValueOwnership, DequeDisposalLeavesPointerAndStringPayloadsCallerOwned) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable checks need the LLVM backend";
+#endif
+    const std::string compiler = valueCompiler(GetParam());
+    if (!std::filesystem::exists(compiler)) GTEST_SKIP() << "Compiler missing: " << compiler;
+    checkValueProgram(compiler, R"FIN(
+import { Deque, Queue, Stack } from deque::std;
+import { clone, equals, free_str } from strings::std;
+fun main() <noret> {
+    let text <string> = clone("caller owned");
+    let number <&int> = new int(73);
+    for (let round <int> = 0; round < 32; round++) {
+        let values <Deque<&int>> = Deque::<&int>{};
+        let queue <Queue<string>> = Queue::<string>{};
+        let stack <Stack<&int>> = Stack::<&int>{};
+        for (let i <int> = 0; i < 24; i++) {
+            values.push_back(number);
+            queue.push(text);
+            stack.push(number);
+        }
+        let recovered <&int> = values.pop_front();
+        blame recovered == number && *recovered == 73;
+        values.free_deque();
+        queue.free_queue();
+        stack.free_stack();
+        blame *number == 73 && equals(text, "caller owned");
+    }
+    delete number;
+    free_str(text);
+    printf("deque payloads caller owned\n");
+}
+)FIN", "deque payloads caller owned\n"
+#ifdef __linux__
+    , true, true
+#endif
+    );
+}
+
 INSTANTIATE_TEST_SUITE_P(Compilers, StageValueOwnership,
                         ::testing::Values("Reference", "Stage2", "Stage3"));
 

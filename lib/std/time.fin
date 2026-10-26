@@ -201,9 +201,13 @@ pub struct Instant {
         #c_endif
       }
 
+      // Reject offsets beyond the remaining signed-long timestamp range.
+      // Check before multiplying or adding: wrapping is not a deadline.
       static fun deadline_after_ms(ms: long) <Instant> {
         blame ms >= 0, "a deadline offset is nonnegative";
         let t <Instant> = Instant::now();
+        blame t.nanos >= 0 && ms <= (9223372036854775807 - t.nanos) / 1000000,
+          "deadline exceeds the Instant nanosecond range";
         return Instant{nanos: t.nanos + ms * 1000000};
       }
 

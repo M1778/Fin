@@ -2,7 +2,11 @@
 // Path: filesystem path manipulation functions.
 //
 // Provides platform path joining, basename/dirname extraction, extension query,
-// and absolute path detection.
+// and absolute path detection. POSIX treats only '/' as a separator.
+// Windows also recognizes '\', drive prefixes and complete UNC shares.
+// Drive-relative and root-relative paths are not fully absolute; joins
+// retain the applicable drive/share and normalization uses '/' separators.
+// Device/verbatim namespaces and incomplete UNC roots blame explicitly.
 //
 // Every returned string from allocating functions (join, basename, dirname, extname)
 // is malloc/calloc-allocated and the caller owns it. `free_path` is provided to release it.
@@ -57,6 +61,232 @@ priv fun from_chars(bytes: [char], start: int, count: int) <string> {
     return out;
 }
 
+#c_ifdef FIN_TARGET_WINDOWS
+#[llvm_name="IsDBCSLeadByteEx"]
+@define path_is_dbcs_lead(code_page: uint, value: char) <int>;
+
+// Record separators only at character boundaries in the active code page.
+// A DBCS trailing byte equal to '\' is part of its character, not a cut.
+priv fun path_separator_marks(chars: [char]) <[int]> {
+    let n <int> = chars.length - 1;
+    let marks <[int]> = new [int, n + 1]{};
+    let i <int> = 0;
+    while (i < n) {
+        if (chars[i] == '/' || chars[i] == '\\') { marks[i] = 1; }
+        if (i + 1 < n && cast<uint>(chars[i]) >= cast<uint>(128) &&
+          path_is_dbcs_lead(cast<uint>(0), chars[i]) != 0) {
+            i = i + 2;
+          } else { i++; }
+    }
+    return marks;
+}
+
+// Parallel words: kind, prefix end, root end, trimmed end, last separator.
+// Kinds: relative, drive-relative, drive-root, root-relative, complete UNC.
+// Prefixes and roots are boundaries, not components that '..' may remove.
+priv fun path_windows_parts(chars: [char], marks: [int]) <[int]> {
+    let n <int> = chars.length - 1;
+    let parts <[int]> = new [int, 5]{};
+    parts[3] = n;
+    parts[4] = -1;
+    if (n == 0) { return parts; }
+    let drive <bool> = n >= 2 && chars[1] == ':' &&
+      ((chars[0] >= 'A' && chars[0] <= 'Z') || (chars[0] >= 'a' && chars[0] <= 'z'));
+    if (drive) {
+        parts[0] = 1;
+        parts[1] = 2;
+        parts[2] = 2;
+        if (n > 2 && marks[2] != 0) { parts[0] = 2; parts[2] = 3; }
+    } else if (marks[0] != 0) {
+        let first <int> = 0;
+        while (first < n && marks[first] != 0) { first++; }
+        parts[0] = 3;
+        parts[2] = 1;
+        if (first >= 2 && first < n) {
+            let namespace_path <bool> = first == 2 && (chars[2] == '?' || chars[2] == '.') && n > 3 && marks[3] != 0;
+            blame !namespace_path, "Windows path namespace is not supported";
+            blame first == 2, "incomplete UNC path";
+            let end_server <int> = first;
+            while (end_server < n && marks[end_server] == 0) { end_server++; }
+            let start_share <int> = end_server;
+            while (start_share < n && marks[start_share] != 0) { start_share++; }
+            blame start_share < n, "incomplete UNC path";
+            let end_share <int> = start_share;
+            while (end_share < n && marks[end_share] == 0) { end_share++; }
+            parts[0] = 4;
+            parts[1] = end_share;
+            parts[2] = end_share;
+        }
+    }
+    let end <int> = n;
+    while (end > parts[2] && marks[end - 1] != 0) { end--; }
+    parts[3] = end;
+    let i <int> = parts[2];
+    while (i < end) {
+        if (marks[i] != 0) { parts[4] = i; }
+        i++;
+    }
+    return parts;
+}
+
+priv fun path_windows_absolute(path: string) <bool> {
+    let chars <[char]> = to_chars(path);
+    let marks <[int]> = path_separator_marks(chars);
+    let parts <[int]> = path_windows_parts(chars, marks);
+    let absolute <bool> = parts[0] == 2 || parts[0] == 4;
+    delete parts;
+    delete marks;
+    delete chars;
+    return absolute;
+}
+
+priv fun path_windows_is_root(path: string) <bool> {
+    let chars <[char]> = to_chars(path);
+    let marks <[int]> = path_separator_marks(chars);
+    let parts <[int]> = path_windows_parts(chars, marks);
+    let root <bool> = parts[2] > 0 && parts[3] <= parts[2];
+    delete parts; delete marks; delete chars;
+    return root;
+}
+
+priv fun path_windows_component(path: string, parent: bool) <string> {
+    let chars <[char]> = to_chars(path);
+    let marks <[int]> = path_separator_marks(chars);
+    let parts <[int]> = path_windows_parts(chars, marks);
+    let root <int> = parts[2];
+    let end <int> = parts[3];
+    let start <int> = parts[4] + 1;
+    if (start < root) { start = root; }
+    let result <string> = "";
+    if (end <= root && root > 0) {
+        result = from_chars(chars, 0, root);
+    } else if (!parent) {
+        result = from_chars(chars, start, end - start);
+    } else if (parts[4] < 0) {
+        if (root > 0) { result = from_chars(chars, 0, root); }
+        else { result = clone_str("."); }
+    } else {
+        let cut <int> = parts[4];
+        while (cut > root && marks[cut - 1] != 0) { cut--; }
+        if (cut < root) { cut = root; }
+        result = from_chars(chars, 0, cut);
+    }
+    delete parts;
+    delete marks;
+    delete chars;
+    return result;
+}
+
+priv fun path_same_drive(a: char, b: char) <bool> {
+    if (a >= 'A' && a <= 'Z') { a = cast<char>(cast<int>(a) + 32); }
+    if (b >= 'A' && b <= 'Z') { b = cast<char>(cast<int>(b) + 32); }
+    return a == b;
+}
+
+priv fun path_windows_join(p1: string, p2: string) <string> {
+    let first <string> = p1;
+    let second <string> = p2;
+    if (first == null) { first = ""; }
+    if (second == null) { second = ""; }
+    let a <[char]> = to_chars(first);
+    let b <[char]> = to_chars(second);
+    let am <[int]> = path_separator_marks(a);
+    let bm <[int]> = path_separator_marks(b);
+    let ap <[int]> = path_windows_parts(a, am);
+    let bp <[int]> = path_windows_parts(b, bm);
+    let n1 <int> = a.length - 1;
+    let n2 <int> = b.length - 1;
+    let result <string> = "";
+    if (n2 == 0) { result = clone_str(first); }
+    else if (n1 == 0 || bp[0] == 2 || bp[0] == 4) { result = clone_str(second); }
+    else {
+        let out <[char]> = new [char, n1 + n2 + 3]{};
+        let used <int> = 0;
+        let bstart <int> = 0;
+        let astart <int> = 0;
+        let aend <int> = n1;
+        if (bp[0] == 3) {
+            aend = ap[1];
+        } else if (bp[0] == 1) {
+            if (ap[1] == 2 && path_same_drive(a[0], b[0])) {
+                out[0] = b[0]; out[1] = ':';
+                used = 2;
+                astart = 2;
+                bstart = 2;
+            } else { aend = 0; }
+        }
+        for (let i <int> = astart; i < aend; i++) { out[used] = a[i]; used++; }
+        if (bp[0] != 3 && used > 0 && bstart < n2 &&
+          !(aend == 2 && ap[1] == 2) && am[n1 - 1] == 0) {
+            out[used] = '/'; used++;
+          }
+        for (let i <int> = bstart; i < n2; i++) { out[used] = b[i]; used++; }
+        result = from_chars(out, 0, used);
+        delete out;
+    }
+    delete bp; delete ap;
+    delete bm; delete am;
+    delete b; delete a;
+    return result;
+}
+
+priv fun path_windows_normalize(path: string) <string> {
+    let chars <[char]> = to_chars(path);
+    let marks <[int]> = path_separator_marks(chars);
+    let parts <[int]> = path_windows_parts(chars, marks);
+    let n <int> = chars.length - 1;
+    let out <[char]> = new [char, n + 3]{};
+    let used <int> = 0;
+    let rooted <bool> = parts[0] == 2 || parts[0] == 3 || parts[0] == 4;
+    let prefix <int> = parts[1];
+    // Copy and canonicalize only actual separator positions in the prefix.
+    for (let i <int> = 0; i < prefix; i++) {
+        if (marks[i] != 0) {
+            if (used < 2 || out[used - 1] != '/') { out[used] = '/'; used++; }
+        } else { out[used] = chars[i]; used++; }
+    }
+    if (parts[0] == 2 || parts[0] == 3) { out[used] = '/'; used++; }
+    let boundary <int> = used;
+    let starts <[int]> = new [int, n + 1]{};
+    let lengths <[int]> = new [int, n + 1]{};
+    let count <int> = 0;
+    let i <int> = parts[2];
+    while (i < n) {
+        while (i < n && marks[i] != 0) { i++; }
+        if (i >= n) { break; }
+        let start <int> = i;
+        while (i < n && marks[i] == 0) { i++; }
+        let length <int> = i - start;
+        if (length == 1 && chars[start] == '.') { continue; }
+        if (length == 2 && chars[start] == '.' && chars[start + 1] == '.') {
+            if (count > 0) {
+                let top <int> = count - 1;
+                let parent <bool> = lengths[top] == 2 && out[starts[top]] == '.' && out[starts[top] + 1] == '.';
+                if (!parent) {
+                    used = starts[top];
+                    if (used > boundary) { used--; }
+                    count = top;
+                    continue;
+                }
+            }
+            if (rooted) { continue; }
+        }
+        if (count > 0 || parts[0] == 4) { out[used] = '/'; used++; }
+        starts[count] = used;
+        lengths[count] = length;
+        count++;
+        for (let k <int> = 0; k < length; k++) { out[used + k] = chars[start + k]; }
+        used = used + length;
+    }
+    let result <string> = "";
+    if (used == 0) { result = clone_str("."); }
+    else { result = from_chars(out, 0, used); }
+    delete lengths; delete starts;
+    delete out; delete parts; delete marks; delete chars;
+    return result;
+}
+#c_endif
+
 #[export]
 pub fun free_path(s: string) <noret> {
     path_free(s);
@@ -67,10 +297,14 @@ pub fun is_absolute(path: string) <bool> {
     if (path == null) { return false; }
     let n <ulong> = path_len(path);
     if (n == cast<ulong>(0)) { return false; }
+    #c_ifdef FIN_TARGET_WINDOWS
+    return path_windows_absolute(path);
+    #c_else
     let chars <[char]> = to_chars(path);
     let first <char> = chars[0];
     delete chars;
     return first == '/';
+    #c_endif
 }
 
 #[export]
@@ -80,6 +314,9 @@ pub fun is_relative(path: string) <bool> {
 
 #[export]
 pub fun join(p1: string, p2: string) <string> {
+    #c_ifdef FIN_TARGET_WINDOWS
+    return path_windows_join(p1, p2);
+    #c_else
     if (p1 == null) {
         if (p2 == null) { return clone_str(""); }
         return clone_str(p2);
@@ -104,6 +341,7 @@ pub fun join(p1: string, p2: string) <string> {
     }
     let appended <string> = path_strcat(out, p2);
     return out;
+    #c_endif
 }
 
 #[export]
@@ -112,6 +350,9 @@ pub fun basename(path: string) <string> {
     let total <int> = cast<int>(path_len(path));
     if (total == 0) { return clone_str(""); }
 
+    #c_ifdef FIN_TARGET_WINDOWS
+    return path_windows_component(path, false);
+    #c_else
     let chars <[char]> = to_chars(path);
     let end <int> = total;
     while (end > 1) {
@@ -134,6 +375,7 @@ pub fun basename(path: string) <string> {
     let out <string> = from_chars(chars, start, end - start);
     delete chars;
     return out;
+    #c_endif
 }
 
 #[export]
@@ -142,6 +384,9 @@ pub fun dirname(path: string) <string> {
     let total <int> = cast<int>(path_len(path));
     if (total == 0) { return clone_str("."); }
 
+    #c_ifdef FIN_TARGET_WINDOWS
+    return path_windows_component(path, true);
+    #c_else
     let chars <[char]> = to_chars(path);
     let end <int> = total;
     while (end > 1) {
@@ -177,11 +422,15 @@ pub fun dirname(path: string) <string> {
     let out <string> = from_chars(chars, 0, last_slash);
     delete chars;
     return out;
+    #c_endif
 }
 
 #[export]
 pub fun extname(path: string) <string> {
     if (path == null) { return clone_str(""); }
+    #c_ifdef FIN_TARGET_WINDOWS
+    if (path_windows_is_root(path)) { return clone_str(""); }
+    #c_endif
     let base <string> = basename(path);
     let n <int> = cast<int>(path_len(base));
     if (n == 0) {
@@ -214,6 +463,9 @@ pub fun extname(path: string) <string> {
 // back whole. Fresh memory; `free_path` releases it.
 #[export]
 pub fun stem(path: string) <string> {
+    #c_ifdef FIN_TARGET_WINDOWS
+    if (path != null && path_windows_is_root(path)) { return basename(path); }
+    #c_endif
     let base <string> = basename(path);
     let n <int> = cast<int>(path_len(base));
     if (n == 0) { return base; }
@@ -248,6 +500,9 @@ pub fun normalize(path: string) <string> {
     let total <int> = cast<int>(path_len(path));
     if (total == 0) { return clone_str("."); }
 
+    #c_ifdef FIN_TARGET_WINDOWS
+    return path_windows_normalize(path);
+    #c_else
     let chars <[char]> = to_chars(path);
     let absolute <bool> = (chars[0] == '/');
     let out <[char]> = new [char, total + 2]{};
@@ -314,6 +569,7 @@ pub fun normalize(path: string) <string> {
         return rooted;
     }
     return res;
+    #c_endif
 }
 
 }

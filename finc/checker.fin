@@ -7680,17 +7680,9 @@ pub struct Checker {
                 let receiver_t <string> = self.check_expression(rec_node);
                 receiver_t = self.resolve_type(receiver_t);
                 if (receiver_t != null && !chk_str_eq(receiver_t, "void") && !chk_str_eq(receiver_t, "error")) {
-                    let base_st <string> = receiver_t;
-                    let rlen <ulong> = chk_strlen(receiver_t);
-                    if (chk_strchr(receiver_t, 42) != null) {
-                        if (rlen > cast<ulong>(1)) {
-                            base_st = substr(receiver_t, 0, cast<int>(rlen - 1));
-                        }
-                    } else if (chk_strchr(receiver_t, 38) != null) {
-                        if (rlen > cast<ulong>(1)) {
-                            base_st = substr(receiver_t, 1, cast<int>(rlen - 1));
-                        }
-                    }
+                    // Strip only a marker on the receiver itself, not an
+                    // '&' or '*' inside its generic arguments (Deque<&int>).
+                    let base_st <string> = self.chk_strip_ptr(receiver_t);
                     let b_len <int> = cast<int>(chk_strlen(base_st));
                     for (let bi <int> = 0; bi < b_len; bi++) {
                         let ch <string> = substr(base_st, bi, 1);

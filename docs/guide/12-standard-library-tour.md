@@ -29,16 +29,16 @@ executable. The examples below mark those boundaries.
 | [stdptr](../../lib/std/stdptr.fin) | `rptr<T>`, `wptr<T>`, `OwnershipError` | Explicit strong/weak release and per-handle released guards (ADR 0039 amendment). Weak handles retain counters after the value dies. Heap siblings, including the initial restrict snapshot, require release then deletion through an owning local pointer. Copies alias storage without incrementing counts; raw fields and concurrent use require caller discipline |
 | [networking](../../lib/std/networking.fin) | `Socket` (dial/serve/accept_conn/send_text/recv_bytes/local_port/shutdown), `TcpStream` (connect/write/read/close), `TcpListener` (bind/accept/local_port/close), `http_get` | connect/listen/accept/read/write/close run on loopback (the bundled sample ends to end plus pins in `Soundness_SyncNet`, echo and refusal and an against-test-peer `http_get`); explicit byte counts on `write`/`read`, failures `blame` and name the call; dotted-quad addresses only -- a hostname refuses as "cannot parse the address as a dotted quad", no TLS, `http_get` caps at 4096 bytes |
 | [sync](../../lib/std/sync.fin) | `Thread::spawn`/`join`, `Mutex<T>`, `Channel<T>` | POSIX threads or Windows native thread/SRW APIs. The entry adapter carries Fin callbacks through an explicit C context; captures work on the reference compiler, while the self-host compiler requires noncapturing bodies. Join, mutex counter, channel FIFO, and TCP integration have executable regressions. Self-deadlock is not detected |
-| [time](../../lib/std/time.fin) | `now`, `sleep_sec`/`sleep_ms`, `diff_sec`, `Instant`, `Duration`, RFC3339 helpers | `Instant` uses POSIX monotonic clocks or Windows QueryPerformanceCounter; Windows sleeps use Sleep. UTC RFC3339 results are caller-owned and released with `free_rfc3339`. Native platform execution is a release gate |
+| [time](../../lib/std/time.fin) | `now`, `sleep_sec`/`sleep_ms`, `diff_sec`, `Instant`, `Duration`, RFC3339 helpers | `Instant` uses POSIX monotonic clocks or Windows QueryPerformanceCounter; Windows sleeps use Sleep. `deadline_after_ms` blames for negative offsets or a timestamp beyond signed-64-bit nanoseconds; it never wraps a large timeout into an expired deadline. UTC RFC3339 results are caller-owned and released with `free_rfc3339`. Native platform execution is a release gate |
 | [ascii](../../lib/std/ascii.fin) | `is_alpha`, `is_digit`, classification predicates, `to_upper`/`to_lower`, `digit_value`/`hex_value` | Pure predicates build and run (`is_alpha('a')`, `is_digit('3')` probed live); no allocation, no cleanup |
 | [bits](../../lib/std/bits.fin) | `bit_and`/`bit_or`/`bit_xor`/`bit_not`, get/set/clear/toggle, `popcount`, `bit_length`, leading/trailing zeros, `is_power_of_two`, rotations | Arithmetic lowering builds and runs (`bit_and(6, 3) == 2`, `popcount(7) == 3` probed live); the grammar has no `&`/`|`/`^` operators, so use these helpers |
-| [encoding](../../lib/std/encoding.fin) | `hex_encode`/`hex_decode`, `base64_encode`/`base64_decode`, `free_encoded` | Hex and Base64 round-trips build and run (`hex_encode("Hi") == "4869"`, `base64_encode("Hi") == "SGk="` probed live); results are caller-owned, release with `free_encoded` |
+| [encoding](../../lib/std/encoding.fin) | `hex_encode`/`hex_decode`, `base64_encode`/`base64_decode`, `free_encoded` | Hex and Base64 round-trips build and run (`hex_encode("Hi") == "4869"`, `base64_encode("Hi") == "SGk="` probed live). Base64 rejects leading, discontinuous, excess, or nonterminal padding; unused pad bits remain permissive. Results are caller-owned NUL-terminated strings, not length-carrying binary buffers; release with `free_encoded` |
 | [hash](../../lib/std/hash.fin) | `crc32`, `fnv1a_32`/`fnv1a_64`, `djb2`, `sdbm` | String hashes build and run (`fnv1a_32("Fin")`, `djb2("Fin")` probed live); pure values, no cleanup |
-| [random](../../lib/std/random.fin) | `seed`, `seed_now`, `rand`, `random_int`, `random_float`, `random_bool` | `seed` with `random_int`/`random_bool` builds and runs; bare `rand()` is refused in codegen (`signature mismatch or duplicate definition for symbol 'rand' is not lowered yet`) because the name collides with C `rand` |
+| [random](../../lib/std/random.fin) | `seed`, `seed_now`, `rand`, `random_int`, `random_float`, `random_bool` | `seed` and `rand()` build and repeat the same sequence when reseeded; `rand` directly exports the C runtime function, avoiding a same-symbol wrapper. `random_int` supports inclusive bounds across the full signed `int` domain using 32-bit sampling and rejection of the incomplete bucket; `min >= max` returns `min` without drawing. The runtime determines the seeded sequence. These are pseudo-random facilities, not cryptographic randomness |
 | [algorithm](../../lib/std/algorithm.fin) | `sort_ints`, `binary_search_ints`, lower/upper bounds, min/max, `is_sorted_ints`, fill/copy/reverse | Sorting and search over `[int]` build and run (sorted `[3, 1, 4, 2]`, `binary_search` hit probed live); the caller owns the array, `delete` it |
 | [buffer](../../lib/std/buffer.fin) | `Buffer`, `new_buffer`/`new_string_builder`, `free_buffer`/`free_string`, `write_*`, `length`, `to_string` | `new_buffer` with `write_string` and `length` builds and runs; the buffer owns heap storage, release with `free_buffer` |
-| [deque](../../lib/std/deque.fin) | `Deque<T>`, `Queue<T>`, `Stack<T>`, push/pop at both ends, `get`, `len`, `is_empty` | `push_back`/`push_front`/`pop_back`/`pop_front`/`get` build and run (int deque probed live); no buffer destructor, process exit reclaims demo storage |
-| [path](../../lib/std/path.fin) | `join`, `basename`, `dirname`, `extname`, `stem`, `normalize`, `is_absolute`/`is_relative`, `free_path` | `join`/`basename`/`stem`/`normalize` build and run (`normalize("/a/./b/../c") == "/a/c"` probed live); results are caller-owned, release with `free_path` |
+| [deque](../../lib/std/deque.fin) | `Deque<T>`, `Queue<T>`, `Stack<T>`, push/pop at both ends, `get`, `len`, `is_empty`, `free_deque`/`free_queue`/`free_stack` | Explicit disposal releases backing buffers and resets to empty; repeated disposal is safe for one owner, and later pushes lazily allocate again. `clear()` retains capacity. Copies share storage; do not dispose both copies. Pointer/string element payloads remain caller-owned; no implicit destructor |
+| [path](../../lib/std/path.fin) | `join`, `basename`, `dirname`, `extname`, `stem`, `normalize`, `is_absolute`/`is_relative`, `free_path` | Native POSIX and Windows lexical paths: Windows recognizes both separators, drive prefixes and complete UNC shares. Drive-relative/root-relative forms remain distinct from fully absolute paths; device/verbatim namespaces and incomplete UNC roots blame explicitly. Joins insert `/`, normalization uses `/`, and results are caller-owned; release with `free_path` |
 | [env](../../lib/std/env.fin) | `getenv`/`setenv`, `get_env`, `has_env`, `set_env`, `unset_env` | POSIX environment calls or Windows UCRT. Windows set_env rejects empty values without deleting the previous value; use unset_env for removal. Getters borrow environment storage |
 | [log](../../lib/std/log.fin) | `Level` (`Debug`/`Info`/`Warn`/`Error` statics with `.rank`), `Logger`, `init`/`init_json`, `timestamps`, `debug`/`info`/`warn`/`error` | All four levels filter and both modes build and run (`LOG_LEVEL=debug` no-init emit and `init(Level::Error())` silence probed live); `LOG_LEVEL` outside `debug|info|warn|error` blames naming the value; everything goes to stderr and never stdout (pins in `Soundness_Log`); a plain `enum Level` refuses in codegen, so the members are statics (recorded in the module header) |
 | [process](../../lib/std/process.fin) | `run_command`, `exec_command`, `ProcessResult`, `is_success`, `free_process_result` | Uses system and POSIX popen/pclose or Windows _popen/_pclose. Status retains the native encoding; free captured results with free_process_result |
@@ -62,7 +62,7 @@ executable. The examples below mark those boundaries.
 | [cli](../../lib/std/cli.fin) | `Arg`, `Command`, `Match`, `parse`/`parse_args`, `free_match`, `free_parse_result`, `free_command` | `parse(args)` excludes argv0 and copies argument text. `parse_args()` reads the full native argument list on Linux, macOS, and Windows; empty arguments and -- are preserved. Tables grow with input. Free results with free_parse_result and registration tables with free_command; registered strings and child pointers remain caller-owned. Subcommands use the root option table; --name=value and grouped short options are not implemented |
 | [serde](../../lib/std/serde.fin) | `Encode`, `Decode` interfaces | The contract resolves through the import a tool writes and `Outcome<Self>` answers inside the interface body; runtime dispatch flows through json::std's free `decode_T` spelling because interface-method dispatch does not lower yet (derives beyond `derive_hash`, ADR 0058, wait on the R3 `==` decision -- reflect-derive-plan §6 records the state); the bundled sample pins the issue's own round trip and the refusal-is-`Err` rule |
 | [json](../../lib/std/json.fin) | `json_encode/decode_int/str/bool/float`, `json_encode/decode_int_array`, `json_encode/decode_intmap/strmap`, `json_escape`, `json_join2/3/4` | All scalar round-trips, the `[int]` pair, and the two prototype maps build and run (sorted key order pinned byte-exact in `Soundness_Json` and the bundled sample); refusals answer `Err` naming the kind; every returned string is fresh, release with `free_str`; v0 is int32 ints, ASCII-only `\u` escapes, no UTF-8 encoding, and the int-array decode caps at 64 elements (all recorded in the module header); the map decode paths answer `Outcome<HashMap<string, T>>` and build and run on the stage compilers too (the earlier stage-allowlist is gone, not pending) |
-| [btreemap](../../lib/std/btreemap.fin) | `BTreeMap` (`new_btree_map`, `len`, `insert`, `remove`, `find`, `key_at`, `value_at`, `free_btree_map`) | The ordered map: two parallel arrays kept sorted under the caller's `less <fn(K, K) -> bool>` comparator, so index order IS sorted order in every compiler at every opt level -- the determinism rule codegen iteration needs, and the reason nothing here is a hash; ordering is the caller's (the same function-field-not-bind reasoning HashMap's header records); `insert` answers true for a new key, false when it replaced; the stored words are the caller's and `free_btree_map` frees only the arrays; O(n) insert is honest v0 (this is spine search, not balancing); spell the instantiation on the receiver (`<BTreeMap<string, int>>`), an `<auto>` receiver is refused by the stage checkers (recorded in the module header) |
+| [btreemap](../../lib/std/btreemap.fin) | `BTreeMap` (`new_btree_map`, `len`, `insert`, `remove`, `find`, `key_at`, `value_at`, `free_btree_map`) | The ordered map: two parallel arrays kept sorted under the caller's `less <fn(K, K) -> bool>` comparator, so index order IS sorted order in every compiler at every opt level -- the determinism rule codegen iteration needs, and the reason nothing here is a hash; ordering is the caller's (the same function-field-not-bind reasoning HashMap's header records); `insert` answers true for a new key, false when it replaced; an ordering operation on a nonempty map without a comparator blames with `BTreeMap needs a comparator; use new_btree_map`; the stored words are the caller's and `free_btree_map` frees only the arrays; O(n) insert is honest v0 (this is spine search, not balancing); spell the instantiation on the receiver (`<BTreeMap<string, int>>`), an `<auto>` receiver is refused by the stage checkers (recorded in the module header) |
 | [intern](../../lib/std/intern.fin) | `Interner` (`new_interner`, `intern`, `resolve`, `size`, `free_interner`) | Same text, same id: a `[string]` sweep answered by strings::std `compare`, so equality is content, not a pointer word or a hash -- a `concat`-computed copy of a stored text lands on the stored id (the bundled sample pins it); ids are the array index, stable for the interner's lifetime (append-only); O(n) `intern` is honest v0, buckets are a stretch; `intern` stores its own `clone` (free the caller's string), `resolve` answers the interner's string, release everything with `free_interner` and never `free_str` a resolve result |
 
 `fs::std`'s `copy_file` preserves embedded NUL bytes and supports copying a file
@@ -179,6 +179,68 @@ allocations owned by keys or values. Shallow map copies alias storage, so choose
 one owner for cleanup.
 `from_prototype` stores each pair through `__set`, so `map!{...}` builds a
 populated map holding the written entries.
+
+## Deque, Queue, and Stack lifetime
+
+`clear()` removes the logical contents but retains capacity for reuse. Explicit
+`free_deque()`, `free_queue()`, and `free_stack()` release backing buffers and reset
+the container to empty. Calling disposal twice on the same owner is safe; a later
+push lazily creates storage again. Copies share buffer handles, so choose one
+owner rather than disposing both copies. Stored pointer/string payloads remain
+caller-owned. There is no implicit destructor.
+
+```fin
+import { Deque, Queue, Stack } from deque::std;
+fun main() <noret> {
+    let deque <Deque<int>> = Deque::<int>{};
+    let queue <Queue<int>> = Queue::<int>{};
+    let stack <Stack<int>> = Stack::<int>{};
+    deque.push_front(7);
+    queue.push(11);
+    stack.push(13);
+    blame deque.pop_back() == 7 && queue.pop() == 11 && stack.pop() == 13;
+    deque.free_deque();
+    queue.free_queue();
+    stack.free_stack();
+    deque.free_deque();
+    deque.push_back(17);
+    blame deque.pop_front() == 17;
+    deque.free_deque();
+    printf("containers released\n");
+}
+```
+
+```output
+containers released
+```
+
+## Native path rules
+
+`path::std` is lexical: it does not inspect the filesystem, expand a current
+working directory, resolve symlinks, or query per-drive directories. POSIX keeps
+`/` as its only separator, so a backslash is a filename byte. Windows recognizes
+both separator spellings in the active system code page; it does not transcode
+UTF-8. Returned strings belong to the caller and are released with `free_path`.
+
+On Windows, drive-root (`C:/x`) and complete UNC (`//server/share/x`) paths are
+fully absolute. `C:x` is drive-relative, and `/x` or `\x` is root-relative without
+a specified drive/share. `join` replaces its first argument with a fully absolute
+second argument. A root-relative second argument keeps the first argument's drive
+or UNC share; a same-drive relative argument appends to its tail, while a different
+drive-relative argument replaces it without inventing a base directory.
+`join("C:", "child")` is `C:child`; ordinary inserted separators remain `/`.
+
+`basename` and `dirname` ignore trailing separators and preserve roots, including
+bare `C:` and complete UNC shares. A root is not a leaf filename for extension or
+stem queries. `normalize` renders ordinary Windows separators as `/`, preserves
+drive/share boundaries, clamps rooted `..` at the root, and retains excess `..`
+for relative paths. It does not turn `C:child` into `C:/child`.
+
+Windows device/verbatim namespaces (`\\?\` and `\\.\`) are unsupported here and
+blame with `Windows path namespace is not supported`. Incomplete nonempty UNC
+forms blame with `incomplete UNC path`. These refusals apply consistently to
+classification and transforming helpers; they are not an extended-path filesystem
+support promise. Separator-only strings remain root-relative.
 
 ## Strings and math
 

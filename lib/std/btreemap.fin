@@ -17,7 +17,9 @@
 // `Comparable` bound would accept anything and dispatch nothing. `new
 // BTreeMap(f)` takes the comparator; "equal" is the two-sided idiom
 // `!f(a, b) && !f(b, a)`, and nothing here compares K any other way, so a
-// caller who mails in a weak comparator owns the order they get.
+// caller who mails in a weak comparator owns the order they get. A bare
+// literal can store its first pair without comparisons, but any ordering
+// operation on a nonempty map blames if no comparator was supplied.
 //
 // OWNERSHIP: the map stores the key and value words as they arrived. A
 // string key is a pointer: it stays valid only while the caller's string
@@ -67,6 +69,7 @@ pub struct BTreeMap<K, V> {
       // it does not exist.
       priv fun position(self: &Self, key: K) <int> {
         let f <fn(K, K) -> bool> = self.less;
+        blame self.filled == 0 || f != null, "BTreeMap needs a comparator; use new_btree_map";
         let pos <int> = 0;
         while (pos < self.filled && f(self.keys[pos], key)) {
             pos = pos + 1;

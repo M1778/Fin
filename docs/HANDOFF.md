@@ -1,13 +1,15 @@
 # Handoff — Fin compiler, v1 production readiness
 
-Updated **2026-10-23** from local `HEAD` @ **`1f7afd9`**, with the local changes
-listed below still uncommitted. Worktree branch `issue-101-asan-type-leaks` is the
-trunk line; `origin/master` is the published truth (see Branches).
+Updated **2026-10-26** at publication preflight, from local `HEAD` @ **`5360b05`**
+with the maintenance changes listed below prepared for commit and push. Worktree
+branch `issue-101-asan-type-leaks` carries the candidate; `origin/master` remains
+at `1f7afd9`. Local `master` has been safely fast-forwarded to that remote revision.
+No merge, branch deletion, tag, release, or deployment is part of this push.
 
 This file is the **single entry point** for the next agent — self-contained by design, including
 for a fresh subagent with no conversation history. It states what is done, what blocks a
-production release, the traps that cost real time, and the order of work. Every number here was
-measured on the date above; **re-measure before quoting**, and re-read `AGENTS.md` (canonical)
+production release, the traps that cost real time, and the order of work. Measurements below
+belong to their dated checkpoints; **re-measure before quoting**, and re-read `AGENTS.md` (canonical)
 when anything here disagrees.
 
 ## Mission — what "production-ready v1" means
@@ -61,14 +63,201 @@ listed. More recent successful CI runs belong to PR/dispatch revisions
 `c259e5a` (run 39795608686) and `9852289` (39741770240), not this uncommitted
 candidate. They are not evidence that the candidate's six native lanes passed.
 
-**Candidate CI follow-up (2026-10-24):** `cc7f166` is pushed only to
-`issue-101-asan-type-leaks`; run 40026847877 passed Linux x86_64/arm64 and macOS
-arm64, while both Windows lanes failed. Logs identified the bare `ws2_32.lib`
-linker input and `sync.fin`'s unsupported `#c_ifndef` cleanup guard. The follow-up
-uses `-lws2_32` and supported `#c_ifdef`/`#c_else`, with regressions. Its local
-selector/callback/sync gate passed 27 tests; docs passed 74 examples. Corrected
-native CI is required before using candidate artifacts as six-platform proof.
-The initial macOS x86_64 and sanitizer jobs were still running at this update.
+**Candidate CI follow-up (2026-10-24):** corrected commit `5360b05` is pushed only
+to `issue-101-asan-type-leaks`. Run **40028977601** passed all six native lanes,
+ASan/UBSan, build-script, and performance jobs. Native logs confirm target selectors,
+imported selector execution, qsort and thread callback results, mutex/thread/channel
+behavior, and joined cleanup passed on every platform. Both Windows lanes passed
+all 11 logging/filesystem tests without skips. The preceding `cc7f166` run
+40026847877 failed on a bare `ws2_32.lib` linker argument and unsupported
+`#c_ifndef` in sync cleanup; `5360b05` corrects both with regressions.
+
+**Current maintenance (local, not pushed):** issues #136 and #135 reproduce on
+`5360b05`. `random::std::rand` now exports the C runtime function directly rather
+than defining a colliding wrapper. BTreeMap ordering on a nonempty map without a
+comparator now blames before calling null; its empty/first-insert behavior is
+unchanged. Issue #138's inclusive int32-span overflow is repaired by wide span
+arithmetic, three-draw 32-bit sampling and rejection of the incomplete bucket. A
+deterministic 15-bit C-rand shim verifies endpoints and rejection, not just bounds.
+
+The random range repair uncovered a stage `cast<long>(negative int)` bug: it
+zero-extended, producing 4294967295 for -1. The explicit cast now preserves source
+signedness, with a cross-stage regression for signed/unsigned/bool values. Scratch
+Stage2/Stage3 converge (SHA-256
+`62b8e413e315e37fe11e3bd7323363f21d6f3f6e88890438ebc7d5dc3f9250a3`).
+Eight focused tests pass; 12 separate Reference/Stage2/Stage3 O0/O2 wide-range and
+shim executions pass with allocator-sanitizer linkage. Focused compiler sanitizer
+tests passed six, with two missing-stage skips; optimized reference tests passed
+five. Docs passed 74 examples. The full local suite passed **3,054 tests,
+57 skipped, zero failures** (3,111 checks, 260.49 seconds). The native green
+checkpoint above predates these uncommitted compiler/library changes. Issues
+#140–#142 remain separate, unimplemented slices; #139 is covered below.
+
+**Deadline maintenance (#139, local):** `deadline_after_ms` now checks offsets
+against the remaining signed-long nanosecond range before multiplication/addition.
+A deterministic near-limit clock stub verifies zero/1ms/2ms, one-past addition,
+multiplication overflow and the existing negative-offset blame at `-O0`/`-O2`.
+The reference Debug, Release and focused ASan/UBSan gates pass. Cross-stage testing
+also exposed dynamic `[long]` arithmetic narrowing (#144) and implicit negative
+int-to-long argument widening (#143's call path); both have failing-before public
+regressions and local fixes. All **24 deterministic deadline executions** pass
+across Reference/Stage2/Stage3 at `-O0`/`-O2`; nine cross-stage integer regressions
+pass. The focused compiler sanitizer gate passed 12 tests with six missing-stage
+skips. Scratch Stage2/Stage3 converge (SHA-256
+`f6310759f2d57eeb6b9c602439d921f1011d70da90743a25bee919f597d13b5c`).
+The full local gate passed **3,061 tests, 57 skipped, zero failures**
+(3,118 checks, 267.99 seconds). Twelve additional real-clock overflow
+executions passed across all stages at both optimization levels. Native CI at
+`5360b05` does not cover these uncommitted changes.
+
+**Base64 maintenance (#140, local):** decoding now rejects any '=' before its
+zero/one/two-byte contiguous terminal suffix. Leading, discontinuous, excess and
+nonterminal padding blame before decoded-output allocation. Null/empty inputs and
+existing length/alphabet diagnostics remain; unused pad bits stay permissive.
+Native byte-comparator regressions cover valid tails, high bytes, embedded NULs,
+terminators and noncanonical pad-bit controls. Both reference tests pass, including
+ASan/UBSan and optimized builds; **96 allocator-linked cross-stage executions**
+pass at `-O0`/`-O2`. The full local gate passed **3,063 tests, 57 skipped,
+zero failures** (3,120 checks, 277.28 seconds). Independent read-only testing
+reports 348/348 byte-sensitive cases passed across all stages and both optimization
+levels. These library changes remain uncommitted; no new native remote CI applies.
+#141/#142 are covered in the later maintenance sections.
+
+**Deque lifecycle maintenance (#141, local):** explicit `free_deque`,
+`free_queue`, and `free_stack` release backing buffers, reset to empty and allow
+lazy reuse. `clear()` retains capacity. Methods are idempotent for one owner;
+copies still share handles, pointer/string payloads remain caller-owned, and no
+implicit destructor is introduced. Nine cross-stage regressions first failed for
+the absent API and now pass at `-O0`/`-O2` with Linux allocator checks. The pointer
+payload cases also exposed stage receiver lookup stripping an '&' inside
+`Deque<&int>`/`Stack<&int>`; it now uses the existing outer-marker helper. This
+returning-method path is independently tracked as #145, with a regression reading
+`Deque<&int>.pop_front()` into a pointer binding.
+Scratch Stage2/Stage3 converge (SHA-256
+`9673f7e82858ee4c0e6acd95eba0b0a393590c5c69afb069309ec4881186c451`).
+The expanded local full gate passed **3,072 tests, 57 skipped, zero failures**
+(3,129 checks, 275.98 seconds). Eighteen separate allocator-linked lifecycle
+executions pass; independent read-only verification reports 24/24 allocation-balanced
+cases passed. Focused compiler sanitizer tests passed three with six missing-stage
+skips; optimized reference/stage tests passed nine. Docs passed 75 examples with six
+fragments skipped. Repairs remain uncommitted and not covered by new native CI.
+Windows path issue #142 is covered below.
+
+**Windows path maintenance (#142, local):** the approved stdlib-only repair
+recognizes both separators, drive-relative/root-relative/drive-root prefixes and
+complete UNC shares. Fully absolute replacements, same/different-drive joins,
+root-preserving basename/dirname, and prefix-aware lexical normalization are
+covered; inserted/normalized separators remain '/' to preserve existing output.
+Device/verbatim namespaces and incomplete nonempty UNC roots blame by name.
+DBCS forward boundary scanning protects a trailing 0x5c byte. Five focused tests
+pass, including reference/stage POSIX controls and supplemental Windows prefix,
+DBCS-shim and named-refusal cases. Six allocator-linked Windows-selected matrices
+pass across all stages at `-O0`/`-O2`. Focused sanitizer tests passed three with two
+missing-stage skips, optimized current reference/stage tests passed five. Frozen
+candidate source: `build/release-check/path-work/path-candidate-58a658e.fin`,
+SHA-256 `58a658e18c16116075ce25cc4fa9894b9ca5971fba0fbd57f539d2d48fb07bd3`.
+The final same-source local full gate passed **3,077 tests, 57 skipped, zero
+failures** (3,134 checks, 278.59 seconds), including the final native-byte DBCS
+fixtures.
+Independent exact-final candidate verification reports **410 native Windows** and
+**1,350 POSIX** byte/terminator/refusal cases passed, with hashes stable before/after.
+Six additional allocator-linked DBCS-byte fixture runs pass across all local
+stages. Independent native Windows verification used ACP1252 and observed
+`IsDBCSLeadByteEx(0, 0x83) == false`; that native DBCS fixture was explicitly
+skipped without changing the host code page. These supplemental tests alone
+are not native Windows proof; repairs remain uncommitted and are not covered by a
+new six-platform CI run. The independent native report uses the previously verified
+Windows compiler artifact with the frozen candidate library, not a compiler rebuild.
+
+**Negated-keyword macro maintenance (#146, local):** the stage text expander
+now consults `token::std::lookup_keyword` before interpreting identifier-plus-bang
+as an invocation. Reserved keywords such as `blame` and `return` followed by unary
+parenthesized negation no longer become undefined `blame!`/`return!` macros.
+Genuine identifier/dotted macros, '!=' handling, strings/comments, and undefined
+identifier macro diagnostics keep their existing behavior. Nine public cross-stage
+regressions first reproduced the defect and now pass at `-O0`/`-O2`.
+Scratch Stage2/Stage3 converge (SHA-256
+`715ea9a9fcb9644899a40060493356c3d04b887946271a8fd012b1ccf017a49c`).
+The expanded local full gate passed **3,086 tests, 57 skipped, zero failures**
+(3,143 checks, 283.70 seconds). Eighteen extra compile/runtime boundary checks
+passed, including allocator-linked valid programs and unchanged unknown-macro
+refusals. Optimized reference/stage tests passed nine; focused compiler sanitizer
+tests passed three with six missing-stage skips. Independent scoped boundary
+verification passed **192/192**; its expanded matrix passed **196/204**, retaining
+eight pre-existing comment-trivia failures subsequently tracked as #147. Changes
+remain uncommitted and not covered by a new native six-platform CI run.
+
+**Comment-trivia macro maintenance (#147, local, 2026-10-25):** stage invocation
+lookahead now skips whitespace, line comments, and nested block comments at both
+bang boundaries without mutating the scanner cursor. One nested-comment end
+helper also protects ordinary comment copying and declaration/argument scans.
+An expanded red test caught macro-looking text after an inner `*/`; it now stays
+inside its outer comment. Parser `expect` preserves scanner error tokens rather
+than replacing an unterminated-comment diagnostic with `expected ';'`.
+All **24 focused parameterized tests** pass (Reference/Stage2/Stage3, both
+optimization levels inside each test), covering keyword negation, genuine/unknown
+calls, dotted imports, bracket/braced arguments, nested comments, quoted/comment
+text, following diagnostic lines, and unterminated trivia at both boundaries.
+Stage2/Stage3 converge at SHA-256
+`4dee1965a176a1f1f8b9452389171b08ab25d88d6aa5edea551a55c0bba79355`;
+stable scratch paths are `build/ownership-work/trivia-final-stage2` and
+`build/ownership-work/trivia-final-stage3`. Driver source SHA-256:
+`58a6ec764293ae8904cacf456b789fb313e27467051a3a7104b4bb5d5ba8dd7e`;
+parser source SHA-256:
+`964f39fe425d713bd061afbc14491637840550e664470e1bf59804a358e086e3`.
+The full local gate passed **3,101 tests, 57 skipped, zero failures** (3,158
+checks, 540.90 seconds). Documentation: **75 examples passed, six explicit
+fragments skipped**; formatting and site checks passed. No new native remote CI
+or publication is implied. #148 prototype tests were added after this historical
+full gate; their later results are recorded separately below.
+
+**String-key prototype maintenance (#148, local, 2026-10-26):** lookup, store,
+`delete &p[key]`, and `p.rm(key)` now share a per-entry key-kind comparison.
+String keys compare contents, including separately allocated equal strings;
+integer and opaque words never enter the string-byte path. Null keys avoid byte
+reads, and `memcmp` is bounded by the shorter string. Equal-key stores update
+rather than append. Growth appends key tags; erasure shifts keys, values, and tags
+together and updates both lengths. Unsupported probe/store/erase key forms
+explicitly refuse instead of emitting invalid operands or guessing slot zero.
+
+The first homogeneous-tag candidate failed three full-suite agreement checks
+on the normative mixed-key `prototype_test.fin`. Per-entry tags repair that
+regression without changing its expectation or adding an allowlist. Follow-up red
+checks caught invalid array deallocation through key-half aliases, repeated
+literal-receiver evaluation during cleanup, untracked call/cast/return escapes,
+and key annotations overwritten by a differently typed shadow binding.
+Concrete key-half initializer aliases now retain their header provenance and
+release the tag buffer with the key allocation; incompatible/erased projection
+writes and direct key-buffer call/cast/return escapes explicitly refuse.
+
+The current candidate passes **60 focused checks, three explicit reference skips,
+zero failures** (63 checks, including all three `prototype_test` agreement checks;
+prototype programs test both `-O0`/`-O2`). Stage2/Stage3 converge at SHA-256
+`59467f91730305bf2db5535675eafa07ece0109409b520eae18b383c5aaa5998`;
+stable scratch paths are `build/ownership-work/prototype-scoped-stage2` and
+`build/ownership-work/prototype-scoped-stage3`. Codegen source SHA-256:
+`ba154fa8453af966c176ce6bb10568c7321c9a3a474d080b7915fbac616c7726`.
+The earlier `prototype-verified` full run was stopped after the scoped-annotation
+regression was discovered; it is not a completed gate. The corrected candidate's
+full local gate passed **3,158 tests, 60 skipped, zero failures** (3,218 checks,
+544.18 seconds). The skips include the three explicit reference boundaries above;
+no normative sample expectation or stage allowlist was changed.
+
+Allocator-linked checks pass **72 compile/run combinations**. Generated Fin
+loads/stores are not sanitizer-instrumented, and leak detection was disabled for
+the existing prototype-header ownership limitation. Four additional allocation
+interposition audits confirm key/value/tag buffers are released through direct
+and aliased cleanup at both optimization levels, while existing header allocations
+remain retained. Focused reference-compiler ASan/UBSan checks pass **17 tests,
+43 skipped, zero failures**: 40 missing-stage parameters and three explicit
+reference skips. Documentation passes **75 examples, six explicit fragment skips**;
+site and formatting checks pass. The user authorized commit/push and CI checking
+on 2026-10-26. These maintenance changes are being published on the existing
+candidate branch, with a fresh `ci.yml` dispatch after push; its native results are
+pending and the older green run is not proof for this revision. Release/Pages
+workflows are not dispatched. This slice does not establish general prototype key/value
+support, half rebinding/aggregate escape safety, borrow checking, or whole-header
+ownership; `get`, `contains`, and `remove` stage support remain outside the claim.
 
 **Release:** remote tag **`v0.4.0` already exists** at **`14547b4`**. Its release run
 **39419160854** failed on musl, both Windows platforms, and both macOS platforms;
@@ -148,7 +337,7 @@ Independent review found no concrete defects in those changes. Performance
 benchmarks compile and produce correct outputs; current WSL2 timings are not
 comparable to the checked-in native-Artix baseline.
 
-**Uncommitted work in this checkout:**
+**Earlier production-candidate work (committed by `5360b05`):**
 
 - Native ABI definitions (`FIN_TARGET_WINDOWS`, `FIN_TARGET_DARWIN`,
   `FIN_TARGET_LINUX`, `FIN_TARGET_X86_64`, `FIN_TARGET_ARM64`) use existing
@@ -341,8 +530,9 @@ A backend-disabled build proves nothing — always verify executable behavior.
 - A bare `git push` from the worktree pushes the *branch's own* upstream
   (`origin/issue-101-asan-type-leaks`), **not** `master` — this bit once; always verify with
   `git ls-remote origin refs/heads/master` after pushing.
-- The local `master` ref is **stale** (`f942725`, "wsl-migration WIP snapshot") — never use it
-  as ground truth. `origin/master` is truth.
+- Local `master` was fast-forwarded from `f942725` to `origin/master` @ `1f7afd9`
+  on 2026-10-26, without changing the worktree. Fetch and compare remote refs before
+  choosing a base; the candidate branch remains separate until a merge is authorized.
 - 29 merged remote branches were deleted on 2026-10-20. Kept: the above + `issue-108-*`
   (landed, verify), one opencode worktree (`bs1-issue96`, detached `9ba36f6`) — leave it alone.
 

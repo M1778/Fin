@@ -130,6 +130,7 @@ pub struct LocalVar {
       val <&LLVMValue> = null,
       ty <&LLVMType> = null,
       type_annotation <string> = "",
+      prototype_annotation <string> = "",
       len_val <&LLVMValue> = null,
       elem_ty <&LLVMType> = null,
       // Prototype-half provenance: this `[T]` binding was initialized from
@@ -138,6 +139,8 @@ pub struct LocalVar {
       // type. Index and length paths read it accordingly; the declaration
       // site also fills len_val from the header count.
       is_proto_half <bool> = false,
+      prototype_key_half <bool> = false,
+      prototype_half_header <&LLVMValue> = null,
       scope_depth <int> = 0,
       destroyed <bool> = false,
       // Wave-5 slice 1: moved-from on some path (union). Read only by the
@@ -1839,7 +1842,7 @@ fun is_prototype_node(ctx: &FnContext, node: &AstNode) <bool> {
 
 // A prototype half: `prtp.0` (keys) or `prtp.1` (values) where the inner
 // names a prototype (literal, or an ident annotated `prototype`/`{K, V}`).
-// The header shape is fixed ({keys_ptr, len, vals_ptr, vallen}): the half
+// The header holds keys_ptr, len, vals_ptr, vallen, and key_tags_ptr. A half
 // lowers to the raw i64 buffer, and the entry count lives in the header
 // slot beside it (1 for keys, 3 for values).
 fun is_prototype_half(ctx: &FnContext, node: &AstNode) <bool> {
@@ -1849,10 +1852,9 @@ fun is_prototype_half(ctx: &FnContext, node: &AstNode) <bool> {
     return is_prototype_node(ctx, node.left);
 }
 
-// Whether an LLVM value is an integer word (a usable prototype position
-// for word-compared keys). Anything else keeps the legacy slot-0 read in
-// the subscript paths where key search is unmodeled; string keys scan by
-// content beside this.
+// Whether an LLVM value is an integer word. Prototype integer keys compare
+// words; string keys compare contents after checking the per-entry tag.
+// Other probe shapes are explicitly refused.
 fun cg_is_int_llvm(ctx: &FnContext, ty: &LLVMType) <bool> {
     if (ty == ctx.i32_ty) { return true; }
     if (ty == ctx.i64_ty) { return true; }
@@ -4867,6 +4869,12 @@ fun get_index_elem_type(ctx: &FnContext, base_node: &AstNode) <&LLVMType> {
         if (cg_str_eq(ty_ann, "[short]") || cg_str_eq(ty_ann, "short*") || cg_str_eq(ty_ann, "[ushort]") || cg_str_eq(ty_ann, "ushort*") || cg_str_eq(ty_ann, "[i16]") || cg_str_eq(ty_ann, "i16*") || cg_str_eq(ty_ann, "[u16]") || cg_str_eq(ty_ann, "u16*") || cg_str_eq(ty_ann, "[int{16}]") || cg_str_eq(ty_ann, "[uint{16}]")) {
             return ctx.i16_ty;
         }
+        if (cg_str_eq(ty_ann, "[long]") || cg_str_eq(ty_ann, "[ulong]") ||
+          cg_str_eq(ty_ann, "[i64]") || cg_str_eq(ty_ann, "[u64]") ||
+          cg_str_eq(ty_ann, "[int{64}]") || cg_str_eq(ty_ann, "[uint{64}]") ||
+          cg_str_eq(ty_ann, "long*") || cg_str_eq(ty_ann, "ulong*")) {
+            return ctx.i64_ty;
+          }
         if (cg_str_eq(ty_ann, "[int]") || cg_str_eq(ty_ann, "int*") || cg_str_eq(ty_ann, "[uint]") || cg_str_eq(ty_ann, "uint*") || cg_str_eq(ty_ann, "[i32]") || cg_str_eq(ty_ann, "i32*") || cg_str_eq(ty_ann, "[u32]") || cg_str_eq(ty_ann, "u32*") || cg_str_eq(ty_ann, "[int{32}]") || cg_str_eq(ty_ann, "[uint{32}]")) {
             return ctx.i32_ty;
         }
@@ -5448,7 +5456,8 @@ fun cg_lower_string_eq(ctx: &FnContext, lhs: &LLVMValue, rhs: &LLVMValue, want_n
     let cmp_args <&LLVMValueArgs> = new LLVMValueArgs{};
     cmp_args.v[0] = lhs;
     cmp_args.v[1] = rhs;
-    cmp_args.v[2] = llen;
+    let shorter <&LLVMValue> = llvm_build_icmp(ctx.builder, llvm_int_ult(), llen, rlen, "str.shorter");
+    cmp_args.v[2] = llvm_build_select(ctx.builder, shorter, llen, rlen, "str.minlen");
     let cmp <&LLVMValue> = llvm_build_call2(ctx.builder, memcmp_ty, memcmp_fn, cmp_args, 3, "str.cmp");
     delete cmp_args;
     let zero32 <&LLVMValue> = llvm_const_int(ctx.i32_ty, 0, 0);
@@ -5475,6 +5484,96 @@ fun cg_lower_string_eq(ctx: &FnContext, lhs: &LLVMValue, rhs: &LLVMValue, want_n
     llvm_add_incoming(phi, phi_vals, phi_blks, 2);
     delete phi_vals;
     delete phi_blks;
+    return phi;
+}
+
+// A concrete key annotation is required for mutable key projections. An
+// erased projection could replace text with an integer without updating
+// the per-entry tag, so refuse that write rather than trust it.
+fun cg_prototype_key_annotation(ctx: &FnContext, node: &AstNode) <string> {
+    let ann <string> = cg_eq_operand_ann(ctx, node);
+    if (node != null && node.kind == ast_ident()) {
+        let v <&LocalVar> = fn_ctx_find_var(ctx, node.name);
+        if (v != null && cg_strlen(v.prototype_annotation) > cast<ulong>(0)) { ann = v.prototype_annotation; }
+    }
+    let len <int> = cast<int>(cg_strlen(ann));
+    if (len < 3 || !cg_str_eq(substr(ann, 0, 1), "{")) { return ""; }
+    let comma <int> = 1;
+    while (comma < len && !cg_str_eq(substr(ann, comma, 1), ",")) { comma++; }
+    if (comma >= len) { return ""; }
+    return cg_trim_spaces(substr(ann, 1, comma - 1));
+}
+
+fun cg_prototype_key_buffer(ctx: &FnContext, node: &AstNode) <bool> {
+    if (node == null) { return false; }
+    if (is_prototype_half(ctx, node)) { return cg_str_eq(node.name, "0"); }
+    if (node.kind == ast_ident()) {
+        let v <&LocalVar> = fn_ctx_find_var(ctx, node.name);
+        return v != null && v.prototype_key_half;
+    }
+    if (node.kind == ast_unary_expr() && (cg_str_eq(node.name, "cast") || cg_str_eq(node.name, "&"))) {
+        return cg_prototype_key_buffer(ctx, node.left);
+    }
+    return false;
+}
+
+fun cg_prototype_half_buffer(ctx: &FnContext, hdr: &LLVMValue, key_half: bool) <&LLVMValue> {
+    let slot <int> = 2;
+    if (key_half) { slot = 0; }
+    let ind <&LLVMIndices> = new LLVMIndices{};
+    ind.i0 = llvm_const_int(ctx.i64_ty, slot, 0);
+    let ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, hdr, ind, 1, "p_half");
+    delete ind;
+    return llvm_build_load2(ctx.builder, ctx.ptr_ty, ptr, "half_buf");
+}
+
+fun cg_prototype_concrete_keys(ctx: &FnContext, node: &AstNode) <bool> {
+    let key_ann <string> = cg_prototype_key_annotation(ctx, node);
+    if (cg_strlen(key_ann) == cast<ulong>(0)) { return false; }
+    if (cg_ann_is_string(key_ann)) { return true; }
+    if (cg_str_eq(key_ann, "any") || cg_str_eq(key_ann, "object") || is_nullable_type(key_ann)) { return false; }
+    return cg_is_int_llvm(ctx, map_type(ctx, key_ann));
+}
+
+// A third parallel buffer records each key word's kind: integer (1),
+// string (2), or another opaque representation (3). Header word 4 holds
+// that buffer. Projections retain their existing flat i64 layout.
+fun cg_prototype_key_eq(ctx: &FnContext, hdr: &LLVMValue, position: &LLVMValue, candidate: &LLVMValue, key: &LLVMValue, str_key: bool) <&LLVMValue> {
+    let ind <&LLVMIndices> = new LLVMIndices{};
+    ind.i0 = llvm_const_int(ctx.i64_ty, 4, 0);
+    let tags_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, hdr, ind, 1, "pkey.tags.p");
+    let tags <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, tags_ptr, "pkey.tags");
+    ind.i0 = position;
+    let kind_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, tags, ind, 1, "pkey.kind.p");
+    delete ind;
+    let kind <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, kind_ptr, "pkey.kind");
+    let wanted <int> = 1;
+    if (str_key) { wanted = 2; }
+    let compatible <&LLVMValue> = llvm_build_icmp(ctx.builder, llvm_int_eq(), kind, llvm_const_int(ctx.i64_ty, wanted, 0), "pkey.compatible");
+    if (!str_key) {
+        let equal <&LLVMValue> = llvm_build_icmp(ctx.builder, llvm_int_eq(), candidate, key, "pkey.eq");
+        return llvm_build_and(ctx.builder, compatible, equal, "pkey.match");
+    }
+    let before <&LLVMBasicBlock> = llvm_get_insert_block(ctx.builder);
+    let content_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "pkey.string");
+    let done_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "pkey.done");
+    llvm_build_cond_br(ctx.builder, compatible, content_bb, done_bb);
+    llvm_position_builder(ctx.builder, content_bb);
+    let text <&LLVMValue> = llvm_build_int_to_ptr(ctx.builder, candidate, ctx.ptr_ty, "pkey.text");
+    let equal <&LLVMValue> = cg_lower_string_eq(ctx, text, key, false);
+    let content_exit <&LLVMBasicBlock> = llvm_get_insert_block(ctx.builder);
+    llvm_build_br(ctx.builder, done_bb);
+    llvm_position_builder(ctx.builder, done_bb);
+    let phi <&LLVMValue> = llvm_build_phi(ctx.builder, ctx.i1_ty, "pkey.match");
+    let vals <&LLVMValueArgs> = new LLVMValueArgs{};
+    vals.v[0] = llvm_const_int(ctx.i1_ty, 0, 0);
+    vals.v[1] = equal;
+    let blocks <&LLVMBlockArgs> = new LLVMBlockArgs{};
+    blocks.b0 = before;
+    blocks.b1 = content_exit;
+    llvm_add_incoming(phi, vals, blocks, 2);
+    delete vals;
+    delete blocks;
     return phi;
 }
 
@@ -5514,7 +5613,7 @@ fun cg_decl_is_derive_hash_leaf(decl: &AstNode) <bool> {
 // Scan mirrors the subscript path above; one copy keeps them agreeing.
 fun cg_prototype_erase(ctx: &FnContext, hdr_val: &LLVMValue, key_val: &LLVMValue, str_key: bool, line: int) <&LLVMValue> {
     if (ctx == null || hdr_val == null || key_val == null) { return null; }
-    let key64 <&LLVMValue> = null;
+    let key64 <&LLVMValue> = key_val;
     if (!str_key) {
         key64 = coerce_val(ctx, key_val, ctx.i64_ty);
     }
@@ -5563,17 +5662,7 @@ fun cg_prototype_erase(ctx: &FnContext, hdr_val: &LLVMValue, key_val: &LLVMValue
     let cand_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, k_buf, ind_c, 1, "rmkey");
     delete ind_c;
     let cand <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, cand_ptr, "rmkey.ld");
-    let key_eq <&LLVMValue> = null;
-    if (str_key) {
-        // Words in the flat buffer carry no kind tag; string keys were
-        // stored as `ptr_to_int` text pointers, so a string key meets
-        // word equality like an int one. A deref'd content compare would
-        // read an int-holding entry's word as an address (C++ too only
-        // runs byte comparisons on tagged-as-string payloads).
-        key_eq = llvm_build_icmp(ctx.builder, llvm_int_eq(), cand, key64, "rmkey.eq");
-    } else {
-        key_eq = llvm_build_icmp(ctx.builder, llvm_int_eq(), cand, key64, "rmkey.eq");
-    }
+    let key_eq <&LLVMValue> = cg_prototype_key_eq(ctx, hdr_val, cur_i, cand, key64, str_key);
     llvm_build_cond_br(ctx.builder, key_eq, efound_bb, next_bb);
     llvm_position_builder(ctx.builder, efound_bb);
     llvm_build_store(ctx.builder, llvm_const_int(ctx.i1_ty, 1, 0), hit_s);
@@ -5616,6 +5705,16 @@ fun cg_prototype_erase(ctx: &FnContext, hdr_val: &LLVMValue, key_val: &LLVMValue
     let vt_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, v_buf, ind_vt, 1, "rmvt");
     delete ind_vt;
     llvm_build_store(ctx.builder, llvm_build_load2(ctx.builder, ctx.i64_ty, vf_ptr, "rmvf.ld"), vt_ptr);
+    let tag_ind <&LLVMIndices> = new LLVMIndices{};
+    tag_ind.i0 = llvm_const_int(ctx.i64_ty, 4, 0);
+    let tags_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, hdr_val, tag_ind, 1, "rm.tags.p");
+    let tags <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, tags_ptr, "rm.tags");
+    tag_ind.i0 = from_i;
+    let tag_from <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, tags, tag_ind, 1, "rm.tag.from");
+    tag_ind.i0 = mv_i;
+    let tag_to <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, tags, tag_ind, 1, "rm.tag.to");
+    delete tag_ind;
+    llvm_build_store(ctx.builder, llvm_build_load2(ctx.builder, ctx.i64_ty, tag_from, "rm.tag"), tag_to);
     llvm_build_store(ctx.builder, from_i, mv_s);
     llvm_build_br(ctx.builder, move_bb);
     llvm_position_builder(ctx.builder, close_bb);
@@ -8604,10 +8703,28 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
     }
     if (n.kind == ast_unary_expr()) {
         if (cg_str_eq(n.name, "cast")) {
+            if (cg_prototype_key_buffer(ctx, n.left)) {
+                cg_dprintf(2, "finc codegen refusal: prototype key buffers cannot escape through casts (ADR 0028)\n");
+                refuse_and_poison(ctx);
+                return null;
+            }
             let inner <&LLVMValue> = lower_expr(ctx, n.left);
             if (inner == null) { return null; }
             if (n.type_annotation != null) {
                 let target_ty <&LLVMType> = map_type(ctx, n.type_annotation);
+                let source_ty <&LLVMType> = llvm_type_of(inner);
+                if (target_ty == ctx.i64_ty && source_ty != target_ty && cg_is_int_llvm(ctx, source_ty)) {
+                    let source_ann <string> = cg_eq_operand_ann(ctx, n.left);
+                    if (n.left != null && n.left.kind == ast_call_expr()) {
+                        let symbol <&FnSymbol> = fn_ctx_find_fn(ctx, n.left.name);
+                        if (symbol != null && cg_strlen(symbol.value_return) > cast<ulong>(0)) {
+                            source_ann = symbol.value_return;
+                        }
+                    }
+                    if (source_ty != ctx.i1_ty && cg_ann_is_signed(source_ann)) {
+                        return llvm_build_sext(ctx.builder, inner, target_ty, "cast.signed");
+                    }
+                }
                 return coerce_val(ctx, inner, target_ty);
             }
             return inner;
@@ -8971,18 +9088,16 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 // parallel keys/vals buffers of i64 words; a key scans the
                 // keys for its position and reads the value at the same
                 // position (C++ emitPrototypeScan), blaming when no key
-                // matches. Integer keys compare words; string keys (pointer
-                // words holding text) compare by content, so a literal in
-                // one place matches the same text in another. Any other key
-                // keeps the legacy slot-0 read: key search is not modeled
-                // on stage for those.
+                // matches. Integer keys compare words; string keys compare
+                // contents only when the header identifies string storage.
+                // Other key forms explicitly refuse (ADR 0028).
                 let idx_ty_p <&LLVMType> = llvm_type_of(idx_val);
                 let str_key <bool> = false;
                 if (idx_ty_p == ctx.ptr_ty && cg_operand_is_string(ctx, n.right)) {
                     str_key = true;
                 }
                 if (cg_is_int_llvm(ctx, idx_ty_p) || str_key) {
-                    let key64 <&LLVMValue> = null;
+                    let key64 <&LLVMValue> = idx_val;
                     if (!str_key) {
                         key64 = coerce_val(ctx, idx_val, ctx.i64_ty);
                     }
@@ -9025,19 +9140,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                     let cand_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, k_buf, ind_c, 1, "pkey");
                     delete ind_c;
                     let cand <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, cand_ptr, "pkey.ld");
-                    let key_eq <&LLVMValue> = null;
-                    if (str_key) {
-                        // Words in the flat buffer carry no kind tag;
-                        // string keys were stored as `ptr_to_int` text
-                        // pointers, so a string key meets word equality
-                        // like an int one. A deref'd content compare would
-                        // read an int-holding entry's word as an address
-                        // (C++ too only runs byte comparisons on
-                        // tagged-as-string payloads).
-                        key_eq = llvm_build_icmp(ctx.builder, llvm_int_eq(), cand, key64, "pkey.eq");
-                    } else {
-                        key_eq = llvm_build_icmp(ctx.builder, llvm_int_eq(), cand, key64, "pkey.eq");
-                    }
+                    let key_eq <&LLVMValue> = cg_prototype_key_eq(ctx, arr_val, cur_i, cand, key64, str_key);
                     llvm_build_cond_br(ctx.builder, key_eq, pfound_bb, next_bb);
                     llvm_position_builder(ctx.builder, pfound_bb);
                     llvm_build_store(ctx.builder, llvm_const_int(ctx.i1_ty, 1, 0), hit_s);
@@ -9063,16 +9166,10 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                     delete ind_h;
                     return llvm_build_load2(ctx.builder, ctx.i64_ty, hit_ptr, "pval.ld");
                 }
-                let ind_v <&LLVMIndices> = new LLVMIndices{};
-                ind_v.i0 = llvm_const_int(ctx.i64_ty, 2, 0);
-                let pv_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, arr_val, ind_v, 1, "pv_p");
-                delete ind_v;
-                let v_buf <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, pv_ptr, "v_buf");
-                let ind0 <&LLVMIndices> = new LLVMIndices{};
-                ind0.i0 = llvm_const_int(ctx.i64_ty, 0, 0);
-                let v0_gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, v_buf, ind0, 1, "v0");
-                delete ind0;
-                return llvm_build_load2(ctx.builder, ctx.i64_ty, v0_gep, "val_at_0");
+                cg_dprintf(2, "finc codegen refusal: prototype subscript lookup accepts integer or string keys only (ADR 0028)\n");
+                refuse_and_poison(ctx);
+                llvm_build_unreachable(ctx.builder);
+                return null;
             }
             if (is_prototype_half(ctx, n.left)) {
                 // `(prtp.0)[i]` / `(prtp.1)[i]`: the half already lowered to
@@ -9121,13 +9218,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             if (base_val != null) {
                 let b_ty <&LLVMType> = llvm_type_of(base_val);
                 if (is_prototype_node(ctx, n.left)) {
-                    let slot_idx <int> = 0;
-                    if (cg_str_eq(n.name, "1")) { slot_idx = 2; }
-                    let ind <&LLVMIndices> = new LLVMIndices{};
-                    ind.i0 = llvm_const_int(ctx.i64_ty, slot_idx, 0);
-                    let p_slot <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, base_val, ind, 1, "p_half");
-                    delete ind;
-                    return llvm_build_load2(ctx.builder, ctx.ptr_ty, p_slot, "half_buf");
+                    return cg_prototype_half_buffer(ctx, base_val, cg_str_eq(n.name, "0"));
                 }
                 let e_owner <&EnumInfo> = find_enum_by_llvm_type(ctx, b_ty);
                 if (e_owner == null) {
@@ -9665,21 +9756,9 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                                 let cand_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, k_buf, ind_c, 1, "pkey");
                                 delete ind_c;
                                 let cand <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, cand_ptr, "pkey.ld");
-                                let key_eq <&LLVMValue> = null;
-                                if (str_key) {
-                                    // Words in the flat buffer carry no
-                                    // kind tag; string keys were stored as
-                                    // `ptr_to_int` text pointers, so a
-                                    // string key meets word equality like
-                                    // an int one. A deref'd content compare
-                                    // would read an int-holding entry's
-                                    // word as an address (C++ too only runs
-                                    // byte comparisons on tagged-as-string
-                                    // payloads).
-                                    key_eq = llvm_build_icmp(ctx.builder, llvm_int_eq(), cand, key64, "pkey.eq");
-                                } else {
-                                    key_eq = llvm_build_icmp(ctx.builder, llvm_int_eq(), cand, key64, "pkey.eq");
-                                }
+                                let compare_key <&LLVMValue> = key64;
+                                if (str_key) { compare_key = idx_val; }
+                                let key_eq <&LLVMValue> = cg_prototype_key_eq(ctx, arr_val, cur_i, cand, compare_key, str_key);
                                 llvm_build_cond_br(ctx.builder, key_eq, pfound_bb, pnext_bb);
                                 llvm_position_builder(ctx.builder, pfound_bb);
                                 llvm_build_store(ctx.builder, llvm_const_int(ctx.i1_ty, 1, 0), hit_s);
@@ -9718,6 +9797,22 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                                 rv_args.v[1] = word_cnt;
                                 let nv_buf <&LLVMValue> = llvm_build_call2(ctx.builder, realloc_ty, realloc_fn, rv_args, 2, "v_grow");
                                 delete rv_args;
+                                let tag_ind <&LLVMIndices> = new LLVMIndices{};
+                                tag_ind.i0 = llvm_const_int(ctx.i64_ty, 4, 0);
+                                let tags_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, arr_val, tag_ind, 1, "pset.tags.p");
+                                let tags_buf <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, tags_ptr, "pset.tags");
+                                let tag_args <&LLVMValueArgs> = new LLVMValueArgs{};
+                                tag_args.v[0] = tags_buf;
+                                tag_args.v[1] = word_cnt;
+                                let new_tags <&LLVMValue> = llvm_build_call2(ctx.builder, realloc_ty, realloc_fn, tag_args, 2, "tags_grow");
+                                delete tag_args;
+                                llvm_build_store(ctx.builder, new_tags, tags_ptr);
+                                tag_ind.i0 = len64;
+                                let tag_slot <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, new_tags, tag_ind, 1, "tag_slot");
+                                delete tag_ind;
+                                let kind <int> = 1;
+                                if (str_key) { kind = 2; }
+                                llvm_build_store(ctx.builder, llvm_const_int(ctx.i64_ty, kind, 0), tag_slot);
                                 let ind_nk <&LLVMIndices> = new LLVMIndices{};
                                 ind_nk.i0 = llvm_const_int(ctx.i64_ty, 0, 0);
                                 let nk_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, arr_val, ind_nk, 1, "nk_p");
@@ -9757,6 +9852,21 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                                 return rhs;
                             }
                         } else if (is_prototype_half(ctx, n.left.left)) {
+                            if (cg_str_eq(n.left.left.name, "0") && !cg_prototype_concrete_keys(ctx, n.left.left.left)) {
+                                cg_dprintf(2, "finc codegen refusal: prototype key projection writes require a concrete key type (ADR 0028)\n");
+                                refuse_and_poison(ctx);
+                                return null;
+                            }
+                            if (cg_str_eq(n.left.left.name, "0")) {
+                                let string_storage <bool> = cg_ann_is_string(cg_prototype_key_annotation(ctx, n.left.left.left));
+                                let matching <bool> = cg_is_int_llvm(ctx, llvm_type_of(rhs));
+                                if (string_storage) { matching = llvm_type_of(rhs) == ctx.ptr_ty && cg_operand_is_string(ctx, n.right); }
+                                if (!matching) {
+                                    cg_dprintf(2, "finc codegen refusal: prototype key projection writes require a matching key kind (ADR 0028)\n");
+                                    refuse_and_poison(ctx);
+                                    return null;
+                                }
+                            }
                             // Store through `(prtp.0)[i]` / `(prtp.1)[i]`:
                             // the half is the raw i64 buffer already.
                             let sidx64_h <&LLVMValue> = llvm_build_sext(ctx.builder, idx_val, ctx.i64_ty, "sidx64h");
@@ -9772,6 +9882,15 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                                 sv = fn_ctx_find_var(ctx, n.left.left.name);
                             }
                             if (sv != null && sv.is_proto_half) {
+                                if (sv.prototype_key_half) {
+                                    let matching <bool> = cg_is_int_llvm(ctx, llvm_type_of(rhs));
+                                    if (cg_ann_is_string(sv.prototype_annotation)) { matching = llvm_type_of(rhs) == ctx.ptr_ty && cg_operand_is_string(ctx, n.right); }
+                                    if (!matching) {
+                                        cg_dprintf(2, "finc codegen refusal: prototype key projection writes require a matching key kind (ADR 0028)\n");
+                                        refuse_and_poison(ctx);
+                                        return null;
+                                    }
+                                }
                                 // Store through a `[T]` local bound to a half:
                                 // same i64 words the loads stride.
                                 let sidx64_b <&LLVMValue> = llvm_build_sext(ctx.builder, idx_val, ctx.i64_ty, "sidx64b");
@@ -10597,6 +10716,21 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         return lhs;
     }
     if (n.kind == ast_call_expr()) {
+        // A key half has no ordinary array header, and a callee cannot
+        // maintain its key tags. Only the explicit delete path owns cleanup.
+        if (!cg_str_eq(n.name, "free") && !cg_str_eq(n.name, "Free") && !cg_str_eq(n.name, "@Free")) {
+            let arg <&AstNode> = n.left;
+            while (arg != null) {
+                let actual <&AstNode> = arg;
+                if (arg.kind == 0 && arg.left != null) { actual = arg.left; }
+                if (cg_prototype_key_buffer(ctx, actual)) {
+                    cg_dprintf(2, "finc codegen refusal: prototype key buffers cannot escape through calls (ADR 0028)\n");
+                    refuse_and_poison(ctx);
+                    return null;
+                }
+                arg = arg.right;
+            }
+        }
         // sizeof(T) folds to the size LLVM's own layout computes for the
         // resolved type: one table for the value model and this query.
         if (cg_str_eq(n.name, "__fin_sizeof") || cg_str_eq(n.name, "sizeof")) {
@@ -11527,7 +11661,37 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 llvm_build_unreachable(ctx.builder);
                 return null;
               }
-            let p_val <&LLVMValue> = lower_expr(ctx, actual_arg);
+            let half_hdr <&LLVMValue> = null;
+            let half_var <&LocalVar> = null;
+            let p_val <&LLVMValue> = null;
+            let key_half <bool> = false;
+            if (is_prototype_half(ctx, actual_arg)) {
+                half_hdr = lower_expr(ctx, actual_arg.left);
+                key_half = cg_str_eq(actual_arg.name, "0");
+                if (half_hdr != null) { p_val = cg_prototype_half_buffer(ctx, half_hdr, key_half); }
+            } else {
+                if (actual_arg != null && actual_arg.kind == ast_ident()) {
+                    half_var = fn_ctx_find_var(ctx, actual_arg.name);
+                    if (half_var != null && half_var.is_proto_half) {
+                        half_hdr = half_var.prototype_half_header;
+                        key_half = half_var.prototype_key_half;
+                    }
+                }
+                p_val = lower_expr(ctx, actual_arg);
+            }
+            if (key_half && half_hdr != null) {
+                let tag_ind <&LLVMIndices> = new LLVMIndices{};
+                tag_ind.i0 = llvm_const_int(ctx.i64_ty, 4, 0);
+                let tags_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, half_hdr, tag_ind, 1, "free.tags.p");
+                delete tag_ind;
+                let tags <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, tags_ptr, "free.tags");
+                let free_fn <&LLVMValue> = get_or_declare_free(ctx);
+                let free_args <&LLVMValueArgs> = new LLVMValueArgs{};
+                free_args.v[0] = tags;
+                llvm_build_call2(ctx.builder, llvm_global_get_value_type(free_fn), free_fn, free_args, 1, "");
+                delete free_args;
+                llvm_build_store(ctx.builder, llvm_const_null(ctx.ptr_ty), tags_ptr);
+            }
             if (p_val != null) {
                 let target_var <&LocalVar> = null;
 
@@ -11613,7 +11777,9 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 // header word before it (`new` and literals): free the
                 // allocation base, not the element pointer. Anything else
                 // frees exactly as before.
-                if (st_name != null && cg_strlen(st_name) > cast<ulong>(0) && cg_str_eq(substr(st_name, 0, 1), "[")) {
+                let thin_half <bool> = is_prototype_half(ctx, actual_arg);
+                if (half_var != null && half_var.is_proto_half) { thin_half = true; }
+                if (!thin_half && st_name != null && cg_strlen(st_name) > cast<ulong>(0) && cg_str_eq(substr(st_name, 0, 1), "[")) {
                     delete f_args;
                     cg_free_array(ctx, st_name, p_val);
                     return llvm_const_null(ctx.ptr_ty);
@@ -11849,18 +12015,27 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             let actual_rec <&AstNode> = n.left.left;
             if (actual_rec == null) { actual_rec = n.left; }
             if (is_prototype_node(ctx, actual_rec)) {
-                let proto_val <&LLVMValue> = lower_expr(ctx, actual_rec);
-                if (proto_val != null) {
-                    let ind_l <&LLVMIndices> = new LLVMIndices{};
-                    ind_l.i0 = llvm_const_int(ctx.i64_ty, 1, 0);
-                    let plen_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, proto_val, ind_l, 1, "plen_p");
-                    delete ind_l;
-                    let cur_len <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, plen_ptr, "cur_l");
-                    let one <&LLVMValue> = llvm_const_int(ctx.i64_ty, 1, 0);
-                    let new_len <&LLVMValue> = llvm_build_sub(ctx.builder, cur_len, one, "dec_l");
-                    llvm_build_store(ctx.builder, new_len, plen_ptr);
-                    return llvm_const_int(ctx.i1_ty, 1, 0);
+                let key_wrap <&AstNode> = n.left.right;
+                if (key_wrap == null || key_wrap.right != null) {
+                    cg_dprintf(2, "finc codegen refusal: prototype rm requires one key (ADR 0028)\n");
+                    refuse_and_poison(ctx);
+                    return null;
                 }
+                let key_node <&AstNode> = key_wrap.left;
+                if (key_node == null) { key_node = key_wrap; }
+                let proto_val <&LLVMValue> = lower_expr(ctx, actual_rec);
+                let key_val <&LLVMValue> = lower_expr(ctx, key_node);
+                if (proto_val == null || key_val == null) { return null; }
+                let key_ty <&LLVMType> = llvm_type_of(key_val);
+                if (cg_is_int_llvm(ctx, key_ty)) {
+                    return cg_prototype_erase(ctx, proto_val, key_val, false, n.line);
+                }
+                if (key_ty == ctx.ptr_ty && cg_operand_is_string(ctx, key_node)) {
+                    return cg_prototype_erase(ctx, proto_val, key_val, true, n.line);
+                }
+                cg_dprintf(2, "finc codegen refusal: prototype rm accepts integer or string keys only (ADR 0028)\n");
+                refuse_and_poison(ctx);
+                return null;
             }
         }
         if (n.left != null) {
@@ -12436,6 +12611,8 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                             let box <&LLVMValue> = llvm_build_alloca(ctx.builder, a_ty, "enum.box");
                             llvm_build_store(ctx.builder, av, box);
                             av = box;
+                        } else if (exp_ty == ctx.i64_ty && cg_is_int_llvm(ctx, a_ty)) {
+                            av = cg_coerce_field_int(ctx, av, actual_arg, exp_ty);
                         } else {
                             av = coerce_val(ctx, av, exp_ty);
                         }
@@ -12629,12 +12806,25 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         let vals_buf <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args_v, 2, "v_buf");
         delete c_args_v;
 
+        let c_args_t <&LLVMValueArgs> = new LLVMValueArgs{};
+        c_args_t.v[0] = llvm_const_int(ctx.i64_ty, alloc_count, 0);
+        c_args_t.v[1] = llvm_const_int(ctx.i64_ty, 8, 0);
+        let tags_buf <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args_t, 2, "t_buf");
+        delete c_args_t;
         cur = n.left;
         let p_idx <int> = 0;
         while (cur != null) {
             if (cur.left != null) {
                 let kv <&LLVMValue> = lower_expr(ctx, cur.left);
                 if (kv != null) {
+                    let entry_kind <int> = 3;
+                    if (cg_is_int_llvm(ctx, llvm_type_of(kv))) { entry_kind = 1; }
+                    if (llvm_type_of(kv) == ctx.ptr_ty && cg_operand_is_string(ctx, cur.left)) { entry_kind = 2; }
+                    let tag_ind <&LLVMIndices> = new LLVMIndices{};
+                    tag_ind.i0 = llvm_const_int(ctx.i64_ty, p_idx, 0);
+                    let tag_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, tags_buf, tag_ind, 1, "tag_gep");
+                    delete tag_ind;
+                    llvm_build_store(ctx.builder, llvm_const_int(ctx.i64_ty, entry_kind, 0), tag_ptr);
                     let kv_64 <&LLVMValue> = coerce_val(ctx, kv, ctx.i64_ty);
                     let ind <&LLVMIndices> = new LLVMIndices{};
                     ind.i0 = llvm_const_int(ctx.i64_ty, p_idx, 0);
@@ -12660,7 +12850,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
 
         let c_args_h <&LLVMValueArgs> = new LLVMValueArgs{};
         c_args_h.v[0] = llvm_const_int(ctx.i64_ty, 1, 0);
-        c_args_h.v[1] = llvm_const_int(ctx.i64_ty, 32, 0);
+        c_args_h.v[1] = llvm_const_int(ctx.i64_ty, 40, 0);
         let proto_hdr <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args_h, 2, "proto_hdr");
         delete c_args_h;
 
@@ -12688,6 +12878,11 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         delete ind3;
         llvm_build_store(ctx.builder, llvm_const_int(ctx.i64_ty, count, 0), p_vlen_ptr);
 
+        let ind4 <&LLVMIndices> = new LLVMIndices{};
+        ind4.i0 = llvm_const_int(ctx.i64_ty, 4, 0);
+        let p_kind_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, proto_hdr, ind4, 1, "ptags");
+        delete ind4;
+        llvm_build_store(ctx.builder, tags_buf, p_kind_ptr);
         return proto_hdr;
     }
     // `match (scrutinee) { arms }` (ADR 0050): one tag read, then an
@@ -13054,7 +13249,7 @@ fun cg_zero_uninit_buffer(ctx: &FnContext, ty_ann: string, ty: &LLVMType, alloca
         llvm_build_store(ctx.builder, elem_ptr, p0);
         return true;
     }
-    // Prototype (`{K, V}` / `prototype...`): a zeroed 32-byte header, the
+    // Prototype (`{K, V}` / `prototype...`): a zeroed 40-byte header, the
     // shape the prototype literal builds. Both half-lengths read 0,
     // matching the C++ backend's null pair.
     let tlen <int> = cast<int>(cg_strlen(ty_ann));
@@ -13064,7 +13259,7 @@ fun cg_zero_uninit_buffer(ctx: &FnContext, ty_ann: string, ty: &LLVMType, alloca
         let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
         let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
         c_args.v[0] = llvm_const_int(ctx.i64_ty, 1, 0);
-        c_args.v[1] = llvm_const_int(ctx.i64_ty, 32, 0);
+        c_args.v[1] = llvm_const_int(ctx.i64_ty, 40, 0);
         let raw <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "proto_zero");
         delete c_args;
         llvm_build_store(ctx.builder, raw, alloca);
@@ -13117,6 +13312,7 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
         if (stmt.resolved_spelling != null && cg_strlen(stmt.resolved_spelling) > cast<ulong>(0)) {
             ty_ann = stmt.resolved_spelling;
         }
+        let declared_ann <string> = ty_ann;
         if (stmt.left != null && stmt.left.kind == ast_prototype_literal()) {
             ty_ann = "prototype";
         }
@@ -13131,6 +13327,17 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
         // it reads the outer scope (`let a = a + 1` sees the outer `a`,
         // matching the C++ backend). Same-scope redeclare keeps the legacy
         // reuse path below.
+        let half_hdr <&LLVMValue> = null;
+        let half_init <&LLVMValue> = null;
+        if (is_prototype_half(ctx, stmt.left)) {
+            if (cg_str_eq(stmt.left.name, "0") && !cg_prototype_concrete_keys(ctx, stmt.left.left)) {
+                cg_dprintf(2, "finc codegen refusal: prototype key projection writes require a concrete key type (erased key buffers cannot escape; ADR 0028)\n");
+                refuse_and_poison(ctx);
+                return;
+            }
+            half_hdr = lower_expr(ctx, stmt.left.left);
+            if (half_hdr != null) { half_init = cg_prototype_half_buffer(ctx, half_hdr, cg_str_eq(stmt.left.name, "0")); }
+        }
         let outer_v <&LocalVar> = null;
         let shadow_init <&LLVMValue> = null;
         let have_shadow_init <bool> = false;
@@ -13142,7 +13349,8 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
                 if (stmt.left.kind == ast_call_expr()) {
                     ctx.call_want = ty_ann;
                 }
-                shadow_init = lower_expr(ctx, stmt.left);
+                if (is_prototype_half(ctx, stmt.left)) { shadow_init = half_init; }
+                else { shadow_init = lower_expr(ctx, stmt.left); }
                 ctx.call_want = saved_want0;
                 have_shadow_init = true;
                 if (shadow_init == null) {
@@ -13176,6 +13384,7 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
             }
         }
         if (v != null) {
+            v.prototype_annotation = declared_ann;
             // Wave-5 slice 4: record where this binding lives (scope start
             // plus region) and resolve its `#[slaveof]` tie, if any.
             // Hoisted vars are fixed up here, at their lowering point in
@@ -13206,7 +13415,8 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
                 if (stmt.left.kind == ast_call_expr()) {
                     ctx.call_want = ty_ann;
                 }
-                init_val = lower_expr(ctx, stmt.left);
+                if (is_prototype_half(ctx, stmt.left)) { init_val = half_init; }
+                else { init_val = lower_expr(ctx, stmt.left); }
             }
             ctx.call_want = saved_want;
             if (init_val == null) {
@@ -13293,6 +13503,9 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
                         v.len_val = src_v.len_val;
                         v.elem_ty = src_v.elem_ty;
                         v.is_proto_half = src_v.is_proto_half;
+                        v.prototype_key_half = src_v.prototype_key_half;
+                        v.prototype_half_header = src_v.prototype_half_header;
+                        if (src_v.is_proto_half) { v.prototype_annotation = src_v.prototype_annotation; }
                     }
                 } else if (is_prototype_half(ctx, stmt.left)) {
                     // `let xs <[T]> = prtp.0/1`: the buffer half keeps the
@@ -13301,6 +13514,9 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
                     // is marked so index strides by the i64 words the writer
                     // stored rather than by the static element type.
                     v.is_proto_half = true;
+                    v.prototype_key_half = cg_str_eq(stmt.left.name, "0");
+                    v.prototype_half_header = half_hdr;
+                    if (v.prototype_key_half) { v.prototype_annotation = cg_prototype_key_annotation(ctx, stmt.left.left); }
                     let inner_p <&AstNode> = stmt.left.left;
                     if (inner_p != null && inner_p.kind == ast_prototype_literal()) {
                         let hc <int> = 0;
@@ -13311,7 +13527,7 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
                         }
                         v.len_val = llvm_const_int(ctx.i32_ty, hc, 0);
                     } else if (inner_p != null) {
-                        let hdr <&LLVMValue> = lower_expr(ctx, inner_p);
+                        let hdr <&LLVMValue> = half_hdr;
                         if (hdr != null) {
                             let hs <int> = 1;
                             if (cg_str_eq(stmt.left.name, "1")) { hs = 3; }
@@ -13361,6 +13577,11 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
         return;
     }
     if (stmt.kind == ast_return_stmt()) {
+        if (cg_prototype_key_buffer(ctx, stmt.left)) {
+            cg_dprintf(2, "finc codegen refusal: prototype key buffers cannot escape through returns (ADR 0028)\n");
+            refuse_and_poison(ctx);
+            return;
+        }
         if (llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) != null) {
             return;
         }
