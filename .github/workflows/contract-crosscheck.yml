@@ -45,6 +45,9 @@ jobs:
 
       - uses: ./.github/actions/setup-toolchain
 
+      - name: Check the contract version parser
+        run: python3 tests/tools/check_contract_crosscheck.py
+
       - name: Build finc
         run: |
           conan profile detect --force
@@ -88,7 +91,7 @@ jobs:
           # The mechanical piece of the contract agreement: finn hard-codes the
           # contract it speaks, finc reports the one it implements. Equality or
           # the pair is broken even with every unit test green on both sides.
-          finc_contract="$(build/finc --version | sed -n 's/^finc [0-9][0-9.]* (contract [0-9]*)$/\1/p')"
+          finc_contract="$(build/finc --version | sed -n 's/^finc [0-9][0-9.]* (contract \([0-9][0-9]*\))$/\1/p')"
           finn_contract="$(sed -n 's/^pub const SUPPORTED_CONTRACT: u32 = \([0-9][0-9]*\);$/\1/p' finn/src/finc.rs)"
           if [ -z "$finc_contract" ] || [ -z "$finn_contract" ]; then
             echo "::error::could not read the contract integers (finc '$finc_contract', finn '$finn_contract')"
