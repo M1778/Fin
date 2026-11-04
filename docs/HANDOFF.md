@@ -1,10 +1,11 @@
 # Handoff — Fin compiler, v1 production readiness
 
-Updated **2026-10-26** at publication preflight, from local `HEAD` @ **`5360b05`**
-with the maintenance changes listed below prepared for commit and push. Worktree
-branch `issue-101-asan-type-leaks` carries the candidate; `origin/master` remains
-at `1f7afd9`. Local `master` has been safely fast-forwarded to that remote revision.
-No merge, branch deletion, tag, release, or deployment is part of this push.
+Updated **2026-11-04** after the focused repairs were committed through
+**`17239b5`**, followed by this handoff update. The user approved commit/push
+on that date; the reviewed changes are being published to candidate branch
+`issue-101-asan-type-leaks` for native CI. Remote readback before publication
+confirms `master` remains at `1f7afd9`. No merge, branch deletion, tag, release,
+or deployment is authorized by this handoff.
 
 This file is the **single entry point** for the next agent — self-contained by design, including
 for a fresh subagent with no conversation history. It states what is done, what blocks a
@@ -45,7 +46,70 @@ Everything in "Backlog" is post-v1 and does not gate the tag.
 6. `CONTEXT.md` — terminology (also lists planned concepts; not a feature-support reference).
 7. `docs/reflect-derive-plan.md` — live plan/status for the reflect/derive family (§6).
 
-## Verified state (local 2026-10-23; remote measurements 2026-10-21)
+## Current checkpoint — 2026-11-04
+
+Candidate **`15acb4d`** contains the October maintenance recorded below; those
+changes are committed and pushed to the candidate branch, not to `master`.
+CI run [40254354645](https://github.com/M1778/Fin/actions/runs/40254354645) tested
+that exact revision: both Linux lanes, build.sh, performance and sanitizers passed.
+Each macOS lane failed one path regression; each Windows lane failed one
+clock-fixture link regression. Native-stage parameters remain explicitly skipped
+on non-Linux runners; reference-only green is not self-hosted native proof.
+
+Focused repairs committed for candidate publication:
+
+- `2a86eb1` — isolate owned path results from libc symbols.
+- `ddb0923` — isolate deterministic clock fixture symbols.
+- `17239b5` — repair the scheduled contract version parser.
+
+- `path::std`'s `basename` and `dirname` now publish `fin_path_basename` and
+  `fin_path_dirname`. Their Fin spellings and caller-owned results are unchanged.
+  A strong native-symbol fixture reproduced wrong binding on Linux before the
+  fix; the repaired regression passes at `-O0` and `-O2`. This addresses the
+  macOS path test's libc-preemption mechanism without changing path parsing.
+- The deterministic deadline test now remaps only the `llvm_name` clock externs
+  in a temporary copy of the real `time.fin` module. Its C helpers have private
+  names and the host clock remains callable. This avoids duplicate
+  `QueryPerformanceCounter` definitions from the Windows fixture and
+  `kernel32.lib`, retaining all four offset cases at both optimization levels.
+- Scheduled contract check run
+  [41446321204](https://github.com/M1778/Fin/actions/runs/41446321204) failed in
+  `sed`, before any contract comparison: it referred to capture group `\1`
+  without defining one. The workflow parser is corrected and its new check
+  exercises the actual expression against eight valid/invalid version spellings.
+
+Local focused gate: **10/10 tests passed**, including public path behavior on
+Reference/Stage2/Stage3. Full Debug suite: **3,159 passed, 60 explicitly skipped,
+zero failures** (3,219 checks, 587.98 seconds). No new skips were added by these
+repairs. The rebuilt Release focused gate passed **18/18**, including path,
+runtime-portability and contract checks. The focused compiler ASan/UBSan gate
+passed **16 tests, two missing-stage skips, zero failures**, with leak detection
+and UBSan halt-on-error enabled. This instruments the compiler/test process,
+not arbitrary memory accesses in its emitted programs.
+
+A fresh installed Release tree passed **75 doc examples, six fragment skips**.
+The public path program passed `-O0`/`-O2` from a foreign directory with
+`FIN_LIBS` unset, stdout exact and stderr empty. Object inspection confirmed
+`fin_path_basename`/`fin_path_dirname` definitions and no bare native path
+symbols. Existing Stage2/Stage3 binaries remain byte-identical at SHA-256
+`59467f91730305bf2db5535675eafa07ece0109409b520eae18b383c5aaa5998`;
+no new bootstrap was needed for these library/test/workflow-only repairs.
+
+The eight workflow-parser cases, site check, architecture/installer preflight
+and `git diff --check` pass. Independent read-only review found no actionable
+issues in the patch. Native Windows linker tools are unavailable locally;
+none of these repairs has fresh Windows/macOS CI proof. No `v1.0.0` tag or
+release exists at the November remote readback. Commit/push authorization
+was granted on 2026-11-04. Next: validate the published candidate on all six
+native lanes; packaging rehearsal and stable publication remain separate
+gates. Native CI results must name the exact tested commit, not an earlier
+green revision.
+
+## Historical verification checkpoints
+
+The following results retain their dates and revisions. Descriptions of work as
+"local", "uncommitted", or "pending" below describe that historical checkpoint,
+not the current candidate's git status.
 
 **Compiler:** local candidate `finc 1.0.0 (contract 3)`, LLVM 22 backend enabled. Fresh census:
 49 modules in `lib/std/`; 75 samples recursively under `tests/samples/`, including
