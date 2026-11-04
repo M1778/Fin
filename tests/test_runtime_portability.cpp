@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
@@ -165,27 +166,60 @@ TEST(Soundness_RuntimePortability, DeadlineOffsetsAreCheckedAgainstTheClockRange
         // 2ms is valid; 3ms overflows addition without overflowing ms*1e6.
         file << R"C(
 #ifdef _WIN32
-int __stdcall QueryPerformanceFrequency(long long* frequency) {
+#include <windows.h>
+int fin_deadline_frequency(long long* frequency) {
     *frequency = 1000000000LL;
     return 1;
 }
-int __stdcall QueryPerformanceCounter(long long* ticks) {
+int fin_deadline_counter(long long* ticks) {
     *ticks = 9223372036852000000LL;
     return 1;
 }
+int fin_deadline_host_clock_ready(void) {
+    LARGE_INTEGER frequency, ticks;
+    return QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0 &&
+           QueryPerformanceCounter(&ticks) && ticks.QuadPart >= 0;
+}
 #else
 #include <time.h>
-int clock_gettime(clockid_t id, struct timespec* result) {
+int fin_deadline_clock_gettime(clockid_t id, struct timespec* result) {
     (void)id;
     result->tv_sec = 9223372036LL;
     result->tv_nsec = 852000000;
     return 0;
 }
+int fin_deadline_host_clock_ready(void) {
+    struct timespec now;
+    return clock_gettime(CLOCK_MONOTONIC, &now) == 0 && now.tv_sec >= 0;
+}
 #endif
 )C";
     }
+    // Test clocks must not replace host API symbols used by the CRT/import library.
+    std::ifstream module(fs::path(testsDir()).parent_path() / "lib/std/time.fin");
+    ASSERT_TRUE(module.good());
+    std::string testModule((std::istreambuf_iterator<char>(module)),
+                           std::istreambuf_iterator<char>());
+    for (const auto& [symbol, replacement] : std::vector<std::pair<std::string, std::string>>{
+             {"QueryPerformanceCounter", "fin_deadline_counter"},
+             {"QueryPerformanceFrequency", "fin_deadline_frequency"},
+             {"clock_gettime", "fin_deadline_clock_gettime"}}) {
+        const std::string attribute = "#[llvm_name=\"" + symbol + "\"]";
+        const auto at = testModule.find(attribute);
+        ASSERT_NE(at, std::string::npos) << symbol;
+        ASSERT_EQ(testModule.find(attribute, at + attribute.size()), std::string::npos) << symbol;
+        testModule.replace(at, attribute.size(), "#[llvm_name=\"" + replacement + "\"]");
+    }
+    const fs::path modules = dir / "lib";
+    fs::create_directories(modules);
+    {
+        std::ofstream file(modules / "time.fin");
+        file << testModule;
+        ASSERT_TRUE(file.good());
+    }
     const std::vector<std::pair<std::string, std::string>> cases = {
         {R"FIN(
+blame fin_deadline_host_clock_ready() == 1, "the real host clock remains callable";
 let zero <Instant> = Instant::deadline_after_ms(0);
 let one <Instant> = Instant::deadline_after_ms(1);
 let two <Instant> = Instant::deadline_after_ms(2);
@@ -203,13 +237,14 @@ printf("deadline bounds ok\n");
         SCOPED_TRACE(body);
         {
             std::ofstream file(input);
-            file << "import { Instant } from time::std;\nfun main() <noret> {\n"
-                 << body << "\n}\n";
+            file << "import { Instant } from time::std;\n"
+                 << "@define fin_deadline_host_clock_ready() <int>;\n"
+                 << "fun main() <noret> {\n" << body << "\n}\n";
         }
         for (const std::string level : {"-O0", "-O2"}) {
             SCOPED_TRACE(level);
-            const auto compiled = runFinc({input.string(), level, "-c", "-o", object.string()},
-                                          {{"FIN_LIBS", ""}});
+            const auto compiled = runFinc({input.string(), level, "-I", modules.string(),
+                                          "-c", "-o", object.string()}, {{"FIN_LIBS", ""}});
             ASSERT_EQ(compiled.exitCode, 0) << stripAnsi(compiled.err);
             ASSERT_EQ(fin::runProcess(fin::linkCommand({object.string(), native.string()},
                                                       executable.string()),
