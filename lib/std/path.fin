@@ -344,7 +344,9 @@ pub fun join(p1: string, p2: string) <string> {
     #c_endif
 }
 
+// libc owns basename/dirname with borrowed-result semantics; use namespaced symbols.
 #[export]
+#[llvm_name="fin_path_basename"]
 pub fun basename(path: string) <string> {
     if (path == null) { return clone_str(""); }
     let total <int> = cast<int>(path_len(path));
@@ -379,6 +381,7 @@ pub fun basename(path: string) <string> {
 }
 
 #[export]
+#[llvm_name="fin_path_dirname"]
 pub fun dirname(path: string) <string> {
     if (path == null) { return clone_str("."); }
     let total <int> = cast<int>(path_len(path));

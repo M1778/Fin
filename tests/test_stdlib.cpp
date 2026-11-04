@@ -2735,6 +2735,62 @@ const char* fin_path_byte_fixture(int index) {
 
 } // namespace
 
+TEST(Soundness_Path, OwnedResultsDoNotBindToNativePathSymbols) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    const fs::path dir = uniqueTempPath("fin_native_path_symbols");
+    fs::create_directories(dir);
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { std::error_code ec; fs::remove_all(path, ec); }
+    } cleanup{dir};
+    const fs::path native = dir / "paths.c";
+    const fs::path input = dir / "main.fin";
+    const fs::path object = dir / "main.o";
+    const fs::path executable = dir / "program.exe";
+    const fs::path output = dir / "output.txt";
+    const fs::path error = dir / "error.txt";
+    {
+        std::ofstream file(native);
+        // Model libc's strong symbols and borrowed results on every platform.
+        file << "char* basename(char* path) { (void)path; return \"native basename\"; }\n"
+             << "char* dirname(char* path) { (void)path; return \"native dirname\"; }\n";
+        ASSERT_TRUE(file.good());
+    }
+    const std::string source = R"FIN(
+import { basename, dirname, free_path } from path::std;
+import { equals } from strings::std;
+fun main() <noret> {
+    let name <string> = basename("/a/b/");
+    let parent <string> = dirname("/a/b/");
+    blame equals(name, "b"), "Fin basename must not bind to the native symbol";
+    blame equals(parent, "/a"), "Fin dirname must not bind to the native symbol";
+    free_path(name);
+    free_path(parent);
+    printf("owned path symbols ok\n");
+}
+)FIN";
+    {
+        std::ofstream file(input);
+        file << source;
+        ASSERT_TRUE(file.good());
+    }
+    for (const std::string level : {"-O0", "-O2"}) {
+        SCOPED_TRACE(level);
+        const auto compiled = runFinc({input.string(), level, "-c", "-o", object.string()},
+                                      {{"FIN_LIBS", ""}});
+        ASSERT_EQ(compiled.exitCode, 0) << stripAnsi(compiled.err);
+        ASSERT_EQ(fin::runProcess(fin::linkCommand({object.string(), native.string()},
+                                                  executable.string()),
+                                  output.string(), error.string()), 0)
+            << readProcessOutput(error.string());
+        ASSERT_EQ(fin::runProcess({executable.string()}, output.string(), error.string()), 0)
+            << readProcessOutput(error.string());
+        EXPECT_EQ(readProcessOutput(output.string()), "owned path symbols ok\n");
+    }
+}
+
 TEST(Soundness_Path, WindowsPrefixesAndDbcsTrailBytesRemainIntact) {
 #ifndef FIN_TESTS_HAVE_BACKEND
     GTEST_SKIP() << "Executable library checks need the LLVM backend";
