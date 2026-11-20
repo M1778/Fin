@@ -1,0 +1,101 @@
+# Known release defect: x86_64-linux-gnu `finc 1.0.0` segfaults before `main`
+
+Status: **confirmed, reproduced, root-caused**. Affects the published `v1.0.0`
+release. Found 2026-11-20 during post-release artifact verification.
+
+## Symptom
+
+The glibc Linux x86_64 artifacts crash on `--version`, before `main` runs:
+
+```
+$ tar -xzf finc-1.0.0-x86_64-unknown-linux-gnu.tar.gz --one-top-level=gnu
+$ ./gnu/bin/finc --version
+Segmentation fault (core dumped)          # exit 139
+```
+
+Affected assets (all three carry the same `bin/finc` bytes):
+
+- `finc-1.0.0-x86_64-unknown-linux-gnu.tar.gz`
+- `finc-1.0.0-x86_64-unknown-linux-gnu.deb`
+- `finc-1.0.0-x86_64-unknown-linux-gnu.rpm`
+
+Not affected, measured: `x86_64-unknown-linux-musl` (runs, `finc 1.0.0
+(contract 3)`), and the aarch64/Windows/macOS artifacts (different link path).
+
+## Fault location
+
+Not in Fin. The crash is inside libLLVM **during dynamic linking**:
+
+```
+0x00007fffee1591a3 in ?? () from /usr/lib/libLLVM.so.22.1
+#1 ld-linux-x86-64.so.2
+```
+
+i.e. it dies while the loader is running libLLVM's initializers, before
+`finc`'s own `main` is entered.
+
+## Mechanism (proved, not inferred)
+
+The binary has **31 `R_X86_64_COPY` relocations**; 25 of them land inside the
+`PT_GNU_RELRO` segment. A COPY relocation reserves writable storage in the
+executable for a data symbol owned by a shared library, and the dynamic loader
+then copies the library's initial value over it. libLLVM's later static
+initializers must write those same globals.
+
+Proof that the ELF layout is the cause: **neutralising the `PT_GNU_RELRO`
+header (`p_type` → `PT_NULL`) in a byte-copy makes the same binary run.**
+
+```
+$ ./relro-off --version
+finc 1.0.0 (contract 3)          # exit 0
+```
+
+Same bytes otherwise; only the RELRO program header differs.
+
+## Why CI was green and a user's machine is not
+
+The published binary was linked on `ubuntu-24.04` against that image's
+`libLLVM-22` package. A locally linked build (this host, Arch, LLVM 22.1.8)
+contains the same COPY relocations for the same four
+`llvm::OptimizationLevel` globals, but links them **outside** the RELRO range:
+
+| binary | COPY inside RELRO | COPY outside |
+| --- | --- | --- |
+| published (CI-linked) | 25 | 6 |
+| local build | 20 | 9 |
+
+So a COPY relocation here is only correct when the executable and the runtime
+`libLLVM.so.22.1` agree on where those globals live. They agree on symbol name
+and on size (both export 8-byte `OptimizationLevel` objects — verified), but not
+on placement relative to RELRO, because the two `llvm-22` packages were built
+with different link layouts.
+
+This is a latent portability trap in linking against a monolithic shared
+`libLLVM`, not a bug in a particular flag: `-z relro`, `-z relro,-z now`, and no
+flag at all all produce a working binary when built and run on the same host.
+
+## Candidate fixes (none applied yet)
+
+1. **Build position-independent objects** (`-fPIC` / `CMAKE_POSITION_INDEPENDENT_CODE ON`).
+   COPY relocations exist only for non-PIC references to shared-library data;
+   PIC accesses them through the GOT instead, which removes the class of defect
+   entirely. Largest blast radius: rebuilds everything, may perturb performance.
+2. **Link LLVM statically for glibc Linux** (the musl lane already does this and
+   is unaffected). Removes the shared-library ABI dependency, costs archive size.
+3. **Pin `llvm-22` to the exact package build** used for the release and state
+   that restriction in INSTALL.md. Smallest change, weakest guarantee: it makes
+   the trap documented rather than gone.
+4. **Ship only the musl binary for glibc Linux users.** Works today, but throws
+   away the distro-package lanes.
+
+Recommendation: (1), verified by building the release lane with PIC and running
+the artifact on a *different* host than the one that built it. (1) and (2)
+compose; either should be proven on the actual release runner before the next
+tag.
+
+## Test gap this exposed
+
+`release.yml` proves an artifact by running `--version` **on the machine that
+built it**, where the trap cannot appear. Any fix must add a check that runs the
+staged binary and compiles a program in a container or image different from the
+build image — otherwise a green release keeps meaning "it works here".

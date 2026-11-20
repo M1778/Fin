@@ -177,6 +177,16 @@ if(NOT MSVC)
 endif()
 
 # --- Core Library (The Compiler Engine) ---
+# Position-independent code, not for the executable's benefit but for the ABI's.
+# fin_core references data symbols owned by the shared libLLVM (the
+# llvm::OptimizationLevel globals, typeinfo, vtables). In non-PIC objects those
+# become R_X86_64_COPY relocations, which reserve writable storage in the
+# executable and are then copied over by the loader; whether that storage lands
+# inside PT_GNU_RELRO depends on how the *library* was linked, so a binary built
+# against one llvm-22 package can segfault on a host with another one, inside
+# libLLVM's own static initializers, before main. PIC accesses those symbols
+# through the GOT and removes the class entirely.
+# See docs/known-issues.md for the reproduction and the proof.
 add_library(fin_core STATIC
     ${BISON_Parser_OUTPUTS}
     ${FLEX_Lexer_OUTPUTS}
@@ -289,6 +299,18 @@ endif()
 
 target_link_libraries(fin_core PUBLIC fmt::fmt)
 
+# Position-independent code, not for the executable's benefit but for the ABI's.
+# fin_core references data symbols owned by the shared libLLVM (the
+# llvm::OptimizationLevel globals, typeinfo, vtables). In non-PIC objects those
+# become R_X86_64_COPY relocations, which reserve writable storage in the
+# executable that the loader then fills from the library; whether that storage
+# lands inside PT_GNU_RELRO depends on how the *library* was linked, so a binary
+# built against one llvm-22 package can segfault on a host carrying another one,
+# inside libLLVM's own static initializers, before main. PIC reaches those
+# symbols through the GOT and removes the class of defect. Reproduced and proved
+# in docs/known-issues.md.
+set_target_properties(fin_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 if(FIN_WITH_LLVM)
     if(TARGET LLVM AND NOT FIN_STATIC_LLVM)
         target_link_libraries(fin_core PUBLIC LLVM)
@@ -353,9 +375,20 @@ if(FIN_FUZZ)
 endif()
 
 # --- Install / package layout (ADR 0010) --------------------------------------
-# A release archive unpacks to exactly `bin/finc[.exe]` and `lib/std/**`, with
-# no top-level version directory: `finn` supplies the versioned parent.
+# A release archive unpacks to `bin/finc[.exe]`, `lib/std/**` and
+# `lib/finc/LICENSE`, with no top-level version directory: `finn` supplies the
+# versioned parent.  The license is under lib/ because the archive is
+# assembled as `tar -C stage bin lib` (see the install(FILES ...) above).
 install(TARGETS finc RUNTIME DESTINATION bin)
+# The license text is installed inside `lib/`, not under `share/`, because the
+# archive is assembled as `tar -C stage bin lib`: a share/ path would be
+# installed and then silently dropped from every portable archive, which is the
+# defect this rule exists to close.  Under lib/finc/ the license travels with
+# the tree finn unpacks and with the .dmg, while the .deb and .rpm relocate it
+# to their own convention (/usr/share/doc/finc/copyright,
+# /usr/share/licenses/finc/).  No search path reads lib/finc/, so nothing
+# resolves differently because it is there.
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE DESTINATION lib/finc)
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/lib/std)
     install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/lib/std
             DESTINATION lib
