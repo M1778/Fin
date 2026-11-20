@@ -15,9 +15,9 @@ executable. The examples below mark those boundaries.
 
 | Module | Main declarations | Application boundary |
 | --- | --- | --- |
-| [stdio](../../lib/std/stdio.fin) | `printf`, `Printable`, printing helpers, `Stream`, `File`, `IOResult<T>` | Typed and Printable output preserves literal text and separates stdout/stderr; Windows stderr uses UCRT. File operations use native 64-bit seek APIs; the int-sized `File::size` API returns -1 for unrepresentable extents. Buffered write and close errors return false |
-| [strings](../../lib/std/strings.fin) | Length, byte comparison, search, transforms, splitting/joining | `len`, `split_str`, `replace`, and other imports build and run; allocating calls return owned storage requiring caller cleanup |
-| [math](../../lib/std/math.fin) | Numeric helpers, integer algorithms | Check each imported call before using it in an executable |
+| [stdio](../../lib/std/stdio.fin) | `printf`, `Printable`, printing helpers, `read_line`/`read_all`, `Stream`, `File`, `IOResult<T>` | Typed and Printable output preserves literal text and separates stdout/stderr; Windows stderr uses UCRT. `read_line` answers `null` at end of input, keeps a final line without a newline, strips `\n`/`\r\n`, grows past any fixed buffer, and refuses a line carrying a NUL because a `string` cannot hold it; `read_all` is the binary-safe stdin route. File operations use native 64-bit seek APIs; the int-sized `File::size` API returns -1 for unrepresentable extents. Buffered write and close errors return false |
+| [strings](../../lib/std/strings.fin) | Length, byte comparison, search, transforms, splitting/joining, `parse_int`/`parse_float` | `len`, `split_str`, `replace`, and other imports build and run; allocating calls return owned storage requiring caller cleanup. `parse_float` answers `Outcome<double>` for the decimal grammar and refuses `inf`/`nan`/trailing text, overflow, and underflow by message |
+| [math](../../lib/std/math.fin) | Numeric helpers, integer algorithms | Check each imported call before using it in an executable. `floor_div`/`floor_mod` refuse or handle the one input the hardware division traps on (`-2147483648 / -1`) |
 | [collection](../../lib/std/collection.fin) | `Collection<T>`, `CollectionError`, `coll!` | Geometric growth and checked method indices; `free_collection()` releases backing storage and permits reuse. Stored allocations remain caller-owned. `from_prototype` and `coll!` populate entries |
 | [hashmap](../../lib/std/hashmap.fin) | `HashMap<K,V>`, `HashMapError`, `map!` | Open addressing with content-based string keys. `free_hashmap()` releases internal containers and permits reuse; key/value allocations remain caller-owned. Shallow copies share storage |
 | [types](../../lib/std/types.fin) | Numeric aliases, `Number`, `Any`, `number2str` | Alias/bound declarations do not imply working dynamic values or conversion helpers |
@@ -58,7 +58,7 @@ executable. The examples below mark those boundaries.
 | [emitter](../../lib/std/emitter.fin) | `CEmitter`, `new_c_emitter`, `free_c_emitter`, `emit_*` | `new_c_emitter` with `emit_prologue` and `emit_fn_header` builds and runs; always build via `new_c_emitter` and release with `free_c_emitter`; no `finc/` consumer yet |
 | [ir](../../lib/std/ir.fin) | `ir_*()` opcodes, `ir_opcode_name`, `IrInstruction`, `IrBlock`, `IrFunction`, `make_ir_*`, `new_ir_function`, `free_ir_function` | Opcode helpers and instruction builders run. `fresh_temp` names are borrowed until `free_ir_function`, which releases names and block storage; caller-supplied instruction strings remain caller-owned. No `finc/` consumer yet. |
 | [argparse](../../lib/std/argparse.fin) | `FlagDef`, `OptionDef`, `ArgParser`, `new/free_arg_parser`, `add_flag`/`add_option`, `parse`, `get_flag`/`get_option`, positionals | `new_arg_parser` with `add_flag`, `parse`, and `get_flag` builds and runs; flag spelling is literal (`verbose`, not `--verbose`) and unmatched dash-args fail `parse`; `parse` also refuses a negative count, a count past the array's extent, and a null argument, each through `error_msg` + `false` rather than reading past or into libc; release with `free_arg_parser` |
-| [fs](../../lib/std/fs.fin) | `file_exists`, `remove_file`, `file_size`, `read_to_string`, `write_string`, `append_string`, `free_file_content`, `copy_file`, `create_dir`, `remove_dir`, `rename_path`, `is_dir`, `is_file`, `mk_tmp_dir`, `mkdir_p`, `walk_dir` | `Soundness_Fs` runs the tmpdir round trip, distinct temporary directories, and missing-path behavior; `read_to_string` is nullable, denullify with `?`; missing files return null / `-1` / an empty walk. Release reads with `free_file_content`, paths and walk entries with `free_str`, and the walk array with `delete`. Directory records use target-selected POSIX layouts or Win32 directory APIs. Windows paths use the system code page, matching narrow C file I/O; UTF-8 and extended-length Windows paths are not promised. Consumed by `finc/driver` and `finc/checker` |
+| [fs](../../lib/std/fs.fin) | `file_exists`, `remove_file`, `file_size`, `read_to_string`, `write_string`, `append_string`, `free_file_content`, `copy_file`, `create_dir`, `remove_dir`, `rename_path`, `is_dir`, `is_file`, `mk_tmp_dir`, `mkdir_p`, `walk_dir` | `Soundness_Fs` runs the tmpdir round trip, distinct temporary directories, and missing-path behavior; `read_to_string` is nullable, denullify with `?`; missing files return null / `-1` / an empty walk. `write_string` and `append_string` write through `fputs`, so they stop at an embedded NUL -- a `string` has no length to hand `fwrite`. For binary content use `stdio::std`'s `File::write_text(path, text, count)` or `copy_file`. Release reads with `free_file_content`, paths and walk entries with `free_str`, and the walk array with `delete`. Directory records use target-selected POSIX layouts or Win32 directory APIs. Windows paths use the system code page, matching narrow C file I/O; UTF-8 and extended-length Windows paths are not promised. Consumed by `finc/driver` and `finc/checker` |
 | [cli](../../lib/std/cli.fin) | `Arg`, `Command`, `Match`, `parse`/`parse_args`, `free_match`, `free_parse_result`, `free_command` | `parse(args)` excludes argv0 and copies argument text. `parse_args()` reads the full native argument list on Linux, macOS, and Windows; empty arguments and -- are preserved. Tables grow with input. Free results with free_parse_result and registration tables with free_command; registered strings and child pointers remain caller-owned. Subcommands use the root option table; --name=value and grouped short options are not implemented |
 | [serde](../../lib/std/serde.fin) | `Encode`, `Decode` interfaces | The contract resolves through the import a tool writes and `Outcome<Self>` answers inside the interface body; runtime dispatch flows through json::std's free `decode_T` spelling because interface-method dispatch does not lower yet (derives beyond `derive_hash`, ADR 0058, wait on the R3 `==` decision -- reflect-derive-plan §6 records the state); the bundled sample pins the issue's own round trip and the refusal-is-`Err` rule |
 | [json](../../lib/std/json.fin) | `json_encode/decode_int/str/bool/float`, `json_encode/decode_int_array`, `json_encode/decode_intmap/strmap`, `json_escape`, `json_join2/3/4` | All scalar round-trips, the `[int]` pair, and the two prototype maps build and run (sorted key order pinned byte-exact in `Soundness_Json` and the bundled sample); refusals answer `Err` naming the kind; every returned string is fresh, release with `free_str`; v0 is int32 ints, ASCII-only `\u` escapes, no UTF-8 encoding, and the int-array decode caps at 64 elements (all recorded in the module header); the map decode paths answer `Outcome<HashMap<string, T>>` and build and run on the stage compilers too (the earlier stage-allowlist is gone, not pending) |
@@ -247,7 +247,7 @@ support promise. Separator-only strings remain root-relative.
 `strings::std` declares `len`, `equals`, `compare`, `find`, `contains`,
 `index_of_char`, `starts_with`, `ends_with`, `substr`, `concat`, `trim`,
 `to_upper`, `to_lower`, `split`, `split_str`, `replace`, `join`, `to_chars`,
-`from_chars`, and `free_str`.
+`from_chars`, `parse_int`, `parse_float`, and `free_str`.
 Search functions return indices or `-1`; `equals` compares bytes. `split_str`
 splits on a whole separator string, without overlapping, and `replace` rewrites
 every non-overlapping occurrence; `join(split_str(x, s), s)` gives `x` back, the
@@ -256,6 +256,32 @@ Both `strings::std` and `path::std` declare `join` with different signatures;
 a call inside one module always resolves to that module's own definition
 regardless of import order, so the `join` inside `replace` is the string one
 even when `path::std` is imported first.
+
+`parse_int` blames on bad text, because it predates `Outcome` here and changing
+that return type would break 1.0.x callers. `parse_float` is the new
+`Outcome<double>` form and is strict about the grammar: sign, digits, an
+optional fraction, and an optional exponent, with nothing before or after.
+`inf`, `nan`, `0x10`, ` 1`, `1 `, `.5`, and `1.` are `Err` values, not numbers;
+`1e999` refuses as overflow and `1e-999` as underflow rather than saturating to
+infinity or zero, because the significand is nonzero and converted to zero. An
+`Err` carries a literal message and must not be freed; the accepted value needs
+no cleanup.
+
+```fin
+import { parse_float, free_str } from strings::std;
+import { Outcome } from outcome::std;
+fun main() <noret> {
+    let ok <Outcome<double>> = parse_float("1.5e-3");
+    blame ok.ok && ok.value == cast<double>(15.0) / cast<double>(10000.0);
+    let bad <Outcome<double>> = parse_float("1e999");
+    blame !bad.ok && bad.message == "float overflow in parse_float";
+    printf("parse_float ok\n");
+}
+```
+
+```output
+parse_float ok
+```
 
 These ordinary string and integer-algorithm imports build and run:
 
@@ -315,6 +341,16 @@ additional path and binary-copy APIs.
 `unwrap_or`, `expect`, `select`, `is_ok`, and `is_err`. Payload enum code generation is implemented, including generic instantiations.
 Check the chosen helper's behavior through an executable; declarations alone do
 not establish its error handling or ownership.
+
+`read_line()` and `read_all()` are standard input. `read_line` answers null at
+end of input, `""` for a blank line, the final line with or without a newline,
+and drops a trailing `\r\n`; it grows the buffer until the line ends, so no line
+is truncated at a fixed size. A line containing a NUL byte is refused by name,
+because a `string` is NUL-terminated and cannot carry it. Use `read_all` for
+binary input: it returns a fresh `[char]` with the content plus a terminator,
+so `.length` is the byte count plus one, and empty input gives a one-element
+array. `read_line`'s string is caller-owned; release it with `strings::std`'s
+`free_str`, and `delete` the array `read_all` returns.
 
 ## Threads and channels
 

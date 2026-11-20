@@ -328,9 +328,16 @@ pub fun isqrt(value: int) <int> {
 // are the pair where the remainder always has the divisor's sign, which is what an index
 // wrapping into a table wants -- `hashmap.fin` folds a negative hash by hand for exactly
 // this reason.
+//
+// The one input the hardware cannot divide is `-2147483648 / -1`: the quotient is 2^31,
+// one past the largest `int`, and x86 traps with SIGFPE before any comparison sees it.
+// The quotient refuses by name, the way `isqrt` refuses a negative radicand; the
+// remainder is exactly 0, because -1 divides the minimum evenly, so `floor_mod` answers
+// it instead of trapping.
 #[export]
 pub fun floor_div(a: int, b: int) <int> {
     blame b != 0, "division by zero";
+    blame !(a == -2147483648 && b == -1), "floor_div quotient is not representable as an int";
     let quotient <int> = a / b;
     let remainder <int> = a % b;
     if (remainder != 0) {
@@ -342,6 +349,7 @@ pub fun floor_div(a: int, b: int) <int> {
 #[export]
 pub fun floor_mod(a: int, b: int) <int> {
     blame b != 0, "division by zero";
+    if (a == -2147483648 && b == -1) { return 0; }
     let remainder <int> = a % b;
     if (remainder != 0) {
         if ((remainder < 0) != (b < 0)) { return remainder + b; }

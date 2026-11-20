@@ -164,6 +164,23 @@ priv fun io_stderr() <int> { return 2; }
 #[llvm_name="fwrite"]
 @define io_fwrite(buffer: string, size: ulong, count: ulong, handle: &void) <ulong>;
 
+// Standard input. `getchar` is the one stdin reader that needs no `stdin`
+// global: libc's `stdin` is a data symbol, and a `@define` naming it emits a
+// call (`measured: a `@define stdin() <&void>` linked and segfaulted), so the
+// function form is the route that works.
+#[llvm_name="getchar"]
+@define io_getchar() <int>;
+
+// The allocation and copy pair the input readers return strings through. The
+// `memmove` signature mirrors `strings.fin` byte for byte, so a program that
+// imports both modules meets one declaration per libc symbol (json.fin's
+// split-name rule).
+#[llvm_name="calloc"]
+@define io_calloc(count: ulong, size: ulong) <string>;
+
+#[llvm_name="memmove"]
+@define io_bytes_in(dst: string, src: &char, count: ulong) <string>;
+
 #c_ifdef FIN_TARGET_WINDOWS
 #[llvm_name="_fseeki64"]
 #c_else
@@ -298,6 +315,97 @@ pub fun eprintln_double(value: double) <noret> {
 #[export]
 pub fun flush() <noret> {
     let result <int> = io_fflush(null);
+}
+
+// One line from standard input, without its line ending. Null means end of
+// input with no bytes read, which is the only state a caller can tell apart
+// from an empty line: a blank line is `""`, a line whose last byte is `\n` or
+// `\r\n` loses that ending, and a final line without a newline is returned
+// whole. The buffer grows until the line ends, so no line is truncated at a
+// fixed size; a line that would pass the `int` limit refuses by name.
+//
+// A `string` is NUL-terminated and carries no length, so a line containing a
+// NUL byte cannot be returned without silently cutting it at that point. That
+// is refused with "stdin line contains a NUL byte" rather than hidden -- the
+// same rule the backend invariant states for data that cannot be represented.
+// A caller reading binary input should use a byte-oriented reader.
+//
+// The returned string is `calloc`ed and caller-owned; release it with
+// `strings::std`'s `free_str`, which is libc `free` under another name.
+#[export]
+pub fun? read_line() <string> {
+    let cap <int> = 256;
+    let used <int> = 0;
+    let buffer <[char]> = new [char, cap]{};
+    let saw <bool> = false;
+    let newline <bool> = false;
+    while (true) {
+        let c <int> = io_getchar();
+        if (c == -1) { break; }
+        saw = true;
+        if (c == cast<int>('\n')) {
+            newline = true;
+            break;
+        }
+        if (used + 1 >= cap) {
+            blame cap <= 1073741823, "stdin line exceeds the int limit";
+            let bigger <[char]> = new [char, cap * 2]{};
+            for (let i <int> = 0; i < used; i++) { bigger[i] = buffer[i]; }
+            delete buffer;
+            buffer = bigger;
+            cap = cap * 2;
+        }
+        buffer[used] = cast<char>(c);
+        used = used + 1;
+    }
+    if (!saw) {
+        delete buffer;
+        return null;
+    }
+    if (newline && used > 0 && buffer[used - 1] == '\r') { used = used - 1; }
+    for (let i <int> = 0; i < used; i++) {
+        if (buffer[i] == cast<char>(0)) {
+            delete buffer;
+            blame false, "stdin line contains a NUL byte";
+        }
+    }
+    let out <string> = io_calloc(cast<ulong>(used + 1), cast<ulong>(1));
+    if (used > 0) {
+        let copied <string> = io_bytes_in(out, &buffer[0], cast<ulong>(used));
+    }
+    delete buffer;
+    return out;
+}
+
+// Everything left on standard input, byte for byte, in the same shape
+// `File::read_all` returns: a fresh `[char]` one longer than the content, with
+// the final byte a terminator, so `.length` is the byte count plus one. This is
+// the binary-safe stdin route -- `read_line` cannot return a NUL in a `string`,
+// and this one carries bytes in an array whose length is explicit. End of input
+// before any byte gives a one-element array, not null. Release with `delete`.
+#[export]
+pub fun read_all() <[char]> {
+    let cap <int> = 4096;
+    let used <int> = 0;
+    let buffer <[char]> = new [char, cap]{};
+    while (true) {
+        let c <int> = io_getchar();
+        if (c == -1) { break; }
+        if (used + 1 >= cap) {
+            blame cap <= 1073741823, "stdin exceeds the int limit";
+            let bigger <[char]> = new [char, cap * 2]{};
+            for (let i <int> = 0; i < used; i++) { bigger[i] = buffer[i]; }
+            delete buffer;
+            buffer = bigger;
+            cap = cap * 2;
+        }
+        buffer[used] = cast<char>(c);
+        used = used + 1;
+    }
+    let out <[char]> = new [char, used + 1]{};
+    for (let i <int> = 0; i < used; i++) { out[i] = buffer[i]; }
+    delete buffer;
+    return out;
 }
 
 #[export]

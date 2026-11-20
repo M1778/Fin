@@ -10,6 +10,10 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <winioctl.h>
+#else
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 #include "Corpus.hpp"
@@ -102,6 +106,76 @@ std::string buildAndRun(const std::string& code, const std::vector<std::string>&
 }
 
 std::string buildBundledAndRun(const std::string& code) { return buildAndRun(code, {}); }
+
+// The same, with `input` fed to the program's standard input. stdin has to be
+// redirected before the program starts, which `runProcess` cannot express (its
+// redirections are for stdout/stderr), so this spawns the executable itself:
+// fork/dup2 on POSIX, CreateProcess with an inherited input handle on Windows.
+std::string buildAndRunWithStdin(const std::string& code, const std::string& input) {
+    Src src(code);
+    const fs::path exe = uniqueTempPath("fin_stdlib_stdin_exe");
+    const FincRun c = runFinc({src.str(), "-o", exe.string()}, {{"FIN_LIBS", ""}});
+    if (c.exitCode != 0 || !fs::exists(exe)) return "compile failed: " + stripAnsi(c.err);
+    const fs::path inPath = uniqueTempPath("fin_stdlib_stdin", ".in");
+    const fs::path outPath = uniqueTempPath("fin_stdlib_stdin_out");
+    {
+        std::ofstream f(inPath, std::ios::binary);
+        f.write(input.data(), (std::streamsize)input.size());
+    }
+    int status = -1;
+#ifdef _WIN32
+    SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
+    HANDLE in = CreateFileA(inPath.string().c_str(), GENERIC_READ, FILE_SHARE_READ,
+                            &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE out = CreateFileA(outPath.string().c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                             &security, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (in != INVALID_HANDLE_VALUE && out != INVALID_HANDLE_VALUE) {
+        STARTUPINFOA startup{};
+        startup.cb = sizeof(startup);
+        startup.dwFlags = STARTF_USESTDHANDLES;
+        startup.hStdInput = in;
+        startup.hStdOutput = out;
+        startup.hStdError = out;
+        PROCESS_INFORMATION process{};
+        std::string command = "\"" + exe.string() + "\"";
+        if (CreateProcessA(nullptr, command.data(), nullptr, nullptr, TRUE, 0, nullptr,
+                           nullptr, &startup, &process)) {
+            WaitForSingleObject(process.hProcess, INFINITE);
+            DWORD code = 1;
+            GetExitCodeProcess(process.hProcess, &code);
+            status = (int)code;
+            CloseHandle(process.hThread);
+            CloseHandle(process.hProcess);
+        }
+    }
+    if (in != INVALID_HANDLE_VALUE) CloseHandle(in);
+    if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
+#else
+    const pid_t pid = ::fork();
+    if (pid == 0) {
+        const int in = ::open(inPath.string().c_str(), O_RDONLY);
+        const int out = ::open(outPath.string().c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (in < 0 || out < 0) _exit(127);
+        ::dup2(in, STDIN_FILENO);
+        ::dup2(out, STDOUT_FILENO);
+        ::dup2(out, STDERR_FILENO);
+        ::execl(exe.string().c_str(), exe.string().c_str(), (char*)nullptr);
+        _exit(127);
+    }
+    if (pid > 0) {
+        int waitStatus = 0;
+        while (::waitpid(pid, &waitStatus, 0) < 0) {}
+        status = WIFEXITED(waitStatus) ? WEXITSTATUS(waitStatus) : -1;
+    }
+#endif
+    const std::string out = readProcessOutput(outPath.string());
+    std::error_code ec;
+    fs::remove(exe, ec);
+    fs::remove(inPath, ec);
+    fs::remove(outPath, ec);
+    if (status != 0) return "program exited non-zero, output: " + out;
+    return out;
+}
 
 // The same, with a directory of extra modules on the search path.
 std::string buildWithModuleAndRun(const std::string& code, const std::string& includeDir) {
@@ -217,6 +291,129 @@ const std::vector<Row>& corpusImports() {
 }
 
 } // namespace
+
+TEST(Soundness_Stdio, ReadLineAnswersEmptyLastAndLongLinesAndNullAtEof) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    // stdin has no reader anywhere in lib/std; `read_line` is the first. The
+    // pinned lines are the four cases a line reader gets wrong: a blank line is
+    // an empty string and not null, the last line needs no trailing newline,
+    // EOF before any byte is null, and a line longer than the reader's first
+    // buffer arrives whole. `len` is counted, not printed, because 5000 copies
+    // of 'a' would make a failed diff unreadable.
+    const std::string source = R"FIN(
+import { read_line } from stdio::std;
+import { len, free_str } from strings::std;
+fun main() <noret> {
+    let first? <string> = read_line();
+    if (first == null) { printf("first=null\n"); } else {
+        printf("first=%s\n", first?);
+        free_str(first?);
+    }
+    let blank? <string> = read_line();
+    if (blank == null) { printf("blank=null\n"); } else {
+        printf("blank=%d\n", len(blank?));
+        free_str(blank?);
+    }
+    let wide? <string> = read_line();
+    if (wide == null) { printf("long=null\n"); } else {
+        printf("long=%d\n", len(wide?));
+        free_str(wide?);
+    }
+    let last? <string> = read_line();
+    if (last == null) { printf("last=null\n"); } else {
+        printf("last=%s\n", last?);
+        free_str(last?);
+    }
+    let after? <string> = read_line();
+    if (after == null) { printf("after=null\n"); } else {
+        printf("after=%s\n", after?);
+        free_str(after?);
+    }
+}
+)FIN";
+    // "one\n" then an empty line then 5000 bytes then "tail" with no newline.
+    const std::string input = "one\n\n" + std::string(5000, 'a') + "\ntail";
+    EXPECT_EQ(buildAndRunWithStdin(source, input),
+              "first=one\nblank=0\nlong=5000\nlast=tail\nafter=null\n")
+        << "short lines are not read in file order, or the 5000-byte line was truncated";
+}
+
+TEST(Soundness_Stdio, ReadLineOnEmptyInputIsNull) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    EXPECT_EQ(buildAndRunWithStdin(R"FIN(
+import { read_line } from stdio::std;
+fun main() <noret> {
+    let line? <string> = read_line();
+    if (line == null) { printf("eof\n"); }
+}
+)FIN", ""), "eof\n");
+}
+
+TEST(Soundness_Stdio, ReadLineStripsCrLfAndRefusesAnEmbeddedNul) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    // A CRLF line drops both bytes, the same way a text-mode reader should.
+    EXPECT_EQ(buildAndRunWithStdin(R"FIN(
+import { read_line } from stdio::std;
+import { equals, len, free_str } from strings::std;
+fun main() <noret> {
+    let line? <string> = read_line();
+    blame line != null;
+    blame len(line?) == 4;
+    blame equals(line?, "crlf");
+    free_str(line?);
+    let bare? <string> = read_line();
+    blame bare != null;
+    blame len(bare?) == 1;
+    blame equals(bare?, "\r");
+    free_str(bare?);
+    printf("crlf ok\n");
+}
+)FIN", "crlf\r\n\r"), "crlf ok\n");
+    // A string is NUL-terminated, so a line carrying a NUL cannot be returned
+    // whole. Refusing by name is the only answer that does not silently cut the
+    // line at the byte.
+    const std::string out = buildAndRunWithStdin(R"FIN(
+import { read_line } from stdio::std;
+fun main() <noret> {
+    let line? <string> = read_line();
+    printf("returned\n");
+}
+)FIN", std::string("a\0b\n", 4));
+    EXPECT_NE(out.find("stdin line contains a NUL byte"), std::string::npos) << out;
+    EXPECT_EQ(out.find("returned"), std::string::npos) << out;
+}
+
+TEST(Soundness_Stdio, ReadAllCarriesEveryByteIncludingNulAndEmptyInput) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    // The binary-safe stdin route. `read_line` refuses a NUL because a `string`
+    // cannot hold one, so `read_all` returns the bytes in a `[char]` whose
+    // `.length` is explicit -- the same shape `File::read_all` returns, one
+    // longer than the content for the terminator. Empty input is a one-element
+    // array, not null, so a caller's loop never has to special-case it.
+    const std::string source = R"FIN(
+import { read_all } from stdio::std;
+fun main() <noret> {
+    let bytes <[char]> = read_all();
+    printf("len=%d\n", bytes.length);
+    if (bytes.length == 4) {
+        blame bytes[0] == 'a' && bytes[1] == cast<char>(0) && bytes[2] == 'b';
+        blame bytes[3] == cast<char>(0);
+        printf("nul=preserved\n");
+    }
+    delete bytes;
+}
+)FIN";
+    EXPECT_EQ(buildAndRunWithStdin(source, std::string("a\0b", 3)), "len=4\nnul=preserved\n");
+    EXPECT_EQ(buildAndRunWithStdin(source, ""), "len=1\n");
+}
 
 TEST(Soundness_Stdio, PrintableTextIsNotAFormatString) {
 #ifndef FIN_TESTS_HAVE_BACKEND
@@ -1991,6 +2188,42 @@ fun main() <noret> {
     }
 }
 
+TEST(Soundness_Fs, WriteStringStopsAtAnEmbeddedNulAndWriteTextDoesNot) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    // `write_string` is declared `(path, content: string)` and writes through
+    // `fputs`, so a Fin `string` holding an embedded NUL is written up to that
+    // byte -- a `string` has no length to hand `fwrite`. This test pins today's
+    // answer and names the binary route that does preserve the byte:
+    // `File::write_text(path, text, count)` takes the count explicitly. If
+    // `write_string` ever grows a length-taking sibling, this test is the one to
+    // re-read with the limitation note in fs.fin.
+    const std::string source = R"fsf(
+import { mk_tmp_dir, write_string, file_size, remove_file, remove_dir } from fs::std;
+import { concat, from_chars, free_str } from strings::std;
+import { File } from stdio::std;
+fun main() <noret> {
+    let made? <string> = mk_tmp_dir("finfs_nul");
+    blame made != null;
+    let path <string> = concat(made?, "/nul.bin");
+    let bytes <[char]> = ['a', cast<char>(0), 'b'];
+    let text <string> = from_chars(bytes, 0, 3);
+    blame write_string(path, text);
+    // `fputs` stops at the NUL: one byte, and the call still reports success.
+    printf("fputs=%d\n", cast<int>(file_size(path)));
+    blame File::write_text(path, text, 3);
+    printf("fwrite=%d\n", cast<int>(file_size(path)));
+    blame remove_file(path) && remove_dir(made?);
+    delete bytes;
+    free_str(text);
+    free_str(path);
+    free_str(made?);
+}
+)fsf";
+    EXPECT_EQ(buildBundledAndRun(source), "fputs=1\nfwrite=3\n");
+}
+
 TEST(Soundness_Fs, EveryCallRunsInATmpdirAndNothingTouchesTheCwd) {
     // Issue #61's shape, in one run: the scratch directory comes from
     // mkdtemp, so no call touches a fixed path and none of them need (or
@@ -2379,6 +2612,58 @@ TEST(Soundness_BundledStdlib, TheIOResultAndFileSurfacesResolve) {
         "  let gone <bool> = File::remove(path);\n"
         "  println_str(\"a\"); eprintln_str(\"b\"); print_int(1); flush();\n"));
     EXPECT_EQ(errorCount(err), 0u) << err;
+}
+
+TEST(Soundness_Strings, ParseFloatAcceptsTheGrammarAndRefusesByOutcome) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    // A float parser's failure mode is answering a number for text that is not
+    // one, so the table is a literal-to-expected pair for every shape the
+    // grammar has: sign, a bare zero, a signed zero, a fraction, an exponent in
+    // both directions, and the three spellings libc's `strtod` accepts that a
+    // Fin decimal should not (`inf`, `nan`, trailing garbage). Each refusal is
+    // `Ok == false` with a message, never a blame: the caller's data is not the
+    // program's fault.
+    EXPECT_EQ(buildBundledAndRun(R"FIN(
+import { parse_float, equals, free_str } from strings::std;
+import { Outcome } from outcome::std;
+fun check(text: string, expected: double, label: string) <noret> {
+    let r <Outcome<double>> = parse_float(text);
+    blame r.ok, label;
+    blame r.value == expected, label;
+}
+fun refuse(text: string, why: string) <noret> {
+    let r <Outcome<double>> = parse_float(text);
+    blame !r.ok, text;
+    blame equals(r.message, why), text;
+}
+fun main() <noret> {
+    check("0", cast<double>(0.0), "zero");
+    check("-0.0", cast<double>(0.0), "negative zero is zero");
+    check("1", cast<double>(1.0), "+1");
+    check("+1", cast<double>(1.0), "explicit plus");
+    check("-2.5", cast<double>(0.0) - cast<double>(2.5), "negative fraction");
+    check("0.125", cast<double>(1.0) / cast<double>(8.0), "binary fraction exact");
+    check("1.5e-3", cast<double>(15.0) / cast<double>(10000.0), "negative exponent");
+    check("1e10", cast<double>(10000000000.0), "positive exponent");
+    check("2E+3", cast<double>(2000.0), "uppercase exponent with plus");
+    refuse("", "cannot parse an empty string as a float");
+    refuse("abc", "invalid character in float string");
+    refuse("1.2.3", "invalid character in float string");
+    refuse("1e999", "float overflow in parse_float");
+    refuse("1e-999", "float underflow in parse_float");
+    refuse("inf", "invalid character in float string");
+    refuse("nan", "invalid character in float string");
+    refuse(" 1", "invalid character in float string");
+    refuse("1 ", "invalid character in float string");
+    refuse("-", "invalid character in float string");
+    refuse(".5", "invalid character in float string");
+    refuse("1.", "invalid character in float string");
+    refuse("0x10", "invalid character in float string");
+    printf("parse_float ok\n");
+}
+)FIN"), "parse_float ok\n");
 }
 
 TEST(Soundness_BundledStdlib, TheStringsAndMathSurfacesResolve) {
@@ -2958,6 +3243,39 @@ TEST(Soundness_Path, WindowsNamespacesAndIncompleteUncHaveNamedRefusals) {
 // promises "unmatched dash-args fail parse" therefore had no executable
 // assertion behind either promise.
 // ---------------------------------------------------------------------------
+
+TEST(Soundness_Math, TheMinimumDividedByMinusOneDoesNotTrap) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    // `-2147483648 / -1` is 2^31, one past the largest int, and the hardware
+    // division traps with SIGFPE before any comparison sees it. That is the one
+    // input in floor_div's and floor_mod's whole domain that cannot answer a
+    // representable value the usual way: the quotient refuses by name, and the
+    // remainder is exactly 0 because -1 divides the minimum evenly. A crash is
+    // not a refusal, and the module refuses elsewhere (isqrt, gcd) rather than
+    // trapping.
+    EXPECT_EQ(buildBundledAndRun(R"FIN(
+import { floor_div, floor_mod } from math::std;
+fun main() <noret> {
+    blame floor_mod(-2147483648, -1) == 0;
+    blame floor_mod(-2147483648, 2) == 0;
+    blame floor_mod(-7, 2) == 1;
+    blame floor_div(2147483647, -1) == -2147483647;
+    blame floor_div(-2147483647, -1) == 2147483647;
+    printf("edges ok\n");
+}
+)FIN"), "edges ok\n");
+    const std::string out = buildBundledAndRun(
+        "import { floor_div } from math::std;\n"
+        "fun main() <noret> {\n"
+        "    floor_div(-2147483648, -1);\n"
+        "    printf(\"unreachable\\n\");\n"
+        "}\n");
+    EXPECT_NE(out.find("floor_div quotient is not representable as an int"), std::string::npos)
+        << out;
+    EXPECT_EQ(out.find("unreachable"), std::string::npos) << out;
+}
 
 TEST(Soundness_Math, IsqrtAnswersEveryNonnegativeIntAndNeverSpins) {
 #ifndef FIN_TESTS_HAVE_BACKEND

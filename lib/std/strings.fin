@@ -76,6 +76,7 @@
 //     `starts_with("hello", "hel")` is true and `starts_with("hello", "xel")` is false.
 #[stdimport] %{
 import { Collection } from collection::std;
+import { Outcome, Ok, Err } from outcome::std;
 }%
 
 namespace std {
@@ -103,6 +104,11 @@ namespace std {
 
 #[llvm_name="strcat"]
 @define strings_append(dst: string, src: string) <string>;
+
+// The same declaration `types.fin` and `json.fin` carry. `strtod` is the
+// correctly-rounded conversion; `parse_float` admits the text first.
+#[llvm_name="strtod"]
+@define strings_strtod(s: string, rest: &void) <double>;
 
 // `calloc` and not `malloc`, and this is load-bearing rather than tidy. Every allocation
 // here is followed by a copy of exactly the content, with no terminator written, so an
@@ -466,6 +472,111 @@ pub fun parse_int(s: string) <int> {
         return cast<int>(-acc);
     }
     return cast<int>(acc);
+}
+
+// A decimal `double` from `[+-]digits[.digits][eE[+-]digits]`, or an `Err`
+// naming why not. No allocation: the rejected case carries a literal, and the
+// accepted value is the `double` itself.
+//
+// WHY THE GRAMMAR IS FIN'S AND NOT C'S. `strtod` accepts `inf`, `nan`, `0x10`,
+// leading whitespace, a trailing tail and a bare `.5`; every one of those is
+// either not a decimal number a Fin program should treat as a value or a
+// silently accepted half-parse. The walk below admits exactly the decimal
+// grammar and then hands the VETTED text to `strtod`, which is what makes the
+// conversion correctly rounded instead of a hand-rolled accumulation -- the
+// same shape json.fin's scanner uses, and the reason a wrong result here is
+// not possible for accepted text.
+//
+// OVERFLOW AND UNDERFLOW ARE REFUSALS, NOT SATURATION. `strtod("1e999")` is
+// `+inf` with `ERANGE`; this module has no `errno`, so the test is the IEEE
+// one json.fin records (a finite value times zero is zero). An infinity is
+// "float overflow in parse_float". An exact zero from a mantissa with a
+// nonzero digit ("1e-999") cannot be told apart from a legitimate value by
+// magnitude alone, so the mantissa is checked: a nonzero significand that
+// converted to zero is "float underflow in parse_float". A genuine zero
+// ("0", "-0.0", "0e10") has an all-zero significand and is accepted.
+//
+// This is an `Outcome` and not a blame because the text is the caller's data;
+// `parse_int` blames for the same reason the module header gives it: no
+// `Outcome`-returning integer form exists yet, and changing it would break
+// 1.0.x. The message on an Err is a string literal and must not be freed.
+#[export]
+pub fun parse_float(s: string) <Outcome<double>> {
+    let total <int> = cast<int>(strings_len(s));
+    if (total == 0) {
+        let empty <Outcome<double>> = Err::<double>("cannot parse an empty string as a float");
+        return empty;
+    }
+    let bytes <[char]> = to_chars(s);
+    let i <int> = 0;
+    if (bytes[0] == '-' || bytes[0] == '+') {
+        i = 1;
+    }
+    // The grammar walk. Each clause leaves `i` past what it consumed; anything
+    // that does not consume at least one digit, or that leaves bytes behind,
+    // is not the grammar.
+    let digits <int> = 0;
+    while (i < total && is_digit_char(bytes[i])) {
+        i = i + 1;
+        digits = digits + 1;
+    }
+    if (digits == 0) {
+        delete bytes;
+        let bad <Outcome<double>> = Err::<double>("invalid character in float string");
+        return bad;
+    }
+    if (i < total && bytes[i] == '.') {
+        i = i + 1;
+        let fraction <int> = 0;
+        while (i < total && is_digit_char(bytes[i])) {
+            i = i + 1;
+            fraction = fraction + 1;
+        }
+        if (fraction == 0) {
+            delete bytes;
+            let bad <Outcome<double>> = Err::<double>("invalid character in float string");
+            return bad;
+        }
+    }
+    if (i < total && (bytes[i] == 'e' || bytes[i] == 'E')) {
+        i = i + 1;
+        if (i < total && (bytes[i] == '+' || bytes[i] == '-')) { i = i + 1; }
+        let exponent <int> = 0;
+        while (i < total && is_digit_char(bytes[i])) {
+            i = i + 1;
+            exponent = exponent + 1;
+        }
+        if (exponent == 0) {
+            delete bytes;
+            let bad <Outcome<double>> = Err::<double>("invalid character in float string");
+            return bad;
+        }
+    }
+    if (i != total) {
+        delete bytes;
+        let bad <Outcome<double>> = Err::<double>("invalid character in float string");
+        return bad;
+    }
+    let nonzero <bool> = false;
+    for (let k <int> = 0; k < total; k++) {
+        if (is_digit_char(bytes[k]) && bytes[k] != '0') {
+            nonzero = true;
+            break;
+        }
+    }
+    delete bytes;
+    let v <double> = strings_strtod(s, null);
+    let zero <double> = cast<double>(0.0);
+    if (!(v == v) || !(v * zero == zero)) {
+        let over <Outcome<double>> = Err::<double>("float overflow in parse_float");
+        return over;
+    }
+    if (v == zero && nonzero) {
+        let under <Outcome<double>> = Err::<double>("float underflow in parse_float");
+        return under;
+    }
+    let out <Outcome<double>> = Ok::<double>(v);
+    return out;
 }
 
 #[export]

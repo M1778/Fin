@@ -141,6 +141,11 @@ pub fun? read_to_string(path: string) <string> {
     return fs_read_content(path, &size);
 }
 
+// `fputs` and not `fwrite`: a `string` is NUL-terminated and carries no length,
+// so `write_string` writes up to an embedded NUL and cannot preserve bytes past
+// it. For binary content use `stdio::std`'s `File::write_text(path, text,
+// count)`, which takes the count explicitly, or `copy_file` for a whole file.
+// Adding a length here would change the signature, which 1.0.x does not do.
 #[export]
 pub fun write_string(path: string, content: string) <bool> {
     if (path == null) { return false; }
@@ -152,6 +157,8 @@ pub fun write_string(path: string, content: string) <bool> {
     return written >= 0;
 }
 
+// Appends, with `write_string`'s NUL limitation: bytes past an embedded NUL in
+// `content` are not written. See `write_string` for the binary-safe routes.
 #[export]
 pub fun append_string(path: string, content: string) <bool> {
     if (path == null) { return false; }
