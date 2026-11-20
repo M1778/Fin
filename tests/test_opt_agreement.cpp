@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Optimizer-agreement between `finc -O0/-O2/-O3` and between the C++
 // compiler and the self-hosted stage at each level.
 //

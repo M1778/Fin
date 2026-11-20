@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include <gtest/gtest.h>
 
 // Registered for the stdlib/infra wave lanes (issues #51/#56+#58/#81+#87+#88).

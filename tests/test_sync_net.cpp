@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Run-level pins for the two library slices this lane owns: stdlib/sync
 // (issue #56) and the completed blocking-socket surface in stdlib/networking
 // (issue #58).

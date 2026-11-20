@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "Corpus.hpp"
 #include "utils/Process.hpp"
 #include <gtest/gtest.h>

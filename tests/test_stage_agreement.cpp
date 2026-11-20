@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Run agreement between the C++ compiler (build/finc) and the self-hosted
 // stage compilers (build/finc_stage2, build/finc_stage3).
 //
