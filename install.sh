@@ -109,22 +109,55 @@ if ! have_llvm_config; then
 fi
 
 # --- 2. Pin what gets compiled, or refuse. ---
-# A release tag (vX.Y.Z, newest) by default; `master` is never the default,
+# A RELEASED tag (vX.Y.Z, newest) by default; `master` is never the default,
 # because a moving branch compiles whatever it points at when the user runs
 # this script. FIN_REF may name a tag or a full commit; the resolved commit is
 # printed so a user can check it against the release it came from.
-REF="${FIN_REF:-}"
-if [ -z "$REF" ]; then
-  REF="$(git ls-remote --tags "$REPO" \
+#
+# Release, not merely tag: a tag that was pushed but whose release never
+# published (the historical v0.4.0 case) names a revision nobody can install
+# from and whose build may not even pass. Asking the releases API means "newest
+# released tag" is answered by the thing users actually install.
+#
+# The API host is derived from $REPO so FIN_REPO mirrors and test remotes keep
+# working; a non-GitHub remote has no releases API, so it falls back to tags
+# and says so rather than silently answering a different question.
+NEWEST_TAG_BY_TAGS() {
+  git ls-remote --tags "$REPO" \
     | sed -E 's|.*refs/tags/||' \
     | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
     | sed -E 's/^v//' \
     | sort -t. -k1,1n -k2,2n -k3,3n \
     | tail -1 \
-    | sed -E 's/^/v/')"
+    | sed -E 's/^/v/'
+}
+
+# owner/repo from a github.com remote URL, or empty for anything else.
+GITHUB_SLUG="$(printf '%s' "$REPO" \
+  | sed -n -E 's#^(https://github\.com/|git@github\.com:)([^/]+)/([^/]+)$#\2/\3#p' \
+  | sed -E 's/\.git$//')"
+
+REF="${FIN_REF:-}"
+if [ -z "$REF" ]; then
+  if [ -n "$GITHUB_SLUG" ] && command -v curl >/dev/null 2>&1; then
+    REF="$(curl -fsSL "https://api.github.com/repos/$GITHUB_SLUG/releases?per_page=20" 2>/dev/null \
+      | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*/\1/p' \
+      | sed -E 's/^v//' \
+      | sort -t. -k1,1n -k2,2n -k3,3n \
+      | tail -1 \
+      | sed -E 's/^/v/')"
+  elif [ -n "$GITHUB_SLUG" ]; then
+    # A GitHub remote with no curl: tags answer "which tags exist", not
+    # "which releases are installable". Say which question was answered.
+    echo "install.sh: no curl; falling back to tags, which do not prove a release published." >&2
+    REF="$(NEWEST_TAG_BY_TAGS)"
+  else
+    echo "install.sh: $REPO is not a GitHub remote; resolving the newest tag (release state unverified)." >&2
+    REF="$(NEWEST_TAG_BY_TAGS)"
+  fi
 fi
 if [ -z "$REF" ]; then
-  echo "install.sh: no released finc tag found at $REPO." >&2
+  echo "install.sh: no published finc release found at $REPO." >&2
   echo "install.sh: run with FIN_REF=<full commit or vX.Y.Z tag> naming a ref" >&2
   echo "install.sh: you have inspected (e.g. by reading the source at that commit)." >&2
   exit 1
