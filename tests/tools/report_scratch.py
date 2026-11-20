@@ -115,15 +115,29 @@ def main(argv):
     rows.sort(reverse=True)
     print(f"{'SIZE':>8}  {'UNTOUCHED':>10}  PATH  (kind)")
     stale_bytes = 0
+    root_owned = []
     for size, age, path, note in rows:
         flag = "stale" if age >= args.days else "live "
-        print(f"{human(size):>8}  {age:6.1f}d {flag}  {path}  ({note})")
+        owner = ""
+        try:
+            st = Path(path).stat()
+            if st.st_uid != os.getuid():
+                owner = "  [owned by uid %d: needs sudo]" % st.st_uid
+                root_owned.append(path)
+        except OSError:
+            pass
+        print(f"{human(size):>8}  {age:6.1f}d {flag}  {path}  ({note}){owner}")
         if age >= args.days:
             stale_bytes += size
     print()
     print(f"reclaimable if untouched for >{args.days:g}d: {human(stale_bytes)}")
     print("This tool deletes nothing. Check for a live build before removing;")
     print("~/fin-tmp/sw-conan is referenced by build-asan/CMakeCache.txt.")
+    if root_owned:
+        print()
+        print("Root-owned (created from inside a container or chroot); plain rm fails:")
+        for path in root_owned:
+            print(f"  sudo rm -rf {path}")
     return 0
 
 
