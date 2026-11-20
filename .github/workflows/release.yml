@@ -25,6 +25,11 @@
 # is for a human with curl.  The index is generated here on every release and is
 # never hand-maintained, and it is fetched by `finn` at runtime from
 # <server>/<repo>/releases/latest/download/index.json.
+#
+# Supply chain: every target also ships a CycloneDX SBOM
+# (`finc-<semver>-<target>.cdx.json`, hashed like every other asset), and the
+# assembled release set is attested with SLSA build provenance before anything
+# is published.  See docs/supply-chain.md for what a consumer verifies.
 name: Release
 
 on:
@@ -109,6 +114,54 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Releasing finc $version as $tag (prerelease=$prerelease)"
 
+      - name: Check the release tag is annotated (and signed when verifiable)
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          # A lightweight tag points straight at the commit, so there is nothing
+          # a signature could be attached to: annotation is a property of the
+          # tag object, checkable on any runner, so a missing tag object is a
+          # hard failure on a tag run. Rehearsals (`workflow_dispatch`) skip
+          # this step entirely.
+          #
+          # The fetch is unconditional on purpose. On a `push` tag event
+          # actions/checkout resolves this ref to the commit (`+<sha>:refs/tags/<tag>`),
+          # so the tag object is absent and refs/tags/<tag> dereferences to a
+          # commit even when the remote has a signed annotated tag. Refetching
+          # the tag ref itself replaces that with the real object.
+          git fetch --force --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
+          kind="$(git cat-file -t "refs/tags/$TAG" 2>/dev/null || true)"
+          case "$kind" in
+            tag) ;;
+            commit) echo "::error::$TAG is a lightweight tag (points straight at the commit, so no signature can attach); cut releases with: git tag -s $TAG -m '...'"; exit 1 ;;
+            *) echo "::error::could not read the tag object for $TAG (git cat-file says '$kind')"; exit 1 ;;
+          esac
+
+          # Verifying a signature needs the signer's public key, which a hosted
+          # runner does not have. That is a fact about the runner, not about
+          # the tag, so it is reported as a notice rather than failing the run.
+          if ! command -v gpg >/dev/null 2>&1; then
+            echo "::notice::no gpg on this runner; $TAG is annotated (checked) but its signature cannot be evaluated here"
+            exit 0
+          fi
+          if git tag -v "$TAG" > "$RUNNER_TEMP/verify.log" 2>&1; then
+            echo "$TAG is signed; git verified it against a public key on this runner:"
+            grep -E 'Good signature|using .* key' "$RUNNER_TEMP/verify.log" || true
+            exit 0
+          fi
+          cat "$RUNNER_TEMP/verify.log"
+          # One exit code, several meanings.  These say the tag *is* signed by
+          # a key this runner cannot evaluate -- its public key is absent, or
+          # the tag was signed with an SSH key and no allowedSignersFile names
+          # it.  Unverifiable is reported, and is not the same as unsigned.
+          if grep -qE 'No public key|public key not found|allowedSignersFile' "$RUNNER_TEMP/verify.log"; then
+            echo "::notice::$TAG carries a signature from a key this runner does not have; the annotated check passed but the signature was not evaluated here"
+            exit 0
+          fi
+          echo "::error::$TAG is annotated but carries no signature; a release must prove who cut it (sign it with: git tag -s -f $TAG)"
+          exit 1
+
       - name: Refuse to ship a toolchain with no standard library
         run: |
           # `finn` pins a compiler version per project and lib/std/ ships inside
@@ -181,8 +234,11 @@ jobs:
       - name: Build
         run: |
           conan profile detect --force
+          # --lockfile-out records the graph this build actually resolved; the
+          # SBOM below is generated from that file rather than re-derived.
           conan install . \
             --output-folder=build \
+            --lockfile-out=conan.lock \
             --build=missing \
             -pr:a=conan/profiles/fin \
             -c tools.cmake.cmaketoolchain:generator=Ninja \
@@ -224,6 +280,12 @@ jobs:
           binary=stage/bin/finc
           if [ "$RUNNER_OS" = Windows ]; then binary=stage/bin/finc.exe; fi
           uv run --no-project python .github/scripts/check_arch.py "$binary" "$FIN_TARGET"
+          # Structural portability of the shipped ELF: a non-libc COPY
+          # relocation is the defect class that made the 1.0.0 x86_64-gnu
+          # artifacts segfault on every host but this one (docs/known-issues.md).
+          # `--version` below cannot catch it -- the trap needs a differently
+          # linked library to appear, which is exactly what a user has.
+          uv run --no-project python .github/scripts/check_elf_copy_relocs.py "$binary"
           uv run --no-project python tests/tools/check_docs.py --finc "$binary"
           # Every artifact class below repackages these same bytes, so the
           # version proof lives here once: the binary that ships answers.
@@ -301,6 +363,23 @@ jobs:
             deb_dep="libllvm22"; rpm_dep="llvm-libs"
           fi
           echo "LLVM runtime deps: deb='$deb_dep' rpm='$rpm_dep'"
+          # Both packages claim the same thing: `/usr/bin/finc` resolves its
+          # bundled library as `<exe-dir>/../lib/std`, which is `/usr/lib/std`
+          # once installed. A file with no imports -- tests/samples/basic.fin,
+          # which this step used to compile -- cannot show that: it type-checks
+          # and links against a package with no stdlib at all. This program
+          # imports two symbols out of `lib/std/stdio.fin`, links them with the C
+          # driver, and prints the result, so a package that lost `/usr/lib/std`
+          # fails here instead of in a user's build.
+          cat > finc-package-proof.fin <<'PROOF'
+          import { println_str, println_int } from stdio::std;
+
+          fun main() <noret> {
+              let n <int> = 6 * 7;
+              println_str("fin");
+              println_int(n);
+          }
+          PROOF
           bash tools/packaging/build-deb.sh stage "$FIN_VERSION" "$FIN_TARGET" \
             "finc-$FIN_VERSION-$FIN_TARGET.deb" "$deb_dep"
           # Proof without root: unpack the deb and run what it installs, from
@@ -311,8 +390,10 @@ jobs:
           dpkg-deb -x "finc-$FIN_VERSION-$FIN_TARGET.deb" deb-test
           ./deb-test/usr/bin/finc --version
           prove="$(mktemp -d)"
-          cp tests/samples/basic.fin "$prove/"
-          ( cd "$prove" && "$GITHUB_WORKSPACE/deb-test/usr/bin/finc" -c basic.fin )
+          cp finc-package-proof.fin "$prove/"
+          ( cd "$prove" \
+            && "$GITHUB_WORKSPACE/deb-test/usr/bin/finc" -o proof finc-package-proof.fin \
+            && [ "$(./proof)" = "$(printf 'fin\n42')" ] )
           # The .rpm needs rpmbuild, which Ubuntu does not ship: install it the
           # same way any other build tool is installed here, with retries.
           retry() { local n=0; until "$@"; do n=$((n+1)); if [ "$n" -ge 5 ]; then return 1; fi; sleep $((n*10)); done; }
@@ -323,6 +404,88 @@ jobs:
           rm -rf rpm-test && mkdir rpm-test
           ( cd rpm-test && rpm2cpio "../finc-$FIN_VERSION-$FIN_TARGET.rpm" | cpio -idmv )
           ./rpm-test/usr/bin/finc --version
+          # Same proof as the deb's: the extracted FHS tree must compile and run
+          # a program that imports from `lib/std`, not merely answer --version.
+          prove_rpm="$(mktemp -d)"
+          cp finc-package-proof.fin "$prove_rpm/"
+          ( cd "$prove_rpm" \
+            && "$GITHUB_WORKSPACE/rpm-test/usr/bin/finc" -o proof finc-package-proof.fin \
+            && [ "$(./proof)" = "$(printf 'fin\n42')" ] )
+
+      - name: CycloneDX SBOM (Conan graph)
+        uses: anchore/sbom-action@v0.24.3
+        with:
+          # syft's conan cataloger reads conan.lock, which the Build step above
+          # wrote from the graph it actually resolved: fmt for the driver and
+          # gtest for the suite. LLVM is not a Conan dependency (see
+          # conanfile.py), so the next step adds it from the toolchain that
+          # compiled the binary.
+          file: conan.lock
+          format: cyclonedx-json
+          output-file: finc-${{ env.FIN_VERSION }}-${{ matrix.target }}.cdx.json
+          # The action's default syft is pinned inside the action, and the
+          # matrix is heterogeneous (Windows arm64 included), so a version
+          # override here would be an untested combination. The archive upload
+          # below already covers this file; a second artifact of the same bytes
+          # and no release-asset upload keeps the release asset set exactly what
+          # publish expects.
+          upload-artifact: 'false'
+          upload-release-assets: 'false'
+
+      - name: Describe the build in the SBOM
+        run: |
+          sbom="finc-$FIN_VERSION-$FIN_TARGET.cdx.json"
+          # The toolchain that compiled finc, asked rather than assumed. Each
+          # install puts llvm-config somewhere else: apt names it
+          # llvm-config-<major>, Homebrew ships it unlinked inside the keg, and
+          # the Windows tarball puts it on PATH. Falls back to the pin the
+          # toolchain action exported, so this never guesses.
+          llvm_config=""
+          for candidate in "llvm-config" "llvm-config-$FIN_LLVM_MAJOR" \
+                           "${LLVM_DIR:+$(dirname "$LLVM_DIR")/../../bin/llvm-config}"; do
+            if [ -n "$candidate" ] && "$candidate" --version >/dev/null 2>&1; then
+              llvm_config="$candidate"
+              break
+            fi
+          done
+          llvm_version="$("$llvm_config" --version 2>/dev/null || true)"
+          llvm_version="${llvm_version:-${FIN_LLVM_VERSION:-$FIN_LLVM_MAJOR}}"
+          case "$RUNNER_OS" in
+            Linux)   llvm_source="apt.llvm.org llvm-toolchain-$FIN_LLVM_MAJOR" ;;
+            macOS)   llvm_source="Homebrew llvm@$FIN_LLVM_MAJOR" ;;
+            Windows) llvm_source="llvm-project llvmorg-$FIN_LLVM_VERSION tarball" ;;
+            *)       llvm_source="unknown" ;;
+          esac
+          echo "LLVM $llvm_version from $llvm_source (probed ${llvm_config:-nothing})"
+          # An SBOM that silently lists no dependency is worse than no SBOM, so
+          # the scan is asserted to have found both Conan packages first.
+          for dep in fmt gtest; do
+            jq -e --arg dep "$dep" 'any(.components[]; .name == $dep)' "$sbom" >/dev/null \
+              || { echo "::error::$sbom has no $dep component; conan.lock was not catalogued"; cat "$sbom"; exit 1; }
+          done
+          # syft names the scanned file as the subject; the subject here is the
+          # compiler build, which also carries toolchain facts no lockfile has.
+          # Keep in step with the same rewrite in build-musl.
+          jq --arg v "$FIN_VERSION" --arg t "$FIN_TARGET" \
+             --arg bt "$FIN_BUILD_TYPE" --arg lv "$llvm_version" --arg ls "$llvm_source" '
+             .metadata.component = {"bom-ref": "pkg:generic/finc@\($v)?target=\($t)",
+                                    "type": "application", "name": "finc", "version": $v}
+             | .metadata.properties = ((.metadata.properties // [])
+                 + [{"name": "finc:build:target", "value": $t},
+                    {"name": "finc:build:type", "value": $bt},
+                    {"name": "finc:build:llvm-version", "value": $lv},
+                    {"name": "finc:build:llvm-source", "value": $ls}])
+             | .components = ((.components // [])
+                 | map(select((.type == "file" and (.name | endswith("conan.lock"))) | not))
+                 + [{"type": "library", "name": "llvm", "version": $lv,
+                     "purl": "pkg:generic/llvm@\($lv)"}])
+            ' "$sbom" > "$sbom.tmp"
+          mv "$sbom.tmp" "$sbom"
+          jq -e --arg t "$FIN_TARGET" '.bomFormat == "CycloneDX"
+             and (any(.metadata.properties[]; .name == "finc:build:target" and .value == $t))
+             and (any(.components[]; .name == "llvm"))' "$sbom" >/dev/null \
+            || { echo "::error::$sbom does not describe build $FIN_TARGET"; cat "$sbom"; exit 1; }
+          jq -r '.components[] | "  \(.name) \(.version // "-")"' "$sbom"
 
       - name: Checksum
         run: |
@@ -349,6 +512,7 @@ jobs:
             finc-*.rpm
             finc-*-setup.exe
             finc-*.dmg
+            finc-*.cdx.json
             finc-*.sha256
 
   # musl is built inside an Alpine container rather than on the host, so the
@@ -374,6 +538,7 @@ jobs:
             export PATH="$HOME/.local/bin:$PATH"
             conan profile detect --force
             conan install . --output-folder=build-musl --build=missing \
+              --lockfile-out=conan.lock \
               -pr:a=conan/profiles/fin -s build_type=Release
             tc="$(find build-musl -name conan_toolchain.cmake -print | head -n 1)"
             cmake -S . -B build-musl -G Ninja \
@@ -401,15 +566,65 @@ jobs:
             exit 1
           fi
           python3 .github/scripts/check_arch.py stage-musl/bin/finc "$FIN_TARGET"
+          # Static musl has no shared libLLVM to copy from, so this must pass
+          # trivially -- the assertion is here so a future change that
+          # reintroduces dynamic linking into this lane is caught by name.
+          python3 .github/scripts/check_elf_copy_relocs.py stage-musl/bin/finc
           stage-musl/bin/finc --version
+
+      - name: CycloneDX SBOM (Conan graph)
+        uses: anchore/sbom-action@v0.24.3
+        with:
+          # conan.lock came out of the Alpine container in the step above, so
+          # the scan reads the same graph the musl binary was built against.
+          file: conan.lock
+          format: cyclonedx-json
+          output-file: finc-${{ env.FIN_VERSION }}-${{ env.FIN_TARGET }}.cdx.json
+          # Same reasoning as the build job: the action's pinned default syft,
+          # no second artifact, no release upload.
+          upload-artifact: 'false'
+          upload-release-assets: 'false'
+
+      - name: Describe the build in the SBOM
+        run: |
+          sbom="finc-$FIN_VERSION-$FIN_TARGET.cdx.json"
+          for dep in fmt gtest; do
+            jq -e --arg dep "$dep" 'any(.components[]; .name == $dep)' "$sbom" >/dev/null \
+              || { echo "::error::$sbom has no $dep component; conan.lock was not catalogued"; cat "$sbom"; exit 1; }
+          done
+          # The Alpine LLVM the container installed is the toolchain here, and
+          # it is static, so no distro runtime package is implied. Keep in step
+          # with the same rewrite in the build job.
+          jq --arg v "$FIN_VERSION" --arg t "$FIN_TARGET" --arg bt "$FIN_BUILD_TYPE" '
+             .metadata.component = {"bom-ref": "pkg:generic/finc@\($v)?target=\($t)",
+                                    "type": "application", "name": "finc", "version": $v}
+             | .metadata.properties = ((.metadata.properties // [])
+                 + [{"name": "finc:build:target", "value": $t},
+                    {"name": "finc:build:type", "value": $bt},
+                    {"name": "finc:build:llvm-version", "value": "22"},
+                    {"name": "finc:build:llvm-source", "value": "Alpine llvm22-static (static link)"}])
+             | .components = ((.components // [])
+                 | map(select((.type == "file" and (.name | endswith("conan.lock"))) | not))
+                 + [{"type": "library", "name": "llvm", "version": "22",
+                     "purl": "pkg:apk/alpine/llvm22-static@22"}])
+            ' "$sbom" > "$sbom.tmp"
+          mv "$sbom.tmp" "$sbom"
+          jq -e --arg t "$FIN_TARGET" '.bomFormat == "CycloneDX"
+             and (any(.metadata.properties[]; .name == "finc:build:target" and .value == $t))
+             and (any(.components[]; .name == "llvm"))' "$sbom" >/dev/null \
+            || { echo "::error::$sbom does not describe build $FIN_TARGET"; cat "$sbom"; exit 1; }
 
       - name: Archive and checksum
         run: |
           asset="finc-$FIN_VERSION-$FIN_TARGET.tar.gz"
           sudo chown -R "$(id -u):$(id -g)" stage-musl
           tar -czf "$asset" -C stage-musl bin lib
-          sha256sum "$asset" > "$asset.sha256"
-          cat "$asset.sha256"
+          # The SBOM is hashed like every other asset so publish's allow-list
+          # and its `sha256sum -c` cover it too.
+          for f in "$asset" finc-"$FIN_VERSION"-"$FIN_TARGET".cdx.json; do
+            sha256sum "$f" > "$f.sha256"
+            cat "$f.sha256"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
@@ -417,12 +632,20 @@ jobs:
           if-no-files-found: error
           path: |
             finc-*.tar.gz
+            finc-*.cdx.json
             finc-*.sha256
 
   publish:
     name: publish
     needs: [preflight, build, build-musl]
     runs-on: ubuntu-24.04
+    # Job-level because only this job signs (`id-token` mints the OIDC token)
+    # and only this job records the attestation. `contents: write` is repeated
+    # here because a job-level block replaces the workflow-level one wholesale.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     env:
       GH_TOKEN: ${{ github.token }}
       FIN_VERSION: ${{ needs.preflight.outputs.version }}
@@ -436,7 +659,7 @@ jobs:
           pattern: asset-*
           merge-multiple: true
 
-      - name: Check that all thirteen assets are present and intact
+      - name: Check that all twenty assets are present and intact
         run: |
           cd dist
           expected="
@@ -453,6 +676,13 @@ jobs:
           finc-$FIN_VERSION-aarch64-pc-windows-msvc-setup.exe
           finc-$FIN_VERSION-x86_64-apple-darwin.dmg
           finc-$FIN_VERSION-aarch64-apple-darwin.dmg
+          finc-$FIN_VERSION-x86_64-unknown-linux-gnu.cdx.json
+          finc-$FIN_VERSION-aarch64-unknown-linux-gnu.cdx.json
+          finc-$FIN_VERSION-x86_64-unknown-linux-musl.cdx.json
+          finc-$FIN_VERSION-x86_64-apple-darwin.cdx.json
+          finc-$FIN_VERSION-aarch64-apple-darwin.cdx.json
+          finc-$FIN_VERSION-x86_64-pc-windows-msvc.cdx.json
+          finc-$FIN_VERSION-aarch64-pc-windows-msvc.cdx.json
           "
           missing=0
           for f in $expected; do
@@ -489,6 +719,18 @@ jobs:
             --previous prev/index.json \
             --output index.json
           cat index.json
+
+      - name: Attest the release assets
+        # Same gate as the release itself: an attestation exists for bytes that
+        # were published, never for a rehearsal nobody can download.
+        if: github.ref_type == 'tag' || inputs.publish
+        uses: actions/attest-build-provenance@v4
+        with:
+          # Exactly what `gh release create` uploads below: the validated dist/
+          # set plus the generated index. Nothing in, nothing out.
+          subject-path: |
+            dist/*
+            index.json
 
       - name: Create the release
         if: github.ref_type == 'tag' || inputs.publish
