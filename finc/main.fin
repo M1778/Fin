@@ -131,6 +131,12 @@ pub fun run_finc(args: [string], count: int) <int> {
 
 // Process entry point: argv arrives as `args` (program name excluded,
 // like `run_finc` already expects) and forwards with its length.
+//
+// The length is read here, in `main`, and passed down as a value. It is NOT
+// re-read from `args.length` inside `run_finc`/`parse`: a stage miscompile
+// loses that slot when a `main`-args array crosses a call boundary, so a
+// callee's `args.length` is garbage while this one is right
+// (KnownDefect_StageCoverage.PassingMainArgsToACalleeLosesTheLengthOnTheStage).
 pub fun main(args: [string]) <int> {
     return run_finc(args, args.length);
 }

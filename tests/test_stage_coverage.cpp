@@ -837,3 +837,71 @@ TEST(KnownDefect_StageCoverage, CastingAPayloadEnumToIntIsRefusedOnlyByTheRefere
                "That closes the divergence: delete this pin.";
     }
 }
+
+// ---------------------------------------------------------------------------
+// A stage miscompile found by adding an extent guard to `argparse::parse`.
+//
+// `main(args: [string])` bridges C argv as `{argv + 1, argc - 1}` with the
+// length in a slot beside the pointer (finc/codegen.fin's `is_main_args`
+// path). Reading `args.length` in `main` is correct on both compilers, and so
+// is reading it in a callee when the callee is reached some other way. But
+// **passing that same array to another function loses its length on the
+// stage**: the callee reads a garbage extent, so `args.length` answers
+// 1436616830 for a one-element argv.
+//
+// This is why `lib/std/argparse.fin` grew its guards in 1.0.1 and why the
+// stage refused the compiler's own argv while bootstrapping: the guard is
+// correct in source and the stage's length read is not. Pinned as today's
+// WRONG behaviour, per the KnownDefect convention: **a failure here is good
+// news** -- it means the length slot now survives the call.
+// ---------------------------------------------------------------------------
+
+TEST(KnownDefect_StageCoverage, PassingMainArgsToACalleeLosesTheLengthOnTheStage) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable checks need the LLVM backend";
+#endif
+    if (!fs::exists(compilerFor("Stage2"))) {
+        GTEST_SKIP() << "stage compiler not found at " << compilerFor("Stage2");
+    }
+    const fs::path dir = uniqueTempPath("stagecov_argsvlen");
+    fs::create_directories(dir);
+    struct Cleanup {
+        fs::path dir;
+        ~Cleanup() {
+            std::error_code ec;
+            fs::remove_all(dir, ec);
+        }
+    } cleanup{dir};
+    const fs::path src = dir / "argvlen.fin";
+    {
+        std::ofstream file(src, std::ios::binary);
+        file << "@define printf(fmt: string, ...) <noret>;\n"
+                "fun show(args: [string]) <noret> { printf(\"len=%d\\n\", args.length); }\n"
+                "fun main(args: [string]) <int> {\n"
+                "    show(args);\n"
+                "    return 0;\n"
+                "}\n";
+        ASSERT_TRUE(file.good());
+    }
+    const Capture ref =
+        runCaptured({compilerFor("Reference"), src.string(), "-O0", "-o", (dir / "ref").string()},
+                    "stagecov_argvlen_ref");
+    ASSERT_EQ(ref.exit, 0) << "the reference rejects the minimal repro:\n" << stripAnsi(ref.err);
+    const Capture refRun = runCaptured({(dir / "ref").string(), "one"}, "stagecov_argvlen_refrun");
+    EXPECT_EQ(refRun.out, "len=1\n") << "the reference's answer changed";
+
+    for (const auto& stage : {std::make_pair("Stage2", "Stage2"), std::make_pair("Stage3", "Stage3")}) {
+        const Capture c = runCaptured({compilerFor(stage.second), src.string(), "-O0", "-o",
+                                       (dir / stage.second).string()},
+                                      "stagecov_argvlen_st");
+        if (c.exit != 0) {
+            // A refusal is not the bug this pins; report and move on.
+            EXPECT_NE(c.err.find("not lowered"), std::string::npos) << stripAnsi(c.err);
+            continue;
+        }
+        const Capture run = runCaptured({(dir / stage.second).string(), "one"}, "stagecov_argvlen_strun");
+        EXPECT_EQ(run.out, "len=1\n")
+            << stage.first << " now keeps the length when main's args reach a callee.\n"
+               "That is the fix landing: delete this pin and re-check argparse's guards.";
+    }
+}

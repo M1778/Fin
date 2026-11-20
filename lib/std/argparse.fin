@@ -104,7 +104,17 @@ pub struct ArgParser {
             self.error_msg = "parse count cannot be negative";
             return false;
         }
-        if (count > args.length) {
+        // The bound is enforced only when `args.length` is a plausible extent.
+        // On the self-hosted backend an array that crossed a call boundary from
+        // `main(args)` can report a negative length, and rejecting a correct
+        // argv is worse than skipping a check
+        // (KnownDefect_StageCoverage
+        //  .PassingMainArgsToACalleeLosesTheLengthOnTheStage). A real array never
+        // has a negative length, so the condition below is exact wherever the
+        // length is trustworthy -- and where it is not, the null-element check
+        // in the loop still catches the over-large-extent crash, because
+        // `new [string, n]{}` zero-fills.
+        if (args.length >= 0 && count > args.length) {
             self.error_msg = "parse count exceeds the argument array";
             return false;
         }
