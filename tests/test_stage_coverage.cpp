@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Stage coverage for the samples the agreement harness cannot reach.
 //
 // `tests/test_stage_agreement.cpp` compares the reference compiler against
