@@ -1,0 +1,208 @@
+{
+  "name": "Fin",
+  "scopeName": "source.fin",
+  "fileTypes": [
+    "fin"
+  ],
+  "patterns": [
+    {
+      "include": "#comment"
+    },
+    {
+      "include": "#preprocessor"
+    },
+    {
+      "include": "#attribute"
+    },
+    {
+      "include": "#attribute-block"
+    },
+    {
+      "include": "#string"
+    },
+    {
+      "include": "#constant-numeric"
+    },
+    {
+      "include": "#declaration"
+    },
+    {
+      "name": "constant.language.fin",
+      "match": "\\b(?:false|m1778|null|true)\\b"
+    },
+    {
+      "name": "keyword.control.fin",
+      "match": "\\b(?:blame|break|catch|continue|do|else|for|foreach|if|match|return|try|while)\\b"
+    },
+    {
+      "name": "keyword.declaration.fin",
+      "match": "\\b(?:class|const|define|delete|enum|extern|from|fun|implements|import|interface|let|macro|namespace|operator|special|static|struct|type)\\b"
+    },
+    {
+      "name": "keyword.modifier.fin",
+      "match": "\\b(?:priv|pub|readonly)\\b"
+    },
+    {
+      "name": "keyword.operator.word.fin",
+      "match": "\\b(?:as_ptr|cast|in|new|sizeof|typeof)\\b"
+    },
+    {
+      "name": "keyword.other.fin",
+      "match": "\\b(?:as|quote)\\b"
+    },
+    {
+      "name": "storage.type.fin",
+      "match": "\\b(?:Self|any|auto|bool|char|double|f32|f64|float|fn|i16|i32|i64|i8|int|isize|long|noret|object|short|size_t|string|u16|u32|u64|u8|uint|ulong|ushort|usize|void)\\b"
+    },
+    {
+      "name": "variable.language.fin",
+      "match": "\\b(?:super)\\b"
+    },
+    {
+      "name": "keyword.directive.fin",
+      "match": "(?:#for|#index)\\b"
+    },
+    {
+      "name": "keyword.operator.fin",
+      "match": "(?:\\.\\.\\.|<<=|>>=|!=|%=|&&|&=|\\*=|\\+\\+|\\+=|--|-=|->|/=|::|<<|<=|==|=>|>=|\\|=|\\|\\||!|%|&|\\*|\\+|-|/|<|=|>|\\?|\\^|`|\\||~)"
+    },
+    {
+      "name": "punctuation.fin",
+      "match": "(?:%\\{|\\}%|#|\\$|\\(|\\)|,|\\.|:|;|@|\\[|\\]|\\{|\\})"
+    },
+    {
+      "name": "variable.other.fin",
+      "match": "[A-Za-z_]\\w*"
+    }
+  ],
+  "repository": {
+    "comment": {
+      "patterns": [
+        {
+          "name": "comment.block.fin",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "patterns": [
+            {
+              "include": "#comment"
+            }
+          ]
+        },
+        {
+          "name": "comment.line.double-slash.fin",
+          "match": "//.*"
+        }
+      ]
+    },
+    "preprocessor": {
+      "name": "keyword.control.preprocessor.fin",
+      "match": "^\\s*#(?:c_[a-z]+|cdef)\\b.*$"
+    },
+    "attribute": {
+      "name": "meta.attribute.fin",
+      "begin": "#\\[",
+      "end": "\\]",
+      "patterns": [
+        {
+          "include": "#string"
+        },
+        {
+          "include": "#constant-numeric"
+        }
+      ]
+    },
+    "attribute-block": {
+      "name": "meta.attribute-block.fin",
+      "begin": "%\\{",
+      "end": "\\}%",
+      "patterns": [
+        {
+          "include": "$self"
+        }
+      ]
+    },
+    "string": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.fin",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.fin",
+              "match": "\\\\."
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.fin",
+          "match": "'(?:[^'\\\\]|\\\\.)'"
+        }
+      ]
+    },
+    "constant-numeric": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.fin",
+          "match": "\\b\\d+\\.\\d+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.fin",
+          "match": "\\b\\d+\\b"
+        }
+      ]
+    },
+    "declaration": {
+      "patterns": [
+        {
+          "name": "meta.function.fin",
+          "match": "\\b(fun)(\\?)?\\s+([A-Za-z_]\\w*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.function.fin"
+            },
+            "2": {
+              "name": "keyword.operator.nullable.fin"
+            },
+            "3": {
+              "name": "entity.name.function.fin"
+            }
+          }
+        },
+        {
+          "name": "meta.type-declaration.fin",
+          "match": "\\b(struct|enum|interface|class|type)\\s+([A-Za-z_]\\w*)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.fin"
+            },
+            "2": {
+              "name": "entity.name.type.fin"
+            }
+          }
+        },
+        {
+          "name": "meta.macro-declaration.fin",
+          "match": "@(macro|special|define)\\s+([A-Za-z_]\\w*)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.macro.fin"
+            },
+            "2": {
+              "name": "entity.name.function.fin"
+            }
+          }
+        },
+        {
+          "name": "meta.macro-call.fin",
+          "match": "\\b([A-Za-z_]\\w*)!",
+          "captures": {
+            "1": {
+              "name": "entity.name.function.macro.fin"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

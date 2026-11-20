@@ -1,0 +1,545 @@
+{
+  "_generated": "by editors/scripts/generate.py -- do not edit",
+  "language": "fin",
+  "scopeName": "source.fin",
+  "extensions": [
+    "fin"
+  ],
+  "sources": {
+    "keywords": "src/lexer/lexer.l",
+    "builtin_types": "src/semantics/impl/Analyzer_Core.cpp",
+    "crosschecked_against": "lib/std/token.fin"
+  },
+  "keywords": [
+    {
+      "word": "Self",
+      "scope": "storage.type",
+      "form": "type",
+      "token": "KW_SELF_TYPE"
+    },
+    {
+      "word": "any",
+      "scope": "storage.type",
+      "form": "type",
+      "token": "KW_ANY"
+    },
+    {
+      "word": "as",
+      "scope": "keyword.other",
+      "form": "expression",
+      "token": "KW_AS"
+    },
+    {
+      "word": "as_ptr",
+      "scope": "keyword.operator.word",
+      "form": "expression",
+      "token": "KW_AS_PTR"
+    },
+    {
+      "word": "auto",
+      "scope": "storage.type",
+      "form": "type",
+      "token": "KW_AUTO"
+    },
+    {
+      "word": "blame",
+      "scope": "keyword.control",
+      "form": "statement",
+      "token": "KW_BLAME"
+    },
+    {
+      "word": "break",
+      "scope": "keyword.control",
+      "form": "statement",
+      "token": "KW_BREAK"
+    },
+    {
+      "word": "cast",
+      "scope": "keyword.operator.word",
+      "form": "expression",
+      "token": "KW_CAST"
+    },
+    {
+      "word": "catch",
+      "scope": "keyword.control",
+      "form": "statement",
+      "token": "KW_CATCH"
+    },
+    {
+      "word": "class",
+      "scope": "keyword.declaration",
+      "form": "statement",
+      "token": "KW_CLASS"
+    },
+    {
+      "word": "const",
+      "scope": "keyword.declaration",
+      "form": "statement",
+      "token": "KW_CONST"
+    },
+    {
+      "word": "continue",
+      "scope": "keyword.control",
+      "form": "statement",
+      "token": "KW_CONTINUE"
+    },
+    {
+      "word": "define",
+      "scope": "keyword.declaration",
+      "form": "statement",
+      "token": "KW_DEFINE"
+    },
+    {
+      "word": "delete",
+      "scope": "keyword.declaration",
+      "form": "statement",
+      "token": "KW_DELETE"
+    },
+    {
+      "word": "do",
+      "scope": "keyword.control",
+      "form": "statement",
+      "token": "KW_DO"
+    },
+    {
+      "word": "else",
+      "scope": "keyword.control",
+      "form": "statement",
+      "token": "KW_ELSE"
+    },
+    {
+      "word": "enum",
+      "scope": "keyword.declaration",
+      "form": "statement",
+      "token": "KW_ENUM"
+    },
+    {
+      "word": "extern",
+      "scope": "keyword.declaration",
+      "form": "statement",
+      "token": "KW_EXTERN"
+    },
+    {
+      "word": "false",
+      "scope": "constant.language",
+      "form": "expression",
+      "token": "KW_FALSE"
+    },
+    {
+      "word": "fn",
+      "scope": "storage.type",
+      "form": "type",
+      "token": "KW_FN_TYPE"
+    },
+    {
+      "word": "for",
+      "scope": "keyword.control",
+      "form": "statement",
+      "token": "KW_FOR"
+    },
+    {
+      "word": "foreach",
+      "scope": "keyword.control",
+      "form": "statement",
+      "token": "KW_FOREACH"
+    },
+    {
+      "word": "from",
+      "scope": "keyword.declaration",
+      "form": "statement",
+      "token": "KW_FROM"
+    },
+    {
+      "word": "fun",
+      "scope": "keyword.declaration",
+      "form": "statement",
+      "token": "KW_FUN"
+    },
+    {
+      "word": "if",
+      "scope": "keyword.control",
+      "form": "statement",
+      "token": "KW_IF"
+    },
+    {
+      "word": "implements",
+      "scope": "keyword.declaration",
+      "form": "statement",
+      "token": "KW_IMPLEMENTS"
+    },
+    {
+      "word": "import",
+      "scope": "keyword.declaration",
+      "form": "statement",
+      "token": "KW_IMPORT"
+    },
+    {
+      "word": "in",
+      "scope": "keyword.operator.word",
+      "form": "expression",
+      "token": "KW_IN"
+    },
+    {
+      "word": "interface",
+      "scope": "keyword.declaration",
+      "form": "statement",
+      "token": "KW_INTERFACE"
+    },
+    {
+      "word": "let",
+      "scope": "keyword.declaration",
+      "form": "statement",
+      "token": "KW_LET"
+    },
+    {
+      "word": "m1778",
+      "scope": "constant.language",
+      "form": "expression",
+      "token": "KW_M1778"
+    },
+    {
+      "word": "macro",
+      "scope": "keyword.declaration",
+      "form": "statement",
+      "token": "KW_MACRO"
+    },
+    {
+      "word": "match",
+      "scope": "keyword.control",
+      "form": "statement",
+      "token": "KW_MATCH"
+    },
+    {
+      "word": "namespace",
+      "scope": "keyword.declaration",
+      "form": "statement",
+      "token": "KW_NAMESPACE"
+    },
+    {
+      "word": "new",
+      "scope": "keyword.operator.word",
+      "form": "expression",
+      "token": "KW_NEW"
+    },
+    {
+      "word": "null",
+      "scope": "constant.language",
+      "form": "expression",
+      "token": "KW_NULL"
+    },
+    {
+      "word": "operator",
+      "scope": "keyword.declaration",
+      "form": "statement",
+      "token": "KW_OPERATOR"
+    },
+    {
+      "word": "priv",
+      "scope": "keyword.modifier",
+      "form": "modifier",
+      "token": "KW_PRIV"
+    },
+    {
+      "word": "pub",
+      "scope": "keyword.modifier",
+      "form": "modifier",
+      "token": "KW_PUB"
+    },
+    {
+      "word": "quote",
+      "scope": "keyword.other",
+      "form": "expression",
+      "token": "KW_QUOTE"
+    },
+    {
+      "word": "readonly",
+      "scope": "keyword.modifier",
+      "form": "modifier",
+      "token": "KW_READONLY"
+    },
+    {
+      "word": "return",
+      "scope": "keyword.control",
+      "form": "statement",
+      "token": "KW_RETURN"
+    },
+    {
+      "word": "sizeof",
+      "scope": "keyword.operator.word",
+      "form": "expression",
+      "token": "KW_SIZEOF"
+    },
+    {
+      "word": "special",
+      "scope": "keyword.declaration",
+      "form": "statement",
+      "token": "KW_SPECIAL"
+    },
+    {
+      "word": "static",
+      "scope": "keyword.declaration",
+      "form": "statement",
+      "token": "KW_STATIC"
+    },
+    {
+      "word": "struct",
+      "scope": "keyword.declaration",
+      "form": "statement",
+      "token": "KW_STRUCT"
+    },
+    {
+      "word": "super",
+      "scope": "variable.language",
+      "form": "expression",
+      "token": "KW_SUPER"
+    },
+    {
+      "word": "true",
+      "scope": "constant.language",
+      "form": "expression",
+      "token": "KW_TRUE"
+    },
+    {
+      "word": "try",
+      "scope": "keyword.control",
+      "form": "statement",
+      "token": "KW_TRY"
+    },
+    {
+      "word": "type",
+      "scope": "keyword.declaration",
+      "form": "statement",
+      "token": "KW_TYPE"
+    },
+    {
+      "word": "typeof",
+      "scope": "keyword.operator.word",
+      "form": "expression",
+      "token": "KW_TYPEOF"
+    },
+    {
+      "word": "while",
+      "scope": "keyword.control",
+      "form": "statement",
+      "token": "KW_WHILE"
+    }
+  ],
+  "types": [
+    {
+      "word": "bool",
+      "scope": "storage.type",
+      "form": "type",
+      "token": "TYPE_BOOL"
+    },
+    {
+      "word": "char",
+      "scope": "storage.type",
+      "form": "type",
+      "token": "TYPE_CHAR"
+    },
+    {
+      "word": "double",
+      "scope": "storage.type",
+      "form": "type",
+      "token": "TYPE_DOUBLE"
+    },
+    {
+      "word": "float",
+      "scope": "storage.type",
+      "form": "type",
+      "token": "TYPE_FLOAT"
+    },
+    {
+      "word": "int",
+      "scope": "storage.type",
+      "form": "type",
+      "token": "TYPE_INT"
+    },
+    {
+      "word": "long",
+      "scope": "storage.type",
+      "form": "type",
+      "token": "TYPE_LONG"
+    },
+    {
+      "word": "noret",
+      "scope": "storage.type",
+      "form": "type",
+      "token": "TYPE_VOID"
+    },
+    {
+      "word": "string",
+      "scope": "storage.type",
+      "form": "type",
+      "token": "TYPE_STRING"
+    },
+    {
+      "word": "void",
+      "scope": "storage.type",
+      "form": "type",
+      "token": "TYPE_VOID"
+    }
+  ],
+  "builtin_types": [
+    {
+      "word": "short",
+      "scope": "storage.type",
+      "form": "type"
+    },
+    {
+      "word": "ushort",
+      "scope": "storage.type",
+      "form": "type"
+    },
+    {
+      "word": "uint",
+      "scope": "storage.type",
+      "form": "type"
+    },
+    {
+      "word": "ulong",
+      "scope": "storage.type",
+      "form": "type"
+    },
+    {
+      "word": "object",
+      "scope": "storage.type",
+      "form": "type"
+    },
+    {
+      "word": "u8",
+      "scope": "storage.type",
+      "form": "type"
+    },
+    {
+      "word": "i8",
+      "scope": "storage.type",
+      "form": "type"
+    },
+    {
+      "word": "u16",
+      "scope": "storage.type",
+      "form": "type"
+    },
+    {
+      "word": "i16",
+      "scope": "storage.type",
+      "form": "type"
+    },
+    {
+      "word": "u32",
+      "scope": "storage.type",
+      "form": "type"
+    },
+    {
+      "word": "i32",
+      "scope": "storage.type",
+      "form": "type"
+    },
+    {
+      "word": "u64",
+      "scope": "storage.type",
+      "form": "type"
+    },
+    {
+      "word": "i64",
+      "scope": "storage.type",
+      "form": "type"
+    },
+    {
+      "word": "f32",
+      "scope": "storage.type",
+      "form": "type"
+    },
+    {
+      "word": "f64",
+      "scope": "storage.type",
+      "form": "type"
+    },
+    {
+      "word": "usize",
+      "scope": "storage.type",
+      "form": "type"
+    },
+    {
+      "word": "isize",
+      "scope": "storage.type",
+      "form": "type"
+    },
+    {
+      "word": "size_t",
+      "scope": "storage.type",
+      "form": "type"
+    }
+  ],
+  "directives": [
+    {
+      "word": "#for",
+      "scope": "keyword.directive",
+      "form": "statement",
+      "token": "HASH_FOR"
+    },
+    {
+      "word": "#index",
+      "scope": "keyword.directive",
+      "form": "statement",
+      "token": "HASH_INDEX"
+    }
+  ],
+  "operators": [
+    "...",
+    "<<=",
+    ">>=",
+    "!=",
+    "%=",
+    "&&",
+    "&=",
+    "*=",
+    "++",
+    "+=",
+    "--",
+    "-=",
+    "->",
+    "/=",
+    "::",
+    "<<",
+    "<=",
+    "==",
+    "=>",
+    ">=",
+    "|=",
+    "||",
+    "!",
+    "%",
+    "&",
+    "*",
+    "+",
+    "-",
+    "/",
+    "<",
+    "=",
+    ">",
+    "?",
+    "^",
+    "`",
+    "|",
+    "~"
+  ],
+  "punctuation": [
+    "%{",
+    "}%",
+    "#",
+    "$",
+    "(",
+    ")",
+    ",",
+    ".",
+    ":",
+    ";",
+    "@",
+    "[",
+    "]",
+    "{",
+    "}"
+  ]
+}

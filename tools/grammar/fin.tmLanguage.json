@@ -65,7 +65,7 @@
     },
     {
       "name": "storage.type.fin",
-      "match": "\\b(?:bool|char|double|float|int|long|noret|string|void|Self)\\b"
+      "match": "\\b(?:bool|char|double|f32|f64|float|i16|i32|i64|i8|int|isize|long|noret|object|short|size_t|string|u16|u32|u64|u8|uint|ulong|ushort|usize|void|Self)\\b"
     },
     {
       "name": "constant.language.fin",
