@@ -1,4 +1,37 @@
+// =============================================================================
+// Fin Programming Language Compiler
+//
+// Made with ❤️ for someone special.
+//
+// This project is genuinely built on love and dedication, a way to express your love can be done through Fin.
+// Fin is a semi-object-orientated programming language that specialized in control, giving so much control to the user while asking for the bare minimum.
+// Fin is the name of the Angel from BlackNightmare-Stories not yet published.
+// “Love is the reason this project exists”
+// -----------------------------------------------------------------------------
+// Author: M1778
+// Repository: https://github.com/M1778/Fin
+// Profile: https://github.com/M1778M/
+// -----------------------------------------------------------------------------
+// Copyright (C) 2027 M1778
+//
+// This file is part of the Fin Programming Language Compiler.
+//
+// Fin is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Fin is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Fin.  If not, see <https://www.gnu.org/licenses/>.
+//
 // SPDX-License-Identifier: GPL-3.0-or-later
+// =============================================================================
+
 // Stage coverage for the samples the agreement harness cannot reach.
 //
 // `tests/test_stage_agreement.cpp` compares the reference compiler against
@@ -906,5 +939,79 @@ TEST(KnownDefect_StageCoverage, PassingMainArgsToACalleeLosesTheLengthOnTheStage
             << stage.first << " now keeps the length when main's args reach a callee.\n"
                "That is the fix landing: delete this pin, restore the plain assertion,\n"
                "and re-check that argparse's extent guard can come back.";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A stage defect found while adding the project header, and proved older than
+// that change by rebuilding the stage from the pre-header tree.
+//
+// Importing one symbol from `stdio` and then a whole other module makes the
+// stage report type errors that do not exist, against a line number that does
+// not exist in the file (540 in a three-line program), and exit 1 where the
+// reference exits 0 and emits an object.
+//
+// The named types are the tell: the messages mention `IOError` and
+// `Outcome<double>`, which `stdio` and `json` declare, while the second import
+// is `strings` or `networking`. So the stage is resolving declarations across
+// module boundaries it should keep separate, and attributing the result to the
+// importer's file. `stdio` is the module that triggers it; `json` + `networking`
+// produces one error, and `networking` alone produces none.
+//
+// Pinned as today's WRONG behaviour, in the KnownDefect convention: **a failure
+// here is good news** -- the stage stopped inventing errors and this pin can be
+// deleted.
+// ---------------------------------------------------------------------------
+
+TEST(KnownDefect_StageCoverage, ImportingFromStdioThenAModuleInventsTypeErrors) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable checks need the LLVM backend";
+#endif
+    if (!fs::exists(compilerFor("Stage2"))) {
+        GTEST_SKIP() << "stage compiler not found at " << compilerFor("Stage2");
+    }
+    const fs::path dir = uniqueTempPath("stagecov_stdioimport");
+    fs::create_directories(dir);
+    // The stage resolves `package::std` imports through the working directory,
+    // so this test runs from the repo root like the driven-sample harness does.
+    std::error_code ec;
+    const fs::path previous = fs::current_path(ec);
+    fs::current_path(fs::path(testsDir()).parent_path(), ec);
+    struct Cleanup {
+        fs::path dir;
+        fs::path previous;
+        ~Cleanup() {
+            std::error_code inner;
+            fs::current_path(previous, inner);
+            fs::remove_all(dir, inner);
+        }
+    } cleanup{dir, previous};
+    const fs::path src = dir / "stdioimport.fin";
+    {
+        std::ofstream file(src, std::ios::binary);
+        file << "import { printf } from stdio;\n"
+                "import strings;\n"
+                "fun main() <noret> { printf(\"x\"); }\n";
+        ASSERT_TRUE(file.good());
+    }
+    const Capture ref =
+        runCaptured({compilerFor("Reference"), src.string(), "-c", "-o", (dir / "ref.o").string()},
+                    "stagecov_stdio_ref");
+    EXPECT_EQ(ref.exit, 0) << "the reference now refuses a program it used to compile:\n"
+                           << stripAnsi(ref.err);
+
+    for (const auto& stage : {std::make_pair("Stage2", "Stage2"), std::make_pair("Stage3", "Stage3")}) {
+        const Capture c = runCaptured({compilerFor(stage.second), src.string(), "-c", "-o",
+                                       (dir / (std::string(stage.second) + ".o")).string()},
+                                      "stagecov_stdio_st");
+        if (c.exit == 0) {
+            // The defect is gone. Report it as the good news it is.
+            EXPECT_EQ(c.err.find("Type mismatch"), std::string::npos)
+                << stage.first << " exited 0 but still printed a type mismatch:\n"
+                << stripAnsi(c.err);
+            continue;
+        }
+        EXPECT_NE(c.err.find("Type mismatch"), std::string::npos)
+            << stage.first << " refuses the program for some other reason:\n" << stripAnsi(c.err);
     }
 }

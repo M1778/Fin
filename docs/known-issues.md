@@ -125,3 +125,37 @@ rather than causal. Linux is unaffected and still asserts the behaviour.
 The macOS half now skips with that reason named instead of asserting a
 behaviour the platform does not have. **Deleting the skip is the fix landing**
 -- restore the plain assertion once the lexer reaches its catch-all there.
+
+---
+
+# Open: the stage invents type errors after importing from `stdio`
+
+Status: **confirmed, minimal repro, pre-existing** (proved older than the
+project-header change by rebuilding the stage from the pre-header tree).
+
+```
+import { printf } from stdio;
+import strings;
+fun main() <noret> { printf("x"); }
+```
+
+- Reference: exit 0, object emitted, no diagnostics.
+- Stage2/Stage3: exit 1, **15 type errors**, attributed to the importer's file
+  at a line number that does not exist (line 540 of a three-line program).
+
+The messages name `IOError` and `Outcome<double>` — types `stdio` and `json`
+declare — while the second import is `strings`. So the stage is resolving
+declarations across module boundaries it should keep separate, and reporting
+the result against the caller's file.
+
+Scope measured: `stdio` + `networking` → 15 errors; `stdio` + `strings` → 15;
+`stdio` + `json` → 69; `json` + `networking` → 1; `networking` alone → 0. The
+trigger is importing a symbol from `stdio`, which makes this the most damaging
+stage defect found so far: `stdio` is the most-imported module in the library.
+
+Pinned by `KnownDefect_StageCoverage.ImportingFromStdioThenAModuleInventsTypeErrors`.
+
+Not root-caused. A future reader should start at how the stage's import
+machinery carries a module's declaration list across files — the bogus line
+number suggests positions from one module's AST are being rendered against
+another module's source text.
