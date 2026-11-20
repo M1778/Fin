@@ -19,7 +19,7 @@
 # with a checksum mismatch instead of silently installing unverified bytes --
 # `SKIP` was the defect that allowed exactly that.
 pkgname=finc-bin
-pkgver=1.0.0
+pkgver=1.0.1
 pkgrel=1
 pkgdesc='Fin systems programming language compiler (static binary)'
 arch=('x86_64')
