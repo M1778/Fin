@@ -60,7 +60,7 @@ jobs:
             generator: Ninja
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ./.github/actions/setup-toolchain
         with:
@@ -312,7 +312,7 @@ jobs:
     name: sanitizers (ASan+UBSan)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ./.github/actions/setup-toolchain
 
@@ -400,7 +400,7 @@ jobs:
     runs-on: ubuntu-24.04
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ./.github/actions/setup-toolchain
 
@@ -481,7 +481,7 @@ jobs:
     name: build.sh runs as committed
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-toolchain
       - name: ./build.sh --release
         # No --with-llvm.  The backend is build.sh's default now, and this job is

@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Issue #81: docs/site is a checked-in rendering of docs/guide + lib/std,
       # but until a generator exists nothing noticed when it drifted — the site
