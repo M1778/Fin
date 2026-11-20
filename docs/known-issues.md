@@ -128,10 +128,9 @@ behaviour the platform does not have. **Deleting the skip is the fix landing**
 
 ---
 
-# Open: the stage invents type errors after importing from `stdio`
+# Open: the stage invents type errors after `strings::parse_float`
 
-Status: **confirmed, minimal repro, pre-existing** (proved older than the
-project-header change by rebuilding the stage from the pre-header tree).
+Status: **confirmed, isolated to one file, introduced by the 1.0.1 stdlib work.**
 
 ```
 import { printf } from stdio;
@@ -143,19 +142,33 @@ fun main() <noret> { printf("x"); }
 - Stage2/Stage3: exit 1, **15 type errors**, attributed to the importer's file
   at a line number that does not exist (line 540 of a three-line program).
 
-The messages name `IOError` and `Outcome<double>` — types `stdio` and `json`
-declare — while the second import is `strings`. So the stage is resolving
-declarations across module boundaries it should keep separate, and reporting
-the result against the caller's file.
+## Cause, isolated
 
-Scope measured: `stdio` + `networking` → 15 errors; `stdio` + `strings` → 15;
-`stdio` + `json` → 69; `json` + `networking` → 1; `networking` alone → 0. The
-trigger is importing a symbol from `stdio`, which makes this the most damaging
-stage defect found so far: `stdio` is the most-imported module in the library.
+`lib/std/strings.fin` as it stands in this release. Reverting **only** that file
+to its previous contents clears the defect; every other file — including the
+project header added to all 348 sources — stays as it is, and the errors stay
+gone. Restoring `strings.fin` brings the 15 errors back. Measured both ways
+with the bundled stdlib path, not with `--fin-libs`.
+
+The new code in that file is `parse_float` and its helpers. A first hypothesis
+blamed the header (the defect appeared in the same commit range); that was
+tested by stripping the header from `stdio.fin` and from `strings.fin` in turn,
+and it is not the cause. A second hypothesis blamed `stdio`'s new `read_line`;
+reverting `stdio.fin` alone does not clear it either.
+
+## Scope measured
+
+`stdio` + `networking` → 15 errors; `stdio` + `strings` → 15; `stdio` + `json`
+→ 69; `json` + `networking` → 1; `networking` alone → 0. The messages name
+`IOError` and `Outcome<double>`, which `stdio` and `json` declare, while the
+second import is `strings` — so the stage is resolving declarations across
+module boundaries it should keep separate, and reporting the result against
+the caller's file.
 
 Pinned by `KnownDefect_StageCoverage.ImportingFromStdioThenAModuleInventsTypeErrors`.
+The two driven-corpus agreement tests for `importing.fin` fail for this reason
+and are allowed to.
 
-Not root-caused. A future reader should start at how the stage's import
-machinery carries a module's declaration list across files — the bogus line
-number suggests positions from one module's AST are being rendered against
-another module's source text.
+Not root-caused. A future reader should start at how the stage carries a
+module's declaration list across files: the bogus line number suggests
+positions from one module's AST are rendered against another module's source.

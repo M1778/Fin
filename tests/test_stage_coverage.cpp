@@ -943,20 +943,25 @@ TEST(KnownDefect_StageCoverage, PassingMainArgsToACalleeLosesTheLengthOnTheStage
 }
 
 // ---------------------------------------------------------------------------
-// A stage defect found while adding the project header, and proved older than
-// that change by rebuilding the stage from the pre-header tree.
+// A stage defect that `strings::parse_float` exposed, NOT the header change it
+// was first blamed on.
 //
 // Importing one symbol from `stdio` and then a whole other module makes the
 // stage report type errors that do not exist, against a line number that does
 // not exist in the file (540 in a three-line program), and exit 1 where the
 // reference exits 0 and emits an object.
 //
+// The cause was isolated to `lib/std/strings.fin`, and specifically to the
+// `parse_float` addition in this release: reverting that one file to its
+// previous contents clears the defect while every other file, including the
+// project header, stays as it is. Restoring it brings the 15 errors back.
+//
 // The named types are the tell: the messages mention `IOError` and
 // `Outcome<double>`, which `stdio` and `json` declare, while the second import
-// is `strings` or `networking`. So the stage is resolving declarations across
-// module boundaries it should keep separate, and attributing the result to the
-// importer's file. `stdio` is the module that triggers it; `json` + `networking`
-// produces one error, and `networking` alone produces none.
+// is `strings`. So the stage is resolving declarations across module boundaries
+// it should keep separate, and attributing the result to the importer's file.
+// `stdio` is the import that trips it; `json` + `networking` gives one error and
+// `networking` alone gives none.
 //
 // Pinned as today's WRONG behaviour, in the KnownDefect convention: **a failure
 // here is good news** -- the stage stopped inventing errors and this pin can be
