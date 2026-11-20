@@ -27,6 +27,7 @@ add_executable(fin_tests
     test_runtime_portability.cpp
     test_target_selectors.cpp
     test_foreign_callbacks.cpp
+    test_module_callback.cpp
     test_cli_library.cpp
     test_container_lifetimes.cpp
     test_stdptr_lifetimes.cpp
