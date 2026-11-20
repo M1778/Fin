@@ -1,0 +1,38 @@
+name: Scorecard
+
+on:
+  # Default branch only: a scorecard for a feature branch measures work in
+  # progress, and publish_results would overwrite the badge with it.
+  push:
+    branches: [master]
+  schedule:
+    - cron: '27 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  id-token: write
+
+jobs:
+  analysis:
+    name: OpenSSF Scorecard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@v2
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # Public repository (verified), so the score can be published and the
+          # badge served. Needs id-token: write.
+          publish_results: true
+
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif

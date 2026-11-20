@@ -1,0 +1,24 @@
+version: 2
+
+updates:
+  # Action pins are major tags (actions/checkout@v4), so a new major is the
+  # only update dependabot can offer here.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # pyprototype/ is historical (AGENTS.md) but its uv.lock is tracked, so it
+  # still resolves packages on any machine that runs it.
+  - package-ecosystem: "uv"
+    directory: "/pyprototype"
+    schedule:
+      interval: "weekly"
+    groups:
+      python-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]

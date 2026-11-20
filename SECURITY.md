@@ -3,20 +3,22 @@
 ## Supported Versions
 
 Security fixes for Fin (`finc`) are provided on the current release line only.
-This tree is the 1.0.0 release candidate; release validation is tracked in
-`docs/HANDOFF.md`.
+The supported line is the newest published GitHub release of M1778/Fin; the
+release list is the authority, not this file.
 
 | Version | Supported |
 | ------- | --------- |
 | 1.0.x | Yes |
-| < 1.0.0 | Upgrade and re-test when 1.0.0 is released |
+| < 1.0.0 | Upgrade to the newest 1.0.x release and re-test |
 
 There are no LTS branches. If you are pinned to an older tree, the fix
 will still land on `master` first; backports are best-effort at the
 maintainer's discretion.
 
-Identify your build with `finc --version` and compare against the
-`project(... VERSION ...)` value in `CMakeLists.txt` at tip of `master`.
+Identify your build with `finc --version`. The semver it prints comes from
+the single `project(FinCompiler VERSION ...)` declaration in `CMakeLists.txt`,
+which CMake passes to the compiler as a build-time define, so a locally built
+binary reports the tree it was built from.
 
 ## Reporting a Vulnerability
 
