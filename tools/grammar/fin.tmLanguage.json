@@ -97,21 +97,23 @@
     }
   ],
   "repository": {
-    "comment": [
-      {
-        "name": "comment.block.fin",
-        "begin": "/\\*",
-        "end": "\\*/",
-        "patterns": [
-          {
-            "include": "#comment"
-          }
-        ]
-      },
-      {
-        "name": "comment.line.double-slash.fin",
-        "match": "//.*"
-      }
-    ]
+    "comment": {
+      "patterns": [
+        {
+          "name": "comment.block.fin",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "patterns": [
+            {
+              "include": "#comment"
+            }
+          ]
+        },
+        {
+          "name": "comment.line.double-slash.fin",
+          "match": "//.*"
+        }
+      ]
+    }
   }
 }

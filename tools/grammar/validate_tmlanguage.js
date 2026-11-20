@@ -56,17 +56,27 @@ snippets.push(fs.readFileSync(S("tests/samples/deeptest2.fin"), "utf8").split("\
 snippets.push(fs.readFileSync(S("tests/samples/deeptest3.fin"), "utf8").split("\n")[124] + "\n"); // &&int reference type
 snippets.push("/* nested /* opens again */ still closes at my own */\n");
 snippets.push("blame x == y, \"message\";\nblame m1778;\n");
+// The literal constants the assertion block below pins. Without them in the
+// snippet, `null not scoped as constant.language.fin` fails against a sample
+// that never wrote the word -- the assertion was testing its own omission.
+snippets.push("let lit <bool> = true;\nlet off <bool> = false;\nlet none <&int> = null;\n");
 const snippet = snippets.join("\n");
 
 // --- replay -------------------------------------------------------------------
 const memo = new Map();
 function flatten(patterns) {
+  if (!Array.isArray(patterns)) {
+    // A repository value that is not one rule object loses every rule in it in
+    // a real editor. Fail with the reason instead of "cannot read properties".
+    throw new Error("flatten() needs an array of rules; got " +
+                    (patterns === null ? "null" : typeof patterns));
+  }
   const key = patterns.map((r) => r.name || r.match || r.begin).join("|");
   if (memo.has(key)) return memo.get(key);
   const out = [];
   for (const rule of patterns) {
     if (rule.include) {
-      if (rule.include === "#comment") out.push(...flatten(grammar.repository.comment));
+      if (rule.include === "#comment") out.push(...flatten(grammar.repository.comment.patterns));
       else if (rule.include === "$base") out.push(...flatten(grammar.patterns));
       else throw new Error("unresolved include " + rule.include);
     } else out.push(rule);
@@ -133,6 +143,16 @@ console.log("replayed " + snippet.length + " bytes -> " + events.length + " scop
 // --- assertions ------------------------------------------------------------------
 const fail = (m) => { console.error("FAIL: " + m); process.exit(1); };
 const check = (ok, m) => { if (!ok) fail("assertion: " + m); };
+
+// Shape first, because a wrong shape does not fail loudly in a real editor: it
+// silently drops every rule in that repository entry. TextMate requires each
+// `repository` value to be ONE rule object; an array is ignored by
+// vscode-textmate and Oniguruma alike. This file shipped the array form and
+// nothing noticed, because the replay below used to assume the same shape.
+for (const [name, value] of Object.entries(grammar.repository)) {
+  check(value && !Array.isArray(value) && typeof value === "object",
+    `repository.${name} must be one rule object, not ${Array.isArray(value) ? "an array" : typeof value}`);
+}
 const has = (scope, contains) =>
   events.some((e) => e.scope === scope && String(e.text ?? "").includes(contains));
 const inside = (at, scope) => {

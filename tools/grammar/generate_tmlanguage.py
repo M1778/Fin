@@ -70,13 +70,19 @@ def build_pattern_rules(kw):
     # Comments first so `//` and `/*` never split into DIV/STAR operators.
     # The block rule self-includes, matching the lexer's nestable choice
     # (lexer.l: `/*` inside a comment opens a second level).
-    rep["comment"] = [
-        {"name": "comment.block.fin",
-         "begin": r"/\*",
-         "end": r"\*/",
-         "patterns": [{"include": "#comment"}]},
-        {"name": "comment.line.double-slash.fin", "match": r"//.*"},
-    ]
+    # TextMate's `repository` value must be a single rule object. The real
+    # engine (vscode-textmate/Oniguruma) silently ignores an array here, which
+    # would drop every comment and string rule -- the exact defect that shipped
+    # in this file until 2026-11-20. Keep the list internally, wrap once.
+    rep["comment"] = {
+        "patterns": [
+            {"name": "comment.block.fin",
+             "begin": r"/\*",
+             "end": r"\*/",
+             "patterns": [{"include": "#comment"}]},
+            {"name": "comment.line.double-slash.fin", "match": r"//.*"},
+        ]
+    }
     patterns.append({"include": "#comment"})
 
     # Strings may span newlines (lexer.l: [^\\"] has no \n exclusion).
@@ -210,7 +216,7 @@ def main() -> int:
     }
     OUT.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
     print(f"wrote {OUT.relative_to(ROOT)} "
-          f"({len(rep['comment'])} comment rules, "
+          f"({len(rep['comment']['patterns'])} comment rules, "
           f"{len(patterns)} top-level patterns; "
           f"{len(kw['keywords'])} keywords, {len(kw['types'])} types, "
           f"{len(kw['directives'])} directives all consumed from the JSON)")
