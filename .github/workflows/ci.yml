@@ -67,7 +67,7 @@ jobs:
           llvm-arch: ${{ matrix.tar_arch || 'x86_64' }}
 
       - name: Cache Conan packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.conan2
           key: conan-${{ matrix.name }}-${{ hashFiles('conanfile.py', 'conan/profiles/fin') }}
@@ -314,7 +314,7 @@ jobs:
       - uses: ./.github/actions/setup-toolchain
 
       - name: Cache Conan packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.conan2
           key: conan-sanitizers-${{ hashFiles('conanfile.py', 'conan/profiles/fin') }}
@@ -402,7 +402,7 @@ jobs:
       - uses: ./.github/actions/setup-toolchain
 
       - name: Cache Conan packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.conan2
           key: conan-perf-${{ hashFiles('conanfile.py', 'conan/profiles/fin') }}
