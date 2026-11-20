@@ -19,6 +19,38 @@ independently. The semver is the release; the **contract integer is what `finn` 
 changes only when something in this document changes incompatibly. Parse the integer, do not
 compare semver ranges.
 
+### Explaining diagnostics
+
+```
+$ finc --explain E0201
+```
+
+`--explain <code>` prints the long-form explanation of one diagnostic code to **stdout**, exit `0`.
+`--explain list` prints the code inventory — one `<code> <severity> <meaning>` line per code, sorted by
+code — also to stdout with exit `0`. Neither requires nor reads a source file, and neither accepts or
+needs `-o`. They are informational like `--help` and `--version`, which is why stdout is not reserved
+against them; nothing else about that reservation changes.
+
+The command requires the compiler to know the code, so it is additive to the interface and not a
+lookup service: `--explain` names only codes this `finc` can raise. An unknown code is a command-line
+error — exit `2`, in the requested diagnostic format, with `file` null and the unknown code named in
+the message — because a caller asking about a code this compiler has never heard of is a version-skew
+signal, the same class as an unknown flag. The `code` key of the emitted diagnostic is `null`: it is a
+diagnostic *about* the invocation, not one carrying a stable code of its own.
+
+This is what `code` on a diagnostic has always promised to become usable for. A consumer that sees
+`"code":"E0201"` can shell out to `finc --explain E0201` and show the result, and the explanation
+cannot describe a rule the compiler does not implement — the catalogue and the emitter are one table
+(`src/diagnostics/DiagnosticEngine.cpp`), and `tests/test_diagnostic_help.cpp` compiles every
+catalogue example to prove it still reproduces its code. `docs/diagnostics.md` is generated from the
+same table and checked against `--explain list`.
+
+`code` is still `null` for diagnostics that belong to no coded family, and a diagnostic that matches
+no row is not a contract violation — it is a family the registry has not covered yet. Codes are
+purely additive: `code` was already in the schema and a consumer that reads it as nullable keeps
+working, so adding a row changes no byte of human output and no exit code, and is not a contract
+change. See [Changing this document](#changing-this-document).
+
 ### One contract, two repositories
 
 `finc` and `finn` implement this document against each other; neither is
@@ -39,8 +71,10 @@ pass (issue #87). Two things make the agreement testable:
   cross-repo workflow (`contract-crosscheck.yml`) builds both and fails while
   the two disagree, so the integer cannot drift unnoticed.
 
-`--help` is also stdout and exit `0`. These two are the only things `finc` writes to stdout, and they are
-written because the caller asked for them.
+`--help` is also stdout and exit `0`. These three — `--help`, `--version` and
+`--explain` — are the only things `finc` writes to stdout, and they are written
+because the caller asked for them. `--explain` is documented under
+[Explaining diagnostics](#explaining-diagnostics) below.
 
 ## Exit codes
 
@@ -61,9 +95,10 @@ a version-skew signal, not a user error, which is why it is a separate code from
 
 ## Streams
 
-**stdout is reserved.** Nothing but `--help` and `--version` is ever written there — not progress
-chatter, not `Build Successful.`, not diagnostics. If `finn` ever needs to pass compiler output through
-to a user, that is stderr. This holds on every exit path, including `2` and `3`.
+**stdout is reserved.** Nothing but `--help`, `--version` and `--explain` is ever written
+there — not progress chatter, not `Build Successful.`, not diagnostics. If `finn` ever needs
+to pass compiler output through to a user, that is stderr. This holds on every exit path,
+including `2` and `3`.
 
 ## `--diagnostics=json`
 
@@ -110,9 +145,12 @@ will more likely be *worse* than a note than better than an error. Those three a
 because "treat unknown as an error" is unimplementable without knowing the known set — every value is
 unknown to a consumer that was never told any.
 
-Two keys are deliberately present and always null today:
+Two keys are deliberately present and `attribution` is always null today:
 
-- `code` — diagnostics will be named and suppressible later without a schema change.
+- `code` — a stable code for the diagnostic's family, or `null` when no registry row
+  matches it. Codes are additive and never redefined (`docs/diagnostics.md`), so a
+  consumer may store one and branch on it; treat `null` as "this family is not coded
+  yet", not as an error. Adding or populating a code is not a contract change.
 - `attribution` — reserved for wave 4. A compile-time library can inject code, so a diagnostic will be
   able to point at a source location the user never wrote; when that happens this names the handler
   responsible and the event point that fired it. It is `null` for every diagnostic `finc` raises on its
@@ -153,6 +191,7 @@ file — a bad flag, a file that could not be read. Check for null; do not print
 --debug-codegen        Print backend and linker details
 --no-check             Skip semantic analysis (unsafe)
 --no-fin-guard         Reject bare 'let x = ...'; default rewrites to '<auto>' with a warning
+--explain <code>       Explain a diagnostic code on stdout; '--explain list' lists them
 --version / --help
 ```
 
@@ -172,8 +211,8 @@ section above) — `-c` accepts the flag because it links nothing.
 other than the host's is refused by name (exit `1`) for `-o` and `-c` builds, and no artifact
 is written: emitting a host object while naming another target would silently miscompile. A
 frontend-only check (without `-o` or `-c`) never reaches lowering and accepts the flag without
-effect. A missing triple is a command-line error (exit `2`). Adding this flag is additive, so
-the contract stays at 2 (see Changing this document).
+effect. A missing triple is a command-line error (exit `2`). Adding this flag is additive and
+needs no contract bump (see Changing this document).
 
 `--diagnostics=` and `--color=` are honoured for command-line errors too, and **may be written after the
 mistake they render** — `finn` does not need to order argv to get parseable errors.
@@ -276,6 +315,16 @@ the search-path narrowing (contract 1) could still dodge because nothing had shi
 so the integer moves. A contract-2 `finn` treats a `2` as a version-skew signal, and the refusal
 is JSONL-shaped with the command-line diagnostic naming `-o` and `--diagnostics=json`, so a
 consumer that ignores the integer still gets a parseable explanation.
+
+### Why `--explain` did not bump the contract
+
+It is a new flag, and this document already rules that adding a flag is additive. It changes no
+existing invocation's exit code, stream or diagnostic text: `--explain` is only reached when argv
+names it, and it exits before a source file is read. The one promise it touches — stdout being
+reserved — is touched the way `--help` and `--version` already touch it, by writing asked-for
+informational output there, and that sentence now names all three rather than two. A contract-3
+consumer that never passes the flag sees byte-identical behaviour, so there is nothing for `finn` to
+branch on and the integer stays at 3.
 
 ### Why the search-path change did not bump the contract
 

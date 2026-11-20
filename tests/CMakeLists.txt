@@ -16,6 +16,7 @@ add_executable(fin_tests
     test_comptime_interp.cpp
     test_scopes_w9.cpp
     test_layout.cpp
+    test_diagnostic_help.cpp
     test_stdlib.cpp
     test_module_loader.cpp
     test_macro_expander.cpp
@@ -34,6 +35,7 @@ add_executable(fin_tests
     test_stage_array_regressions.cpp
     test_stage_global_generics.cpp
     test_stage_value_ownership.cpp
+    test_stage_coverage.cpp
     test_sync_lifetimes.cpp
     test_infra_contract.cpp
     Corpus.cpp

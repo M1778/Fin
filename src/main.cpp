@@ -33,6 +33,7 @@ void printUsage(std::FILE* out) {
     fmt::print(out, "  --debug-codegen        Print what the backend lowers and the link command\n");
     fmt::print(out, "  --no-check             Skip semantic analysis (unsafe)\n");
     fmt::print(out, "  --no-fin-guard         Reject bare 'let/const x = ...'; default rewrites to '<auto>' with a warning\n");
+    fmt::print(out, "  --explain <code>       Explain a diagnostic code on stdout; '--explain list' lists them\n");
     fmt::print(out, "  --version              Print version and machine contract version\n");
     fmt::print(out, "  --help                 Show this message\n");
     fmt::print(out, "\nExit codes: 0 success, 1 diagnostics, 2 usage, 3 internal error.\n");
@@ -137,6 +138,28 @@ int main(int argc, char** argv) {
                 fmt::print("finc {} (contract {})\n",
                            fin::kFincVersion, fin::kFincContractVersion);
                 return static_cast<int>(fin::ExitCode::Success);
+            }
+            // `--explain` is asked-for output, like `--help` and `--version`, so it
+            // writes stdout and exits before anything is compiled: no source file and
+            // no `-o` are required or read. Handled in the loop the same way they are,
+            // so it wins wherever it appears -- the prescan above has already settled
+            // `--diagnostics=`/`--color=`, which is all a refusal here needs.
+            if (arg == "--explain") {
+                if (i + 1 >= args.size())
+                    return usageError(format, color, "missing code for --explain");
+                const std::string what = args[++i];
+                if (what == "list") {
+                    fmt::print("{}", fin::diagnosticCatalogueText());
+                    return static_cast<int>(fin::ExitCode::Success);
+                }
+                if (const fin::DiagnosticDoc* doc = fin::findDiagnosticDoc(what)) {
+                    fmt::print("{}", fin::diagnosticDocText(*doc));
+                    return static_cast<int>(fin::ExitCode::Success);
+                }
+                return reportAndExit(
+                    format, color, fin::ExitCode::Usage,
+                    "'" + what + "' is not a diagnostic code this finc raises",
+                    "run `finc --explain list` to see every code it raises");
             }
             if (arg == "--debug-ast")  { opts.debugParser = true;   continue; }
             if (arg == "--debug-sema") { opts.debugSema = true;     continue; }

@@ -212,6 +212,49 @@ private:
     void printHighlightedLine(const std::string& line);
 };
 
+// One row of the user-facing catalogue behind `finc --explain` (docs/diagnostics.md).
+// The code, severity and summary live in the same table that assigns codes when a
+// diagnostic is emitted, so an explanation cannot describe a code the compiler does
+// not raise, and a code cannot be raised without an explanation. `example` is a
+// complete program: the catalogue's examples are compiled by
+// tests/test_diagnostic_help.cpp, so one that stops reproducing its code fails the
+// suite rather than aging quietly.
+struct DiagnosticDoc {
+    std::string code;
+    std::string severity;
+    std::string summary;   // one line, for `--explain list`
+    std::string detail;    // the long form
+    std::string example;   // a minimal program that triggers the code
+    std::string owner;     // the ruling or sample that owns the rule, "" if none
+    // The message shape the code matches, built from the same prefix/contains
+    // pair the emitter matches on (e.g. `Type mismatch: ...`), so the
+    // explanation shows the literal family rather than paraphrasing it.
+    std::string shape;
+};
+
+// Every code the compiler can emit, sorted by code.
+const std::vector<DiagnosticDoc>& diagnosticCatalogue();
+// The row for `code`, or nullptr when no such code is emitted.
+const DiagnosticDoc* findDiagnosticDoc(const std::string& code);
+// What `--explain <code>` and `--explain list` print, both on stdout.
+std::string diagnosticDocText(const DiagnosticDoc& doc);
+std::string diagnosticCatalogueText();
+
+// One row's match rule, exactly as the emitter applies it: a message belongs to
+// `code` when it starts with `prefix` (when non-empty) and contains `contains`
+// (when non-empty). Exposed so the tests can prove no two families overlap and
+// that a row's own message is not stolen by another row's rule, without
+// duplicating the predicates into the test.
+struct DiagnosticRule {
+    std::string code;
+    std::string prefix;
+    std::string contains;
+};
+
+// Every rule, in match order. The first match wins, so a message matched by an
+// earlier rule never reaches a later one.
+const std::vector<DiagnosticRule>& diagnosticRules();
+
 // The lexer's catch-all rule reports through here rather than writing to
 // std::cerr itself. `finc` installs the engine for the translation unit it is
 // about to lex; when none is installed the character is still reported, so a
