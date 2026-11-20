@@ -19,11 +19,18 @@ command -v hdiutil >/dev/null 2>&1 || { echo "build-dmg.sh: hdiutil not found (m
 [ -f "$stage/bin/finc" ] || { echo "build-dmg.sh: $stage/bin/finc is missing" >&2; exit 1; }
 [ -n "$(find "$stage/lib/std" -name '*.fin' -print -quit 2>/dev/null)" ] \
   || { echo "build-dmg.sh: $stage/lib/std/**.fin is missing" >&2; exit 1; }
+# GPL-3.0 §4/§6 require conveying a copy of the license with the object code.
+license="$stage/lib/finc/LICENSE"
+[ -f "$license" ] \
+  || { echo "build-dmg.sh: $license is missing (cmake --install should have put it there)" >&2; exit 1; }
 
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 root="$work/finc-$version-$target"
 mkdir -p "$root"
 cp -R "$stage/bin" "$stage/lib" "$root/"
+# A dmg has no package metadata to carry a license field, so the text sits
+# beside bin/ and lib/ in the dmg's named folder the user drags from.
+cp "$license" "$root/LICENSE"
 # `-srcfolder` copies the named directory's *contents* into the volume root,
 # so pass the wrapper's parent: the volume must carry the named folder, not
 # that folder's bin/lib tree laid flat.

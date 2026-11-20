@@ -7,19 +7,28 @@
 # Arch snapshot is staler than a static binary by construction.
 #
 # This PKGBUILD wraps that tarball for makepkg/AUR use. Per release, bump
-# `pkgver` to the tag's version and fill `sha256sums` from the tarball's
-# `.sha256` sidecar on the release page.
+# `pkgver` to the tag's version and replace `sha256sums` with the value from the
+# tarball's `.sha256` sidecar on the release page:
+#
+#   curl -sSLf https://github.com/M1778/Fin/releases/download/v$pkgver/\
+#     finc-$pkgver-x86_64-unknown-linux-musl.tar.gz.sha256
+#
+# The release job publishes that sidecar next to the asset (release.yml,
+# "Archive and checksum"), so the value is never computed by hand and never
+# copied from a local rebuild. Until a maintainer fills it in, makepkg fails
+# with a checksum mismatch instead of silently installing unverified bytes --
+# `SKIP` was the defect that allowed exactly that.
 pkgname=finc-bin
 pkgver=1.0.0
 pkgrel=1
 pkgdesc='Fin systems programming language compiler (static binary)'
 arch=('x86_64')
 url='https://github.com/M1778/Fin'
-license=('GPL-3.0-only')
+license=('GPL-3.0-or-later')
 provides=('finc')
 conflicts=('finc')
 source=("finc-$pkgver-x86_64-unknown-linux-musl.tar.gz::https://github.com/M1778/Fin/releases/download/v$pkgver/finc-$pkgver-x86_64-unknown-linux-musl.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('REPLACE_WITH_THE_SHA256_FROM_THE_RELEASE_SIDECAR')
 
 package() {
   # FHS for the same reason as the .deb/.rpm: /usr/bin/finc resolves
@@ -27,4 +36,7 @@ package() {
   install -Dm755 bin/finc "$pkgdir/usr/bin/finc"
   mkdir -p "$pkgdir/usr/lib/std"
   install -m644 lib/std/*.fin -t "$pkgdir/usr/lib/std/"
+  # The license travels inside the archive (lib/finc/LICENSE); Arch wants it
+  # under /usr/share/licenses/<pkgname>/ (see the license= field above).
+  install -Dm644 lib/finc/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

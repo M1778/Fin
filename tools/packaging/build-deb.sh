@@ -32,6 +32,11 @@ done
 [ -f "$stage/bin/finc" ] || { echo "build-deb.sh: $stage/bin/finc is missing" >&2; exit 1; }
 [ -n "$(find "$stage/lib/std" -name '*.fin' -print -quit 2>/dev/null)" ] \
   || { echo "build-deb.sh: $stage/lib/std/**.fin is missing" >&2; exit 1; }
+# GPL-3.0 §4/§6 require conveying a copy of the license with the object code.
+# Debian puts it under /usr/share/doc/<package>/copyright (policy §12.5).
+license="$stage/lib/finc/LICENSE"
+[ -f "$license" ] \
+  || { echo "build-deb.sh: $license is missing (cmake --install should have put it there)" >&2; exit 1; }
 
 case "${target%%-*}" in
   x86_64) deb_arch=amd64 ;;
@@ -40,11 +45,17 @@ case "${target%%-*}" in
 esac
 
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
-pkg="$work/pkg"; mkdir -p "$pkg/DEBIAN" "$pkg/usr/bin" "$pkg/usr/lib/std"
+pkg="$work/pkg"; mkdir -p "$pkg/DEBIAN" "$pkg/usr/bin" "$pkg/usr/lib/std" \
+  "$pkg/usr/share/doc/finc"
 cp "$stage/bin/finc" "$pkg/usr/bin/finc"
 chmod 755 "$pkg/usr/bin/finc"
 cp "$stage"/lib/std/*.fin "$pkg/usr/lib/std/"
 chmod 644 "$pkg"/usr/lib/std/*.fin
+# Debian calls the license text `copyright`; it must be a regular file in
+# /usr/share/doc/<package>/, not a symlink to lib/finc/, so it survives dpkg -x
+# and is what `apt-get source` readers look at.
+cp "$license" "$pkg/usr/share/doc/finc/copyright"
+chmod 644 "$pkg/usr/share/doc/finc/copyright"
 
 {
   echo "Package: finc"

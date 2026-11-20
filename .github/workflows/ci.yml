@@ -73,14 +73,17 @@ jobs:
           key: conan-${{ matrix.name }}-${{ hashFiles('conanfile.py', 'conan/profiles/fin') }}
           restore-keys: conan-${{ matrix.name }}-
 
-      - name: License headers (issue #85)
+      - name: License headers and packaging metadata (issue #85)
         run: |
-          missing=$(git ls-files 'src/*.cpp' 'src/**/*.cpp' 'src/*.hpp' 'src/**/*.hpp' 'src/lexer/lexer.l' 'src/parser/parser.y' 'finc/*.fin' 'lib/std/*.fin' 'tools/*/main.cpp' | xargs grep -L SPDX-License-Identifier || true)
-          if [ -n "$missing" ]; then
-            echo "::error::files without SPDX-License-Identifier:"
-            printf '%s\n' "$missing"
-            exit 1
-          fi
+          # One checker for the whole declaration set: the SPDX header in every
+          # shipped source file, the identifier they all carry, the packaging
+          # fields, the license text each package carries, and the CMake install
+          # rule every artifact is staged from.  The grep this replaced covered
+          # src/ and finc/ only, so tests/*.cpp drifted with no header at all.
+          # `uv run` for the same reason check_docs.py uses it: setup-toolchain
+          # has already installed a Python 3.12, and `python3` is not a command
+          # on the Windows runners.
+          uv run --no-project python tests/tools/check_licensing.py
 
       - name: Conan install
         run: |
@@ -374,16 +377,21 @@ jobs:
             build/Testing/Temporary/LastTest.log
             build/CMakeCache.txt
 
-  # Perf signal (issue #65). Clearly-marked OPTIONAL: continue-on-error, so
-  # timing noise on shared runners -- not a compiler change -- can never turn
-  # the matrix red. This job uploads numbers as an artifact (signal, not
-  # gate): a blocking perf gate is an explicit non-goal until variance is
-  # characterized, and deltas under ~5% are machine noise (see
-  # docs/PERFORMANCE_NOTES.md section 1). It DOES fail (red) if a bench
-  # source stops compiling: run_bench.py exits 1 when a Fin source fails to
-  # build or run. Promote to blocking by deleting continue-on-error only
-  # after variance is characterized. Linux only: the harness needs a finc
-  # binary and gcc; rustc is optional (SKIP, not failure, when absent).
+  # Perf signal (issue #65). It gates Fin's own compile and runtime metrics
+  # against bench/baselines/ when the runner is the same machine the baseline
+  # was recorded on, and otherwise uploads numbers and SKIPs -- a different
+  # machine is incomparable, never "faster". The threshold is 20%, justified by
+  # measurement: 96 leave-one-out deviations of the same compiler on the
+  # baseline machine reached p99 = +8.6% and max = +10.3%, and runs taken while
+  # the box was loaded reached +16.5% (hence the load SKIP). See
+  # docs/PERFORMANCE_NOTES.md "The Gate".
+  #
+  # Deliberately still continue-on-error. Not because the threshold is a guess,
+  # but because the runner that executes this job (ubuntu-24.04, native, no
+  # baseline yet) is not the machine the baseline was recorded on (WSL2), so on
+  # today's CI the gate SKIPs and only the artifact is produced. That skip is
+  # honest -- a different machine says nothing about the compiler. Promote to
+  # blocking once a native runner baseline is recorded; see PERFORMANCE_NOTES.
   perf:
     name: perf signal (optional)
     runs-on: ubuntu-24.04
@@ -433,9 +441,26 @@ jobs:
         run: cmake --build build --target finc --parallel
 
       - name: Run benchmarks
+        # --repeat 3 is the gate protocol: each metric is the min of three pass
+        # medians, which is what the checked-in baseline records. find_finc()
+        # picks up build/finc from the Release build above; a Debug finc is
+        # measurably slower on compile rows and is caught as a SKIP by the gate.
         run: |
-          python3 bench/run_bench.py --json "$RUNNER_TEMP/bench-results.json"
+          python3 bench/run_bench.py \
+            --repeat 3 --json "$RUNNER_TEMP/bench-results.json"
           cat "$RUNNER_TEMP/bench-results.json"
+
+      - name: Compare against the checked-in baseline
+        # Exit 2 is a regression beyond the tolerance; exit 1 is a result file
+        # missing a metric the baseline expects; exit 0 is a pass, and also a
+        # SKIP when the runner is not the baseline's machine, its finc build
+        # type differs, or the run started outside the baseline's load envelope.
+        # pipefail so tee cannot hide the gate's status -- without it the
+        # pipeline reports tee's exit 0 and a regression would go unnoticed.
+        run: |
+          set -o pipefail
+          python3 bench/check_bench.py --results "$RUNNER_TEMP/bench-results.json" \
+            | tee "$RUNNER_TEMP/bench-gate.txt"
 
       - name: Upload benchmark numbers
         if: ${{ !cancelled() }}
@@ -443,7 +468,9 @@ jobs:
         with:
           name: ci-perf
           if-no-files-found: error
-          path: ${{ runner.temp }}/bench-results.json
+          path: |
+            ${{ runner.temp }}/bench-results.json
+            ${{ runner.temp }}/bench-gate.txt
 
   # The exit criterion is that build.sh runs as committed.  It is a separate job
   # so that a broken build.sh is a distinct red mark from a broken build.

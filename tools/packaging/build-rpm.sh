@@ -26,6 +26,10 @@ command -v rpmbuild >/dev/null 2>&1 || { echo "build-rpm.sh: rpmbuild not found 
 [ -f "$stage/bin/finc" ] || { echo "build-rpm.sh: $stage/bin/finc is missing" >&2; exit 1; }
 [ -n "$(find "$stage/lib/std" -name '*.fin' -print -quit 2>/dev/null)" ] \
   || { echo "build-rpm.sh: $stage/lib/std/**.fin is missing" >&2; exit 1; }
+# GPL-3.0 §4/§6 require conveying a copy of the license with the object code.
+license="$stage/lib/finc/LICENSE"
+[ -f "$license" ] \
+  || { echo "build-rpm.sh: $license is missing (cmake --install should have put it there)" >&2; exit 1; }
 
 case "${target%%-*}" in
   x86_64) rpm_arch=x86_64 ;;
@@ -37,12 +41,13 @@ work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 mkdir -p "$work"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 cp "$stage/bin/finc" "$work/SOURCES/finc"
 cp "$stage"/lib/std/*.fin "$work/SOURCES/"
+cp "$license" "$work/SOURCES/LICENSE"
 {
   echo "Name: finc"
   echo "Version: $version"
   echo "Release: 1"
   echo "Summary: Fin systems programming language compiler"
-  echo "License: GPL-3.0-only"
+  echo "License: GPL-3.0-or-later"
   echo "BuildArch: $rpm_arch"
   [ -z "$requires" ] || echo "Requires: $requires"
   echo "%description"
@@ -50,12 +55,14 @@ cp "$stage"/lib/std/*.fin "$work/SOURCES/"
   echo "The binary finds its library relative to itself"
   echo "(<exe-dir>/../lib/std), so /usr/bin/finc reads /usr/lib/std."
   echo "%install"
-  echo 'mkdir -p "%{buildroot}/usr/bin" "%{buildroot}/usr/lib/std"'
+  echo 'mkdir -p "%{buildroot}/usr/bin" "%{buildroot}/usr/lib/std" "%{buildroot}/usr/share/licenses/finc"'
   echo 'install -m755 "%{_sourcedir}/finc" "%{buildroot}/usr/bin/finc"'
   echo 'install -m644 %{_sourcedir}/*.fin "%{buildroot}/usr/lib/std/"'
+  echo 'install -m644 "%{_sourcedir}/LICENSE" "%{buildroot}/usr/share/licenses/finc/LICENSE"'
   echo "%files"
   echo "/usr/bin/finc"
   echo "/usr/lib/std/"
+  echo "%license /usr/share/licenses/finc/LICENSE"
 } > "$work/SPECS/finc.spec"
 rpmbuild -bb --define "_topdir $work" "$work/SPECS/finc.spec"
 built="$(find "$work/RPMS" -name '*.rpm' -print -quit)"
