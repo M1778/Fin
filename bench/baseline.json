@@ -1,0 +1,198 @@
+{
+  "environment": {
+    "platform": "Linux-7.2.2-artix1-1.1-x86_64-with-glibc2.44",
+    "cpu": "Intel(R) Core(TM) i5-14400F",
+    "python": "3.14.7",
+    "flags": "gcc/g++ -O2, rustc -O, finc -O2",
+    "memory": {
+      "MemTotal": "16147892 kB",
+      "MemAvailable": "7809928 kB"
+    },
+    "swap": {
+      "SwapTotal": "2097148 kB",
+      "SwapFree": "321584 kB"
+    },
+    "gcc": "gcc (GCC) 16.2.1 20260810",
+    "g++": "g++ (GCC) 16.2.1 20260810",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01) (Artix Linux rust 1:1.98.1-1)",
+    "finc": "finc 0.4.0 (contract 2)",
+    "finc_path": "/home/M1778/Fin/build/finc",
+    "llvm_pin": "set(FIN_LLVM_MAJOR 22 CACHE STRING"
+  },
+  "benchmarks": {
+    "fib": {
+      "compile": {
+        "C": {
+          "median_s": 0.057666235999931814,
+          "min_s": 0.0524218300015491,
+          "status": "ok",
+          "detail": ""
+        },
+        "C++": {
+          "median_s": 0.08553953100272338,
+          "min_s": 0.08155674399677082,
+          "status": "ok",
+          "detail": ""
+        },
+        "Rust": {
+          "median_s": 0.13044437700227718,
+          "min_s": 0.11700632499923813,
+          "status": "ok",
+          "detail": ""
+        },
+        "Fin": {
+          "median_s": 0.09143110000150045,
+          "min_s": 0.08879568600241328,
+          "status": "ok",
+          "detail": ""
+        }
+      },
+      "runtime": {
+        "C": {
+          "median_s": 0.12108125799932168,
+          "min_s": 0.11232725499939988,
+          "status": "ok",
+          "detail": "",
+          "output": "102334155"
+        },
+        "C++": {
+          "median_s": 0.11709325799893122,
+          "min_s": 0.1117726769989531,
+          "status": "ok",
+          "detail": "",
+          "output": "102334155"
+        },
+        "Rust": {
+          "median_s": 0.22592128699761815,
+          "min_s": 0.2249882889991568,
+          "status": "ok",
+          "detail": "",
+          "output": "102334155"
+        },
+        "Fin": {
+          "median_s": 0.2761809759977041,
+          "min_s": 0.2714137260009011,
+          "status": "ok",
+          "detail": "",
+          "output": "102334155"
+        }
+      }
+    },
+    "qsort_big": {
+      "compile": {
+        "C": {
+          "median_s": 0.05145468100090511,
+          "min_s": 0.047660387001087656,
+          "status": "ok",
+          "detail": ""
+        },
+        "C++": {
+          "median_s": 0.07343311800286756,
+          "min_s": 0.07067028700112132,
+          "status": "ok",
+          "detail": ""
+        },
+        "Rust": {
+          "median_s": 0.08237361099963891,
+          "min_s": 0.07699211799990735,
+          "status": "ok",
+          "detail": ""
+        },
+        "Fin": {
+          "median_s": 0.10000607899928582,
+          "min_s": 0.0977391840024211,
+          "status": "ok",
+          "detail": ""
+        }
+      },
+      "runtime": {
+        "C": {
+          "median_s": 0.06043691399827367,
+          "min_s": 0.059604002999549266,
+          "status": "ok",
+          "detail": "",
+          "output": "32750"
+        },
+        "C++": {
+          "median_s": 0.060675551998429,
+          "min_s": 0.06067401399923256,
+          "status": "ok",
+          "detail": "",
+          "output": "32750"
+        },
+        "Rust": {
+          "median_s": 0.06751468700167607,
+          "min_s": 0.06574714800080983,
+          "status": "ok",
+          "detail": "",
+          "output": "499840"
+        },
+        "Fin": {
+          "median_s": 0.06697357400116744,
+          "min_s": 0.06675516499672085,
+          "status": "ok",
+          "detail": "",
+          "output": "499840"
+        }
+      }
+    },
+    "mmul_big": {
+      "compile": {
+        "C": {
+          "median_s": 0.043632977998640854,
+          "min_s": 0.04111611199914478,
+          "status": "ok",
+          "detail": ""
+        },
+        "C++": {
+          "median_s": 0.06075307599894586,
+          "min_s": 0.057644475000415696,
+          "status": "ok",
+          "detail": ""
+        },
+        "Rust": {
+          "median_s": 0.11686840000038501,
+          "min_s": 0.10940080599903013,
+          "status": "ok",
+          "detail": ""
+        },
+        "Fin": {
+          "median_s": 0.10555630699673202,
+          "min_s": 0.0987962970029912,
+          "status": "ok",
+          "detail": ""
+        }
+      },
+      "runtime": {
+        "C": {
+          "median_s": 0.0019068859983235598,
+          "min_s": 0.0016903620016819332,
+          "status": "ok",
+          "detail": "",
+          "output": "-5273500"
+        },
+        "C++": {
+          "median_s": 0.0023509450002165977,
+          "min_s": 0.002238190998468781,
+          "status": "ok",
+          "detail": "",
+          "output": "-5273500"
+        },
+        "Rust": {
+          "median_s": 0.006418668999685906,
+          "min_s": 0.006371587998728501,
+          "status": "ok",
+          "detail": "",
+          "output": "-5273500"
+        },
+        "Fin": {
+          "median_s": 0.002417652001895476,
+          "min_s": 0.002275629998621298,
+          "status": "ok",
+          "detail": "",
+          "output": "-5273500"
+        }
+      }
+    }
+  }
+}
