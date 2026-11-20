@@ -46,12 +46,12 @@ rustc -O -o /tmp/fib_rust bench/fib.rs
 ```
 
 The driver records the environment (compiler versions, CPU,
-memory/swap state, LLVM pin, flags) alongside every number, reports
-median-of-N with the min alongside, and honors the ~5% noise floor.
-Reference numbers live in `bench/baseline.json` (machine-local,
-informational only). CI runs the same harness on Linux as a
-non-blocking `perf` job (`continue-on-error`) and uploads fresh
-numbers as an artifact — signal, not gate.
+memory/swap state, load average, LLVM pin, flags) alongside every number,
+reports median-of-N with the min alongside, and honors the ~5% noise floor.
+Reference numbers live in `bench/baselines/` (fingerprinted per machine; see
+"The Gate" below). CI runs the same harness on Linux and uploads fresh numbers
+as an artifact, and compares them to the baseline only when the runner is the
+same machine — see "The Gate" for the threshold and the limits.
 
 ### Method Note (2026-09-20 Re-measurement)
 
@@ -62,6 +62,116 @@ memory pressure (swap exhausted), which inflates occasional runs by 2–3×;
 rankings below use minima throughout so all four compilers face the same
 rule. Differences under ~5% (≈2ms at this scale) are noise — do not
 over-read Fin-vs-GCC on any single row.
+
+### The Gate (2026-11-20)
+
+`bench/baselines/` holds one JSON per machine that has been characterized.
+`bench/check_bench.py` compares a fresh result file against the baseline whose
+fingerprint matches, and refuses to compare across machines:
+
+```bash
+# record (or re-record) this machine
+python3 bench/run_bench.py --repeat 3 --json /tmp/bench.json
+python3 bench/make_baseline.py --name <machine-name> --label "<description>" \
+    --inputs /tmp/bench.json [/tmp/bench2.json ...] --tolerance <pct>
+
+# gate a run
+python3 bench/check_bench.py --results /tmp/bench.json
+```
+
+**What is compared.** Only the three `Fin` compile rows and three `Fin` runtime
+rows. A C/C++ row moves with gcc, not with finc, so those are recorded as a
+same-machine control and never gated. Compile is `finc <src> -o <bin> -O2` —
+parse, sema, LLVM IR, `-O2`, codegen, and the `cc` link, wall clock. It is the
+whole pipeline, not a phase: a frontend regression shows up in it, but you
+cannot tell from this number which phase moved. Runtime rows are the built
+binary's wall clock, so they measure Fin's generated code, not the compiler.
+
+**The measured protocol.** `--repeat 3` runs the whole suite three times; each
+metric is the **min of the three pass medians** (each pass median is itself the
+median of 5 compile runs / 3 runtime runs). Min because shared-runner noise is
+one-sided — other tenants only add time — so the fastest of three passes is the
+stable estimator. The baseline stores the **median of that gated metric over
+the invocations recorded**, not the best one.
+
+**The threshold: 20%.** Measured, not assumed. Six consecutive `--repeat 3`
+invocations of the same Release compiler, each recording its load average
+(0.71–1.34), give 36 leave-one-out deviations — same compiler, same machine,
+nothing changed: p90 = +2.8%, max = +8.0%. Folding in ten earlier invocations
+taken while the machine was quiet (1-minute load at or below 1.5) raises the
+tail — 96 samples: p90 = +5.8%, p99 = +8.6%, max = +10.3%. Twenty percent
+clears the worst deviation ever observed on this machine for the gated metric by
+roughly 2x.
+
+For contrast, the same unchanged compiler measured while another build held the
+machine at load 3 and above (peaks near 18) reaches **+16.5%** (144 samples,
+every invocation in this session pooled), and its whole-pipeline medians read
+6–11% slower than the quiet ones. Even at load 1.96 an unchanged compiler read
+**+14.8%** on a compile row. That is why `check_bench.py` refuses to judge a
+result whose run started above `gate.max_loadavg` — in the checked-in baseline
+that is 1.4, the busiest state its six invocations were measured in (0.71–1.39).
+The ceiling travels with the baseline instead of being guessed, so re-recording
+wider re-opens the envelope honestly.
+
+A result with **no recorded `loadavg`** is SKIPped for the same reason: the
+envelope cannot be checked. This is not hypothetical — the first invocations
+taken for this document predate the field, ran at load ~2–3, and read +15–25%
+against the final baseline with the compiler unchanged. A gate that judged them
+would have reported a regression that never happened.
+
+The baseline's own numbers sit slightly on the slow side: six later invocations
+at comparable load read 7–11% **faster** than it on the compile rows. That is
+the safe direction — the gate can miss a small regression but is less likely to
+invent one — and it is another reason not to tighten the tolerance toward the
+observed spread.
+
+The 20% is deliberately loose. It catches a real compile-time regression (the
+kind that matters at this scale is tens of percent, e.g. an optimization pass
+silently turned off) and will not catch a 5% one. Raising the sample count is
+the way to tighten it; do not lower the percentage without a new measurement.
+
+**Reproducing the baseline file.** The checked-in baseline
+`bench/baselines/wsl2-i5-14400f.json` was recorded on **WSL2**, not native
+Linux, from six consecutive invocations of a Release `finc` while the repo HEAD
+was `6052885c`. That binary was built at `5360b05`; no `src/` commit landed
+between the two, so it is the committed compiler. Both facts are in the file
+(`git_head`, `machine.finc_mtime`). Every number in it came from
+`bench/make_baseline.py` reading those six result files; nothing was typed by
+hand.
+
+**Known limits.**
+
+- A baseline is only valid for the fingerprint it stores: `family`, `arch`,
+  `cpu` model string, and `virt` (`wsl2` vs `native`). A different CPU model is
+  reported as incomparable (exit 0, SKIP), never as faster or slower. The same
+  CPU at a different clock, a different memory size, or a native kernel instead
+  of WSL2 is also not comparable; `virt` catches the WSL2 case explicitly
+  because it was measured to shift these numbers.
+- `cpu_count` and `loadavg` are recorded but not part of the fingerprint match;
+  a runner with fewer cores is a different machine for timing purposes and needs
+  its own baseline. `gate.max_loadavg` (the busiest load the baseline's own
+  invocations saw) is the ceiling above which a result is SKIPped.
+- The baseline records the compiler version *and* its build type. Measured
+  interleaved on this machine, Debug `finc` compiled the same sources 1.02x to
+  1.11x slower than Release (`mmul_big` 0.1735s vs 0.1558s on min-of-12), so a
+  Debug run against a Release baseline SKIPs instead of failing.
+- `finc_mtime` in the baseline is the binary's build time and `git_head` is the
+  repo HEAD when it was measured; they can differ. Both are provenance, not gate
+  inputs. If the binary predates the commit under test, a regression may be
+  invisible.
+- mmul runtime is ~2ms, so a 1ms scheduler hiccup is a 50% reading. Its
+  tolerance is the same 20%, and its observed spread (13.5% at baseline) is the
+  largest of the six — read its row last.
+- Rust is optional here (`rustc` was absent on the baseline machine), so no Rust
+  row exists in the baseline. An absent compiler is a SKIP, not a failure.
+
+**CI.** The `perf` job runs `--repeat 3` and then `check_bench.py`. It stays
+`continue-on-error` because GitHub's `ubuntu-24.04` runner is native Linux and
+the only checked-in baseline is WSL2: today the gate SKIPs there, which is
+honest, and the job still produces the numbers artifact and still fails (red,
+via exit 1) when a bench source stops compiling or running. Once a native
+runner baseline exists under `bench/baselines/`, that job's numbers compare for
+real and `continue-on-error` can be deleted.
 
 ---
 

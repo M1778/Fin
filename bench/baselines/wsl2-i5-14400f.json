@@ -1,0 +1,148 @@
+{
+  "schema": 1,
+  "label": "WSL2 (Linux 6.18.58.1-microsoft-standard-WSL2) on Intel Core i5-14400F, 16 threads, 8 GiB",
+  "created": "2026-11-20T06:26:44+03:30",
+  "git_head": "6052885c7b961e7732a4175ba3eb4a0a5e9a277f",
+  "machine": {
+    "family": "linux",
+    "arch": "x86_64",
+    "cpu": "Intel(R) Core(TM) i5-14400F",
+    "virt": "wsl2",
+    "cpu_count": 16,
+    "finc": "finc 1.0.0 (contract 3)",
+    "finc_build_type": "Release",
+    "finc_mtime": "2026-10-24T02:50:54+03:30",
+    "gcc": "gcc (GCC) 16.2.1 20260810",
+    "llvm_pin": "set(FIN_LLVM_MAJOR 22 CACHE STRING"
+  },
+  "method": {
+    "protocol": "run_bench.py --repeat 3 --compile-runs 5 --run-runs 3",
+    "gated_metric": "min of the 3 pass medians; each pass median is the median of its own runs",
+    "baseline_value": "median of the gated metric across 6 invocations",
+    "spread_pct": "max-min of those gated metrics, as a percentage of the median (observed variance, not a bound)"
+  },
+  "gate": {
+    "tolerance_pct": 20.0,
+    "max_loadavg": 1.39,
+    "metrics": [
+      "fib/compile/Fin",
+      "fib/runtime/Fin",
+      "qsort_big/compile/Fin",
+      "qsort_big/runtime/Fin",
+      "mmul_big/compile/Fin",
+      "mmul_big/runtime/Fin"
+    ],
+    "note": "only Fin rows gate: a C/C++ row moves with gcc, not with finc, and is recorded as the same-machine control"
+  },
+  "metrics": {
+    "fib": {
+      "compile": {
+        "C": {
+          "median_s": 0.103596,
+          "spread_pct": 2.6,
+          "samples": 6
+        },
+        "C++": {
+          "median_s": 0.134881,
+          "spread_pct": 4.0,
+          "samples": 6
+        },
+        "Fin": {
+          "median_s": 0.143547,
+          "spread_pct": 4.6,
+          "samples": 6
+        }
+      },
+      "runtime": {
+        "C": {
+          "median_s": 0.118724,
+          "spread_pct": 5.6,
+          "samples": 6
+        },
+        "C++": {
+          "median_s": 0.114974,
+          "spread_pct": 9.4,
+          "samples": 6
+        },
+        "Fin": {
+          "median_s": 0.284282,
+          "spread_pct": 5.5,
+          "samples": 6
+        }
+      }
+    },
+    "qsort_big": {
+      "compile": {
+        "C": {
+          "median_s": 0.094236,
+          "spread_pct": 5.5,
+          "samples": 6
+        },
+        "C++": {
+          "median_s": 0.127725,
+          "spread_pct": 4.4,
+          "samples": 6
+        },
+        "Fin": {
+          "median_s": 0.150015,
+          "spread_pct": 3.9,
+          "samples": 6
+        }
+      },
+      "runtime": {
+        "C": {
+          "median_s": 0.06172,
+          "spread_pct": 5.4,
+          "samples": 6
+        },
+        "C++": {
+          "median_s": 0.062731,
+          "spread_pct": 4.4,
+          "samples": 6
+        },
+        "Fin": {
+          "median_s": 0.068256,
+          "spread_pct": 8.3,
+          "samples": 6
+        }
+      }
+    },
+    "mmul_big": {
+      "compile": {
+        "C": {
+          "median_s": 0.085398,
+          "spread_pct": 3.7,
+          "samples": 6
+        },
+        "C++": {
+          "median_s": 0.11079,
+          "spread_pct": 3.2,
+          "samples": 6
+        },
+        "Fin": {
+          "median_s": 0.147917,
+          "spread_pct": 4.2,
+          "samples": 6
+        }
+      },
+      "runtime": {
+        "C": {
+          "median_s": 0.001964,
+          "spread_pct": 13.4,
+          "samples": 6
+        },
+        "C++": {
+          "median_s": 0.002428,
+          "spread_pct": 11.3,
+          "samples": 6
+        },
+        "Fin": {
+          "median_s": 0.001851,
+          "spread_pct": 13.5,
+          "samples": 6
+        }
+      }
+    }
+  },
+  "note": "Measured on a WSL2 guest, not native Linux. CI runners (ubuntu-24.04) do not match this fingerprint, so the gate SKIPs there until a runner baseline is recorded; see docs/PERFORMANCE_NOTES.md."
+}
