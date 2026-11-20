@@ -299,10 +299,9 @@ jobs:
   # measurement is now in: 32 consecutive sanitizer jobs passed between the last
   # failure (run 39179051667, 2026-10-19) and run 44791938372 (2026-11-20). That
   # last failure was the ordinary test failures of that day, not a sanitizer
-  # report -- its log contains no AddressSanitizer/UBSan diagnostic at all, and
-  # neither does any run since. So there is no intermittent, no upstream-LLVM
-  # attribution, and no finding being suppressed by the old `continue-on-error`;
-  # what it bought was silence. A new finding is now a defect to fix.
+  # report -- its log contains no AddressSanitizer/UBSan diagnostic at all. So
+  # there is no intermittent and no upstream-LLVM attribution for the flag to
+  # suppress; what it bought was silence. A new finding is now a defect to fix.
   # Does NOT touch the build matrix above: same toolchain action, Debug (better
   # stacks), -DFIN_SANITIZE=ON, full ctest. No stage bootstrap here: stage
   # binaries link through the stage driver's own `cc` line, so they would run
