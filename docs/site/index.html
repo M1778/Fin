@@ -70,6 +70,7 @@
         <ul class="nav-section-items">
           <li><a href="#intro" class="nav-item-link active"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#heart"></use></svg><span>Introduction</span></a></li>
           <li><a href="#installation" class="nav-item-link"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#download"></use></svg><span>Installation &amp; Build</span></a></li>
+          <li><a href="#prebuilt" class="nav-item-link"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#package"></use></svg><span>Prebuilt Binaries</span></a></li>
           <li><a href="#quickstart" class="nav-item-link"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#rocket"></use></svg><span>Quickstart</span></a></li>
           <li><a href="#hello-world" class="nav-item-link"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#terminal-2"></use></svg><span>Hello, World!</span></a></li>
         </ul>
@@ -278,7 +279,43 @@ fn main() {
           <div class="code-block">
             <div class="code-header"><span class="code-lang">Install from a release</span><button type="button" class="copy-btn" id="hero-copy-install-btn" aria-label="Copy install command"><span>Copy</span></button></div>
             <pre><code class="language-bash">curl -o install.sh https://raw.githubusercontent.com/M1778/Fin/master/install.sh
-sh install.sh  # pins the newest released tag; the compiled commit is printed</code></pre>
+sh install.sh  # pins the newest PUBLISHED release, or refuses; the commit is printed</code></pre>
+          </div>
+
+          <h3 id="prebuilt">Prebuilt binaries <a href="#prebuilt" class="header-anchor">#</a></h3>
+          <p>
+            Every release ships a build for each supported platform, so a toolchain
+            can be installed without a compiler or LLVM on the machine. Each asset
+            has a <code>.sha256</code> sidecar, and the release's <code>index.json</code>
+            is the authoritative checksum list that <code>finn</code> reads.
+          </p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr><th style="width: 30%;">Platform</th><th style="width: 38%;">Asset</th><th style="width: 32%;">Notes</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Linux, glibc, x86_64 / aarch64</td><td><code>finc-&lt;ver&gt;-&lt;triple&gt;.tar.gz</code></td><td>Also as <code>.deb</code> and <code>.rpm</code> on x86_64.</td></tr>
+                <tr><td>Linux, any distro, x86_64</td><td><code>finc-&lt;ver&gt;-x86_64-unknown-linux-musl.tar.gz</code></td><td>Fully static: no dynamic loader, no LLVM runtime.</td></tr>
+                <tr><td>macOS, Intel / Apple silicon</td><td><code>.tar.gz</code> and <code>.dmg</code></td><td>Drag-to-install image, or unpack the archive.</td></tr>
+                <tr><td>Windows, x64 / arm64</td><td><code>.zip</code> and <code>-setup.exe</code></td><td>The installer adds an optional <code>PATH</code> entry.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            <a href="https://github.com/M1778/Fin/releases/latest">Download the latest release &#8594;</a>
+            &nbsp;&middot;&nbsp; verify with <code>sha256sum -c finc-&lt;ver&gt;-&lt;triple&gt;.tar.gz.sha256</code>
+          </p>
+          <div class="callout callout-important">
+            <svg class="icon callout-icon" aria-hidden="true"><use href="assets/icons.svg#shield-check"></use></svg>
+            <div class="callout-body">
+              <strong>What is and is not verified</strong>
+              <p>Release artifacts are not cryptographically signed. Integrity rests on the
+              per-asset checksums and <code>index.json</code>; authenticity rests on GitHub TLS
+              and the release's commit. Each target carries a CycloneDX SBOM, and the release
+              set is attested with build provenance &mdash;
+              <code>gh attestation verify &lt;asset&gt; --repo M1778/Fin</code>.</p>
+            </div>
           </div>
 
           <h3 id="prerequisites">Prerequisites <a href="#prerequisites" class="header-anchor">#</a></h3>
@@ -1080,6 +1117,7 @@ fun calculate() &lt;int&gt; {
       <ul class="toc-list">
         <li class="toc-item"><a href="#intro" class="toc-link active">Introduction</a></li>
         <li class="toc-item"><a href="#installation" class="toc-link">Installation &amp; Build</a></li>
+        <li class="toc-item"><a href="#prebuilt" class="toc-link">Prebuilt Binaries</a></li>
         <li class="toc-item"><a href="#quickstart" class="toc-link">Quickstart Guide</a></li>
         <li class="toc-item"><a href="#hello-world" class="toc-link">Hello, World!</a></li>
         <li class="toc-item"><a href="#variables-types" class="toc-link">Variables &amp; Types</a></li>
