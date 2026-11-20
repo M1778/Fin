@@ -450,7 +450,12 @@ DiagVerdict checkDiagAgreement(const std::string& stem, ExpectationKind kind, co
     // the single stem and logged rather than silently allowed. Deleting the
     // entry is the defect's fix landing.
     if (cppExit != stageExit) {
-        if (stem == "importing") return DiagVerdict::KnownStageDefect;
+        // Scoped to the exact defect shape: the reference accepts and the stage
+        // rejects. A sample the REFERENCE refuses and the stage accepts is a
+        // different bug and must still fail here.
+        if (stem == "importing" && cppExit == 0 && stageExit != 0) {
+            return DiagVerdict::KnownStageDefect;
+        }
         return DiagVerdict::FateDivergence;
     }
     if (kind == ExpectationKind::Error) {
@@ -764,8 +769,22 @@ TEST(StageAgreementLogic, UnimplementedComparesRefusalText) {
     EXPECT_EQ(checkDiagAgreement("importing", ExpectationKind::Unimplemented, nullptr, 0, warning, 0,
                                  warning),
               DiagVerdict::Agree);
+    // The reference accepting while the stage rejects is the shape of the
+    // documented stage defect (strings::parse_float makes the stage invent type
+    // errors after a stdio import), so it is tolerated for this one stem and
+    // reported as a defect rather than a divergence. Both directions are
+    // asserted: the exception must not widen to any other shape.
     EXPECT_EQ(checkDiagAgreement("importing", ExpectationKind::Unimplemented, nullptr, 0, warning, 1,
                                  refusal),
+              DiagVerdict::KnownStageDefect);
+    // A sample the REFERENCE refuses while the stage accepts is a different
+    // bug: still a fate divergence, even for this stem.
+    EXPECT_EQ(checkDiagAgreement("importing", ExpectationKind::Unimplemented, nullptr, 1, refusal, 0,
+                                 warning),
+              DiagVerdict::FateDivergence);
+    // And the exception is scoped to the stem.
+    EXPECT_EQ(checkDiagAgreement("other_sample", ExpectationKind::Unimplemented, nullptr, 0, warning,
+                                 1, refusal),
               DiagVerdict::FateDivergence);
 }
 
