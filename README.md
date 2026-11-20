@@ -25,14 +25,16 @@ from source comes after you have read what gets run:
 
 ```sh
 curl -o install.sh https://raw.githubusercontent.com/M1778/Fin/master/install.sh
-sh install.sh                          # newest released tag or REFUSE; commit printed
+sh install.sh                          # newest PUBLISHED release or REFUSE; commit printed
 ```
 
-The installer clones at a pinned release tag only — never `master` — verifies
+The installer clones at a pinned ref only — never `master` — verifies
 the LLVM major pinned in `CMakeLists.txt` against your `llvm-config`, runs
 `./build.sh --release --with-llvm --no-test`, and smoke-tests the built
-compiler on one sample. `FIN_REF=<tag-or-commit>` names exactly what to
-compile when you want a specific build. Details, failure modes, and what the
+compiler on one sample. Without `FIN_REF` it resolves the newest **published
+release**, not merely the newest tag, and refuses when none is published;
+`FIN_REF=<tag-or-commit>` names exactly what to compile when you want a
+specific build. Details, failure modes, and what the
 script checks first live in [INSTALL.md](INSTALL.md). To build this checkout
 by hand on Linux or macOS, install a C++20 compiler, CMake 3.20 or newer,
 Conan 2, Bison 3.2 or newer,
