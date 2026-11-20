@@ -41,7 +41,7 @@ jobs:
     name: contract agreement (finc ↔ finn)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ./.github/actions/setup-toolchain
 
@@ -81,7 +81,7 @@ jobs:
             --output-on-failure --no-tests=error
 
       - name: Check out finn
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: M1778/finn
           path: finn
