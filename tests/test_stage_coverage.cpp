@@ -900,8 +900,11 @@ TEST(KnownDefect_StageCoverage, PassingMainArgsToACalleeLosesTheLengthOnTheStage
             continue;
         }
         const Capture run = runCaptured({(dir / stage.second).string(), "one"}, "stagecov_argvlen_strun");
-        EXPECT_EQ(run.out, "len=1\n")
+        // Today's WRONG answer: garbage, and a different garbage each run, because
+        // the length slot is read from whatever the call left behind.
+        EXPECT_NE(run.out, "len=1\n")
             << stage.first << " now keeps the length when main's args reach a callee.\n"
-               "That is the fix landing: delete this pin and re-check argparse's guards.";
+               "That is the fix landing: delete this pin, restore the plain assertion,\n"
+               "and re-check that argparse's extent guard can come back.";
     }
 }
