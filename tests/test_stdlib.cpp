@@ -158,17 +158,17 @@ std::string buildAndRunWithStdin(const std::string& code, const std::string& inp
     int status = -1;
 #ifdef _WIN32
     SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
-    HANDLE in = CreateFileA(inPath.string().c_str(), GENERIC_READ, FILE_SHARE_READ,
-                            &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    HANDLE out = CreateFileA(outPath.string().c_str(), GENERIC_WRITE, FILE_SHARE_READ,
-                             &security, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (in != INVALID_HANDLE_VALUE && out != INVALID_HANDLE_VALUE) {
+    HANDLE inHandle = CreateFileA(inPath.string().c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                  &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE outHandle = CreateFileA(outPath.string().c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                                   &security, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (inHandle != INVALID_HANDLE_VALUE && outHandle != INVALID_HANDLE_VALUE) {
         STARTUPINFOA startup{};
         startup.cb = sizeof(startup);
         startup.dwFlags = STARTF_USESTDHANDLES;
-        startup.hStdInput = in;
-        startup.hStdOutput = out;
-        startup.hStdError = out;
+        startup.hStdInput = inHandle;
+        startup.hStdOutput = outHandle;
+        startup.hStdError = outHandle;
         PROCESS_INFORMATION process{};
         std::string command = "\"" + exe.string() + "\"";
         if (CreateProcessA(nullptr, command.data(), nullptr, nullptr, TRUE, 0, nullptr,
@@ -181,8 +181,8 @@ std::string buildAndRunWithStdin(const std::string& code, const std::string& inp
             CloseHandle(process.hProcess);
         }
     }
-    if (in != INVALID_HANDLE_VALUE) CloseHandle(in);
-    if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
+    if (inHandle != INVALID_HANDLE_VALUE) CloseHandle(inHandle);
+    if (outHandle != INVALID_HANDLE_VALUE) CloseHandle(outHandle);
 #else
     const pid_t pid = ::fork();
     if (pid == 0) {
