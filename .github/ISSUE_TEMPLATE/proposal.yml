@@ -1,0 +1,77 @@
+---
+name: Language or standard-library proposal
+about: A change to Fin's behaviour, a new standard-library API, or a ruling to overturn
+title: ""
+labels: ["proposal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Fin's behaviour is specified by its samples and its ADRs, so a proposal has a
+        specific shape here: it either adds a witness the corpus lacks, or it argues
+        against a ruling that exists.
+
+        That is not bureaucracy. `tests/samples/` is the normative specification
+        (ADR 0008), and a language change without a sample is a change nothing tests.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: |
+        What can you not express today, or what does the language make unnecessarily
+        awkward? Concrete programs are worth more than principles.
+    validations:
+      required: true
+
+  - type: textarea
+    id: witness
+    attributes:
+      label: A program the compiler should accept (or refuse)
+      description: |
+        This becomes the normative sample. Keep it small enough to read in one sitting
+        and write what it should print.
+      render: fin
+    validations:
+      required: true
+
+  - type: textarea
+    id: today
+    attributes:
+      label: What happens today
+      description: Paste the diagnostic. If the answer is "it compiles but means something else", show that instead — a silent difference is a much more serious finding.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: ruling
+    attributes:
+      label: Existing ADR or sample this touches
+      description: |
+        If it changes a ruling, name the ADR. Held rulings are listed in AGENTS.md
+        and are not changed by a patch — say so plainly if that is what you propose.
+      placeholder: "ADR 0036, tests/samples/deeptest4.fin"
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of change is this
+      options:
+        - New language behaviour
+        - Change to existing behaviour (breaking)
+        - New standard-library API
+        - Change to a shipped stdlib API (breaking for 1.0.x)
+        - Overturns a held ruling
+        - Documentation or tooling
+    validations:
+      required: true
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility
+      description: |
+        For a breaking change, say what existing programs stop compiling and what a
+        reader should do. 1.0.x avoids breaking changes except where behaviour was
+        genuinely wrong; if that is the case, say so.

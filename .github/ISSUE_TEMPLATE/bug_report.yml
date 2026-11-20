@@ -1,0 +1,102 @@
+---
+name: Bug report
+about: The compiler, the standard library, or a release artifact misbehaved
+title: ""
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A report that can be reproduced gets fixed. One that cannot usually does not.
+
+        Before filling this in, please try the **smallest** input that still shows the
+        problem: most compiler bugs reproduce in ten lines, and a ten-line repro is
+        something a maintainer can run in a debugger. If you can shrink yours, do.
+
+  - type: input
+    id: version
+    attributes:
+      label: "finc --version"
+      description: Paste the whole line. It carries both the semver and the machine-contract integer.
+      placeholder: "finc 1.0.1 (contract 3)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      description: The OS and architecture you ran the compiler on.
+      options:
+        - Linux, x86_64 (glibc)
+        - Linux, aarch64 (glibc)
+        - Linux, x86_64 (musl / static)
+        - macOS, Apple silicon
+        - macOS, Intel
+        - Windows, x64
+        - Windows, arm64
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How finc arrived
+      description: A bug can be a packaging bug. This narrows it in one line.
+      options:
+        - Release artifact (tar.gz / zip / deb / rpm / dmg / setup.exe)
+        - Built from source with build.sh
+        - install.sh
+        - Installed through finn
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: source
+    attributes:
+      label: The program
+      description: The smallest `.fin` source that shows the problem. Paste it whole, not a screenshot.
+      render: fin
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: The command you ran
+      placeholder: finc repro.fin -o repro
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: If the compiler refused something, say what you expected it to accept and why — a sample, an ADR, or the standard library already doing it is ideal evidence.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: |
+        Paste the compiler's output verbatim. For a JSON stream, `--diagnostics=json --color=never`
+        gives us the machine shape instead of a rendering of it.
+      render: shell
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for the same behaviour.
+          required: true
+        - label: The program above is the smallest version that still fails.
+          required: false
+        - label: I removed anything private from the source and the output.
+          required: true

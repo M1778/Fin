@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/M1778/Fin/security/advisories/new
+    about: Report privately. Do not open a public issue for a security problem.
+  - name: Installation or build failure
+    url: https://github.com/M1778/Fin/blob/master/docs/troubleshooting.md
+    about: Troubleshooting covers the common ones with the exact error text and the fix.
+  - name: Question or idea
+    url: https://github.com/M1778/Fin/discussions
+    about: For a question that is not a bug report or a proposal.
