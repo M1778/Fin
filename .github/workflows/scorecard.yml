@@ -24,7 +24,12 @@ jobs:
           persist-credentials: false
 
       - name: Run analysis
-        uses: ossf/scorecard-action@v2
+        # No moving `v2` tag exists for this action -- only per-release tags,
+        # v2.6.0 being the current one -- so `@v2` resolved to nothing and every
+        # Scorecard run failed at "unable to find version v2" (run 44796140422).
+        # Pinned to the release tag; Dependabot's github-actions ecosystem bumps
+        # it like any other pin.
+        uses: ossf/scorecard-action@v2.6.0
         with:
           results_file: results.sarif
           results_format: sarif
@@ -33,6 +38,9 @@ jobs:
           publish_results: true
 
       - name: Upload to code scanning
-        uses: github/codeql-action/upload-sarif@v3
+        # v3 and v4 are both supported today; v4 is the one GitHub's README
+        # recommends. The repo is public and runs GitHub-hosted runners, so
+        # there is no GHES floor holding the pin at v3.
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: results.sarif
