@@ -664,6 +664,16 @@ run 36516630186), `deploy-pages.yml` (single channel), CodeQL. fin-sdk `provenan
 - **Scratch space:** `/tmp/opencode` root content is shared/ephemeral (a prior uid note said
   unwritable); use `~/fin-tmp/` for durable scratch, subdirectories otherwise. Never write
   scratch into the Fin repo.
+- **Clean up your scratch when the task ends.** `~/fin-tmp/` reached 8.9 GB in six weeks
+  because every agent left its build trees behind and nothing pruned them. Before reporting
+  done: delete the directories you created (`rm -rf ~/fin-tmp/<yours>`), and leave anything
+  still in use by a concurrent agent alone. A Conan toolchain directory under scratch is
+  referenced by an absolute path from `build-asan/CMakeCache.txt`, so check `grep -rl <dir>
+  ~/Fin/build*/CMakeCache.txt` before deleting it.
+- **Build directories are disposable.** `build/` (Debug, ~1.4 GB), `build-asan`,
+  `build-stage`, `build-explain`, `build-pic`, and `build/release-check/` can all be
+  regenerated; delete them when a workstream ends rather than accumulating one per agent.
+  `~/finn/target` (Rust, ~4.5 GB) is the same kind of cache.
 - **Docs gate:** `check_docs.py` verifies fenced Fin examples; plain `fin` means a complete
   runnable program, exceptions name themselves (`fin fragment`, `fin check`, `fin error`,
   `fin build-error`); `output` fences are exact stdout. `docs/adr/README.md` is exempt from the
