@@ -2239,7 +2239,9 @@ import { File } from stdio::std;
 fun main() <noret> {
     let made? <string> = mk_tmp_dir("finfs_nul");
     blame made != null;
-    let path <string> = concat(made?, "/nul.bin");
+    // Not "nul.bin": on Windows that is the NUL device, so the file is never created
+    // or removed and the test fails for a reason that has nothing to do with NUL bytes.
+    let path <string> = concat(made?, "/nulbyte.bin");
     let bytes <[char]> = ['a', cast<char>(0), 'b'];
     let text <string> = from_chars(bytes, 0, 3);
     blame write_string(path, text);
