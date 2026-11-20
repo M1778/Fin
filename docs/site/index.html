@@ -715,12 +715,14 @@ fun memory_lifecycle() &lt;noret&gt; {
     delete buf;
 
     // 2. Safe shared reference counting with rptr
+    // rptr() hands back one strong handle, and creating it counts a reference:
+    // the container itself plus this handle, so refs() starts at 2.
     let ptr &lt;rptr&lt;int&gt;&gt; = rptr(42);
-    printf("Refs: %d, Borrows: %d\n", ptr.refs(), ptr.borrows()); // 1, 0
+    printf("Refs: %d, Borrows: %d\n", ptr.refs(), ptr.borrows()); // 2, 0
 
     // Clone shared handle
     let handle2 &lt;rptr&lt;int&gt;&gt; = ptr.alias();
-    printf("Refs after alias: %d\n", ptr.refs()); // 2
+    printf("Refs after alias: %d\n", ptr.refs()); // 3
 
     // Exclusive borrowing
     let borrowed &lt;rptr&lt;int&gt;&gt; = ptr.borrow();
@@ -1046,9 +1048,9 @@ fun calculate() &lt;int&gt; {
               </thead>
               <tbody>
                 <tr><td><code>0</code></td><td>Success</td><td>Compilation, type-checking, or linking finished with zero diagnostics.</td></tr>
-                <tr><td><code>1</code></td><td>Syntax Error</td><td>Bison parser or Flex lexer failed to parse input source.</td></tr>
-                <tr><td><code>2</code></td><td>Semantic Failure</td><td>Type mismatch, undeclared identifier, or invalid constraint bound.</td></tr>
-                <tr><td><code>3</code></td><td>Codegen Refusal</td><td>Explicit refusal: compiler halts when a construct cannot be lowered soundly.</td></tr>
+                <tr><td><code>1</code></td><td>Source Rejected</td><td>The source was rejected: syntax or semantic diagnostics, or a named codegen refusal. Every rejection is reported with a diagnostic, never silently.</td></tr>
+                <tr><td><code>2</code></td><td>Invocation Failure</td><td>Bad command line, or the input could not be read. A build tool treats this as its own bug or a version mismatch, not as a fault in the user's source.</td></tr>
+                <tr><td><code>3</code></td><td>Compiler Failure</td><td>The compiler itself failed, not the source. Carried as a diagnostic plus summary like any other, so a caller can report an internal bug through the same parse path it uses for everything else.</td></tr>
               </tbody>
             </table>
           </div>
