@@ -97,13 +97,28 @@ no new bootstrap was needed for these library/test/workflow-only repairs.
 
 The eight workflow-parser cases, site check, architecture/installer preflight
 and `git diff --check` pass. Independent read-only review found no actionable
-issues in the patch. Native Windows linker tools are unavailable locally;
-none of these repairs has fresh Windows/macOS CI proof. No `v1.0.0` tag or
-release exists at the November remote readback. Commit/push authorization
-was granted on 2026-11-04. Next: validate the published candidate on all six
-native lanes; packaging rehearsal and stable publication remain separate
-gates. Native CI results must name the exact tested commit, not an earlier
-green revision.
+issues in the patch. Commit/push authorization was granted on 2026-11-04.
+
+**Native CI completed:** run
+[41770346027](https://github.com/M1778/Fin/actions/runs/41770346027) tested exact
+candidate **`3e801a02c31e7d0f17c8243465b2727d2b1f3caf`** and passed all six native
+lanes, build.sh, performance and ASan/UBSan. This supplies native reference
+proof for the path and clock repairs; non-Linux self-hosted stages remain
+outside the bootstrap coverage described above.
+
+**Contract integration remains blocked:** run
+[41770345868](https://github.com/M1778/Fin/actions/runs/41770345868) tested the
+same revision. The parser check, compiler build and Fin-side corpus replay
+passed, then version agreement correctly failed: finc speaks **contract 3**,
+while the checked-out published `M1778/finn` implements **contract 2**. Its
+test-suite step was not reached. Repair and verify the consumer's contract-3
+behavior, not merely its constant; current `AGENTS.md` keeps the local finn
+checkout read-only, so that work needs explicit scope approval.
+
+Next gates: resolve consumer compatibility, rehearse release packaging on the
+validated sources, and obtain separate merge/publication authorization.
+`master` has not been updated and no `v1.0.0` tag or release was created by
+this candidate publication.
 
 ## Historical verification checkpoints
 
