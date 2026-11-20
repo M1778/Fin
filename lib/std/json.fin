@@ -53,6 +53,13 @@
 // fuzzier `%g` of types.fin is NOT, and is why json exports its own number
 // formatter rather than borrowing number2str_float.
 //
+// NON-FINITE DOUBLES REFUSE. RFC 8259's number grammar is finite decimals:
+// there is no `inf`, `-inf` or `nan` token, and a parser refuses all three.
+// `%.17g` prints them anyway, so `json_encode_float` tests finiteness first
+// and BLAMES, naming the value, rather than substituting `null` -- a
+// substitute turns a computed number into absence and the caller never
+// learns, which the never-silent rule forbids. The finite path is untouched.
+//
 // KEY ORDER / DETERMINISM. Encode of `{string, int}` collects the map's live
 // pairs and emits keys in strcmp order, so two encodes of the same map
 // answer the same bytes. The DECODE does not sort: `p["a"]` reads by key,
@@ -263,8 +270,40 @@ pub fun json_encode_bool(v: bool) <string> {
     return out;
 }
 
+// RFC 8259 section 6 spells finite decimals only: there is no `inf`, `-inf`
+// or `nan` token, and `json.loads("inf")` raises. `%.17g` happily prints all
+// three, so the finiteness test is the encoder's, not the formatter's. NaN is
+// the value unequal to itself; +/-inf is a non-zero that multiplies by zero
+// into NaN (no fast-math in this compiler, so the test is the IEEE one).
+priv fun json_float_is_finite(v: double) <bool> {
+    let zero <double> = cast<double>(0.0);
+    if (!(v == v)) { return false; }
+    return v * zero == zero;
+}
+
+// A refusal, not a `null` substitution: a substituted null turns a computed
+// value into absence and the caller never learns, which the project's
+// never-silent rule forbids (Go's encoding/json refuses these the same way).
+// The message names the value, because which of the three it was is the only
+// thing the caller cannot recover from a `string`-returning encoder.
+priv fun json_blame_non_finite(v: double) <noret> {
+    let zero <double> = cast<double>(0.0);
+    let name <string> = "nan";
+    if (v == v) {
+        name = v > zero : "+inf" ? "-inf";
+    }
+    let b <Buffer> = new_buffer(128);
+    b.write_string("json_encode_float: non-finite double (");
+    b.write_string(name);
+    b.write_string(") has no JSON spelling; RFC 8259 numbers are finite");
+    let msg <string> = b.to_string();
+    free_buffer(b);
+    blame false, msg;
+}
+
 #[export]
 pub fun json_encode_float(v: double) <string> {
+    if (!json_float_is_finite(v)) { json_blame_non_finite(v); }
     let buf <string> = json_calloc(cast<ulong>(48), cast<ulong>(1));
     json_snp(buf, cast<ulong>(48), "%.17g", v);
     return buf;

@@ -57,7 +57,7 @@ executable. The examples below mark those boundaries.
 | [diag](../../lib/std/diag.fin) | `diag_*()`, `level_name`, `Diagnostic`, `DiagnosticBag`, `format_*`, `format_snippet`, `free_diag_str` | `level_name(diag_error()) == "error"` and `format_error` build and run; release formatted strings with `free_diag_str`; consumed by `finc/parser` and `finc/checker` |
 | [emitter](../../lib/std/emitter.fin) | `CEmitter`, `new_c_emitter`, `free_c_emitter`, `emit_*` | `new_c_emitter` with `emit_prologue` and `emit_fn_header` builds and runs; always build via `new_c_emitter` and release with `free_c_emitter`; no `finc/` consumer yet |
 | [ir](../../lib/std/ir.fin) | `ir_*()` opcodes, `ir_opcode_name`, `IrInstruction`, `IrBlock`, `IrFunction`, `make_ir_*`, `new_ir_function`, `free_ir_function` | Opcode helpers and instruction builders run. `fresh_temp` names are borrowed until `free_ir_function`, which releases names and block storage; caller-supplied instruction strings remain caller-owned. No `finc/` consumer yet. |
-| [argparse](../../lib/std/argparse.fin) | `FlagDef`, `OptionDef`, `ArgParser`, `new/free_arg_parser`, `add_flag`/`add_option`, `parse`, `get_flag`/`get_option`, positionals | `new_arg_parser` with `add_flag`, `parse`, and `get_flag` builds and runs; flag spelling is literal (`verbose`, not `--verbose`) and unmatched dash-args fail `parse`; release with `free_arg_parser` |
+| [argparse](../../lib/std/argparse.fin) | `FlagDef`, `OptionDef`, `ArgParser`, `new/free_arg_parser`, `add_flag`/`add_option`, `parse`, `get_flag`/`get_option`, positionals | `new_arg_parser` with `add_flag`, `parse`, and `get_flag` builds and runs; flag spelling is literal (`verbose`, not `--verbose`) and unmatched dash-args fail `parse`; `parse` also refuses a negative count, a count past the array's extent, and a null argument, each through `error_msg` + `false` rather than reading past or into libc; release with `free_arg_parser` |
 | [fs](../../lib/std/fs.fin) | `file_exists`, `remove_file`, `file_size`, `read_to_string`, `write_string`, `append_string`, `free_file_content`, `copy_file`, `create_dir`, `remove_dir`, `rename_path`, `is_dir`, `is_file`, `mk_tmp_dir`, `mkdir_p`, `walk_dir` | `Soundness_Fs` runs the tmpdir round trip, distinct temporary directories, and missing-path behavior; `read_to_string` is nullable, denullify with `?`; missing files return null / `-1` / an empty walk. Release reads with `free_file_content`, paths and walk entries with `free_str`, and the walk array with `delete`. Directory records use target-selected POSIX layouts or Win32 directory APIs. Windows paths use the system code page, matching narrow C file I/O; UTF-8 and extended-length Windows paths are not promised. Consumed by `finc/driver` and `finc/checker` |
 | [cli](../../lib/std/cli.fin) | `Arg`, `Command`, `Match`, `parse`/`parse_args`, `free_match`, `free_parse_result`, `free_command` | `parse(args)` excludes argv0 and copies argument text. `parse_args()` reads the full native argument list on Linux, macOS, and Windows; empty arguments and -- are preserved. Tables grow with input. Free results with free_parse_result and registration tables with free_command; registered strings and child pointers remain caller-owned. Subcommands use the root option table; --name=value and grouped short options are not implemented |
 | [serde](../../lib/std/serde.fin) | `Encode`, `Decode` interfaces | The contract resolves through the import a tool writes and `Outcome<Self>` answers inside the interface body; runtime dispatch flows through json::std's free `decode_T` spelling because interface-method dispatch does not lower yet (derives beyond `derive_hash`, ADR 0058, wait on the R3 `==` decision -- reflect-derive-plan §6 records the state); the bundled sample pins the issue's own round trip and the refusal-is-`Err` rule |
@@ -281,6 +281,16 @@ integer algorithms include `gcd`, `lcm`, `ipow`, `isqrt`, `floor_div`, `floor_mo
 `is_even`, and `is_odd`. Read the function body for domain checks and overflow
 limits; the existence of a function does not add checked arithmetic to the language.
 
+Two of those limits are worth naming, because they are refusals rather than
+wrapped answers:
+
+- `isqrt` covers every nonnegative `int`. The loop tests `guess + 1 <= value / (guess + 1)`
+  rather than squaring the guess, because `46341 * 46341` overflows an `int`; `isqrt(2147483647)`
+  is 46340 and does not spin. A negative radicand blames.
+- `gcd` and `lcm` compute their magnitudes in `long` and refuse a result that does not fit
+  in an `int` (`gcd(-2147483648, 0)` is 2^31). Without that widening, negating
+  `-2147483648` wraps to itself and the answer comes back with the wrong sign.
+
 ## Files, streams, and results
 
 `Stream` is an in-memory `[char]` buffer with `seek`, `tell`, `remaining`, `rewind`,
@@ -398,8 +408,10 @@ fun main() <noret> {
 Decode limits worth knowing before designing around them: integers are int32
 with JSON grammar (no leading zeros, no `+`); `\u` escapes read ASCII only
 (`\u00e9` refuses, no UTF-8 encoding in v0); and the `[int]` decode caps at 64
-elements while the encoder takes any count. The bundled sample
-`tests/samples/stdlib/json.fin` pins every printed byte shape under the
+elements while the encoder takes any count. `json_encode_float` blames on a
+non-finite `double` (`inf`/`-inf`/`nan`), naming the value: RFC 8259 has no
+token for any of them, so a document carrying one is unparseable. The bundled
+sample `tests/samples/stdlib/json.fin` pins every printed byte shape under the
 run-agreement harness; `tests/samples/stdlib/serde.fin` pins the contract.
 
 ## Smart pointers

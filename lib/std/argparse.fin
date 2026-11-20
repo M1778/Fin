@@ -3,6 +3,12 @@
 //
 // Supports boolean flags (`-c`, `-v`, `--emit-llvm`), value options (`-o <file>`,
 // `-I <dir>`, `--target <arch>`), and positional arguments (`main.fin`).
+//
+// `parse(args, count)` treats `count` as the caller's claim about `args` and checks it
+// before the first read: a negative count, a count past `args.length`, and a null element
+// each answer `error_msg` + `false` like every other refusal here. None of the three is a
+// parse failure a caller can recover from by re-reading the arguments -- they mean the
+// extent or the table handed in was wrong -- so they are refused rather than read past.
 
 namespace std {
 
@@ -88,9 +94,30 @@ pub struct ArgParser {
 
       fun parse(self: &Self, args: [string], count: int) <bool> {
         self.positional_count = 0;
+        // The extent is the caller's claim, and it is checked before the first
+        // read because it is not derived from the array: a `main(args)` count, a
+        // sliced buffer's length, or an arithmetic slip all arrive here, and
+        // reading past `args` is a crash rather than a parse failure. Every other
+        // refusal in this method answers `error_msg` + `false`, so these do the
+        // same instead of inventing a second error style.
+        if (count < 0) {
+            self.error_msg = "parse count cannot be negative";
+            return false;
+        }
+        if (count > args.length) {
+            self.error_msg = "parse count exceeds the argument array";
+            return false;
+        }
         let i <int> = 0;
         while (i < count) {
             let arg <string> = args[i];
+            // `new [string, n]{}` zero-fills, so a table the caller only partly
+            // filled hands a null element here. Passing that to `arg_strncmp`
+            // below is libc's crash, not a diagnostic.
+            if (arg == null) {
+                self.error_msg = "parse argument is null";
+                return false;
+            }
             let is_matched <bool> = false;
 
             // 1. Check flags

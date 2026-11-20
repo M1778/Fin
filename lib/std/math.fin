@@ -48,17 +48,23 @@
 //     (no implicit conversion between the numeric types), so a caller with a `float`
 //     writes one `cast<double>`.
 //   * `%` on a negative left operand is negative here, so `gcd` takes absolute values
-//     first. Verified: `gcd(-12, 18)` is 6, not -6.
+//     first. Verified: `gcd(-12, 18)` is 6, not -6. The magnitudes are computed in
+//     `long` and a result that does not fit in an `int` is refused: `gcd(-2147483648, 0)`
+//     is 2^31, and negating `-2147483648` in an `int` would wrap to itself. `lcm` folds
+//     its sign the same way and refuses the same edge.
 //   * `isqrt` is a loop and not Newton's method, because the loop is obviously correct at
 //     the boundaries and this module has no benchmark to justify anything cleverer.
 //     `isqrt(15)` is 3 and `isqrt(16)` is 4 -- the boundary that a Newton implementation
-//     with the wrong rounding gets wrong.
+//     with the wrong rounding gets wrong -- and the loop divides rather than squaring so
+//     the top of the `int` range does not overflow it.
 //   * `ipow` does not check for overflow. Nothing in the language traps it and there is no
 //     wider type to promote to, so `ipow(2, 62)` wraps silently. A `blame` on the
 //     exponent's sign is what can be checked and is checked.
-//   * None of the Fin functions here lower when reached through an import. The `@define`d
-//     externs do, and they run: `sqrt(2)` is 1.414214, `pow(2,10)` is 1024, `floor(2.7)`
-//     is 2, `ceil(2.1)` is 3, `fmod(7,3)` is 1, `atan2(1,1)` is 0.785398.
+//   * The Fin functions here lower through an import now, and they run: the generic half
+//     and the integer half were measured through `math::std` end to end (`min::<int>`,
+//     `clamp::<int>`, `gcd(12, 18)`, `isqrt(16)`, `floor_div(-7, 2)`). The `@define`d
+//     externs run too: `sqrt(2)` is 1.414214, `pow(2,10)` is 1024, `floor(2.7)` is 2,
+//     `ceil(2.1)` is 3, `fmod(7,3)` is 1, `atan2(1,1)` is 0.785398.
 #[stdimport] %{
 import { Number } from types::std;
 }%
@@ -242,33 +248,46 @@ pub fun in_range<T: Number>(value: T, low: T, high: T) <bool> {
 // The integer half. Each of these is either an operation the language has no operator for
 // or the integer form of one libm only gives in floating point.
 
-// Euclid, iteratively. Absolute values first because `%` on a negative left operand is
-// negative here: without it `gcd(-12, 18)` would be -6.
+// Euclid, iteratively, in `long`. Absolute values first because `%` on a negative left
+// operand is negative here: without it `gcd(-12, 18)` would be -6.
+//
+// The widening is what makes the magnitude representable. `gcd(-2147483648, 0)` is 2^31,
+// which is one past the largest `int`, and negating `-2147483648` in an `int` wraps back
+// to itself -- so the absolute-value step has to happen where the value fits. The result
+// is refused rather than returned wrapped, the way `isqrt` refuses a negative radicand:
+// a negative "greatest common divisor" is a wrong answer, not a boundary.
 #[export]
 pub fun gcd(a: int, b: int) <int> {
-    let x <int> = a;
-    let y <int> = b;
+    let limit <long> = 2147483647;
+    let x <long> = cast<long>(a);
+    let y <long> = cast<long>(b);
     if (x < 0) { x = 0 - x; }
     if (y < 0) { y = 0 - y; }
     while (y != 0) {
-        let remainder <int> = x % y;
+        let remainder <long> = x % y;
         x = y;
         y = remainder;
     }
-    return x;
+    blame x <= limit, "gcd of these inputs is not representable as an int";
+    return cast<int>(x);
 }
 
 // `gcd` is what makes this safe from overflow for the inputs it can represent: dividing
-// before multiplying keeps the intermediate no larger than the result.
+// before multiplying keeps the intermediate no larger than the result. The sign is folded
+// in `long` for the same reason `gcd` needs it: negating `-2147483648` in an `int` is a
+// wrap, so the magnitude is computed where it fits and then checked.
 #[export]
 pub fun lcm(a: int, b: int) <int> {
     if (a == 0) { return 0; }
     if (b == 0) { return 0; }
+    let limit <long> = 2147483647;
     let divisor <int> = gcd(a, b);
-    let scaled <int> = a / divisor;
-    let result <int> = scaled * b;
-    if (result < 0) { return 0 - result; }
-    return result;
+    let scaled <long> = cast<long>(a) / cast<long>(divisor);
+    let result <long> = scaled * cast<long>(b);
+    let magnitude <long> = result;
+    if (magnitude < 0) { magnitude = 0 - magnitude; }
+    blame magnitude <= limit, "lcm of these inputs is not representable as an int";
+    return cast<int>(magnitude);
 }
 
 // Integer exponentiation. Does not check for overflow -- nothing in the language traps it
@@ -287,11 +306,18 @@ pub fun ipow(base: int, exponent: int) <int> {
 // The largest `n` with `n * n <= value`. A loop rather than Newton's method: the loop is
 // obviously right at the boundaries, which is where a clever version goes wrong.
 // `isqrt(15)` is 3 and `isqrt(16)` is 4.
+//
+// The loop compares `guess + 1 <= value / (guess + 1)` instead of multiplying, which is
+// what keeps it in the documented domain. `(guess + 1) * (guess + 1)` overflows once the
+// guess reaches 46340 -- 46341 squared is 2147488281, past `INT_MAX` -- and a negative
+// product compares as "still <= value", so the loop never exits for a radicand near the
+// top of the range. The division form is the same test written where nothing overflows;
+// the cost is one integer division per step.
 #[export]
 pub fun isqrt(value: int) <int> {
     blame value >= 0, "no integer square root of a negative number";
     let guess <int> = 0;
-    while ((guess + 1) * (guess + 1) <= value) {
+    while (guess + 1 <= value / (guess + 1)) {
         guess++;
     }
     return guess;

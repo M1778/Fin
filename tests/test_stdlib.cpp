@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "utils/Process.hpp"
 #include <gtest/gtest.h>
 
@@ -1915,6 +1916,81 @@ json_decode_float: trailing data after the value
         << "refusal kinds or wording changed";
 }
 
+TEST(Soundness_Json, ANonFiniteDoubleIsRefusedNotEncoded) {
+    // RFC 8259's number grammar (section 6) spells finite decimals only:
+    // there is no `inf`, `-inf` or `nan` token, and `json.loads("inf")`
+    // raises. An encoder that prints `%.17g`'s answer for a non-finite
+    // double therefore hands back a document no conforming parser accepts.
+    //
+    // The behavior chosen here is a refusal, not the `null` substitution
+    // JSON.stringify makes: a substituted null turns a computed value into
+    // absence and the caller never learns, which AGENTS.md forbids
+    // ("unsupported runtime operations must produce diagnostics, never
+    // silently disappear"). Go's encoding/json takes the same side, refusing
+    // NaN/Inf with an error naming the value. The message names the value and
+    // why JSON cannot carry it, and the program dies at the call -- no
+    // document exists to parse afterwards.
+    //
+    // The finite leg is pinned in the same test, byte for byte, so a refusal
+    // that moved `%.17g`'s output (the `%.17g` contract in the module header
+    // and the stage-agreement corpus) fails here rather than later.
+    // (Raw literals as locals, for the same MSVC preprocessor reason as
+    // TheScalarsRoundTripByteExact.)
+    const std::string finite_src = R"jsonp(
+import { json_encode_float } from json::std;
+import { free_str } from strings::std;
+fun main() <noret> {
+    let scale <double> = cast<double>(1.0);
+    for (let i <int> = 0; i < 300; i++) { scale = scale * cast<double>(10.0); }
+    let a <string> = json_encode_float(cast<double>(0.0));
+    let b <string> = json_encode_float(cast<double>(2.5));
+    let c <string> = json_encode_float(cast<double>(-1.5));
+    let d <string> = json_encode_float(cast<double>(0.1));
+    let e <string> = json_encode_float(cast<double>(1.0) / cast<double>(3.0));
+    let f <string> = json_encode_float(scale);
+    printf("%s %s %s %s %s %s\n", a, b, c, d, e, f);
+    free_str(a); free_str(b); free_str(c); free_str(d); free_str(e); free_str(f);
+}
+)jsonp";
+    EXPECT_EQ(buildBundledAndRun(finite_src),
+              "0 2.5 -1.5 0.10000000000000001 0.33333333333333331 1.0000000000000002e+300\n")
+        << "the finite encoding path must not move";
+
+    // One program per value: `blame` aborts, so three values cannot share a
+    // run. The `document:` print after the call must never appear -- it is
+    // the proof that no string (in particular no `inf`/`nan` text) was
+    // returned to a caller who could have put it in a document.
+    struct Bad {
+        const char* name;   // the word in the diagnostic
+        const char* body;   // the Fin expression that makes the value
+    };
+    const std::vector<Bad> bads = {
+        {"+inf", "fun value() <double> { let z <double> = cast<double>(0.0); "
+                 "return cast<double>(1.0) / z; }"},
+        {"-inf", "fun value() <double> { let z <double> = cast<double>(0.0); "
+                 "return z - cast<double>(1.0) / z; }"},
+        {"nan", "fun value() <double> { let z <double> = cast<double>(0.0); "
+                "return z / z; }"},
+    };
+    for (const Bad& bad : bads) {
+        SCOPED_TRACE(bad.name);
+        const std::string out = buildBundledAndRun(
+            std::string("import { json_encode_float } from json::std;\n") + bad.body + "\n"
+            "fun main() <noret> {\n"
+            "    let text <string> = json_encode_float(value());\n"
+            "    printf(\"document: [%s]\\n\", text);\n"
+            "}\n");
+        EXPECT_NE(out.find("program exited non-zero"), std::string::npos)
+            << "a non-finite double must refuse, not encode:\n" << out;
+        EXPECT_NE(out.find(std::string("json_encode_float: non-finite double (") + bad.name +
+                           ") has no JSON spelling; RFC 8259 numbers are finite"),
+                  std::string::npos)
+            << "the refusal must name the value and the reason:\n" << out;
+        EXPECT_EQ(out.find("document:"), std::string::npos)
+            << "no encoded text may reach the caller:\n" << out;
+    }
+}
+
 TEST(Soundness_Fs, EveryCallRunsInATmpdirAndNothingTouchesTheCwd) {
     // Issue #61's shape, in one run: the scratch directory comes from
     // mkdtemp, so no call touches a fixed path and none of them need (or
@@ -2868,4 +2944,208 @@ TEST(Soundness_Path, WindowsNamespacesAndIncompleteUncHaveNamedRefusals) {
             }
         }
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// math::std and argparse::std.
+//
+// Neither module has a draft under tests/samples/stdlib, and before these tests
+// the whole tree touched them only through one signature probe:
+// `grep -rn "math::std\|argparse::std" tests/` found the tour's table rows and a
+// bare `let q <int> = isqrt(15);` in Soundness_BundledStdlib. A module whose
+// header promises "the largest n with n*n <= value" and one whose header
+// promises "unmatched dash-args fail parse" therefore had no executable
+// assertion behind either promise.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_Math, IsqrtAnswersEveryNonnegativeIntAndNeverSpins) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    // `isqrt` is a loop over `(guess + 1) * (guess + 1) <= value`. The documented
+    // domain is every nonnegative `int`, and the header itself names the
+    // boundary a wrong rounding gets wrong (`isqrt(15)` is 3, `isqrt(16)` is 4).
+    // The upper end of the domain is the part the loop actually has to survive:
+    // 46340 * 46340 is 2147395600 and 46341 * 46341 does not fit in an `int`, so
+    // a loop that squares the guess overflows to a negative product and never
+    // exits. Every pin below is a measured value, so an overflow reads as a
+    // wrong answer instead of a hang.
+    EXPECT_EQ(buildBundledAndRun(R"FIN(
+import { isqrt } from math::std;
+fun main() <noret> {
+    blame isqrt(0) == 0;
+    blame isqrt(1) == 1;
+    blame isqrt(2) == 1;
+    blame isqrt(3) == 1;
+    blame isqrt(4) == 2;
+    blame isqrt(15) == 3;
+    blame isqrt(16) == 4;
+    blame isqrt(24) == 4;
+    blame isqrt(25) == 5;
+    // The last value whose root squares without overflowing, then the last two
+    // `int`s: 46340 is the answer at both ends, and the loop must stop there.
+    blame isqrt(2147395599) == 46339;
+    blame isqrt(2147395600) == 46340;
+    blame isqrt(2147395601) == 46340;
+    blame isqrt(2147483647) == 46340;
+    printf("isqrt ok\n");
+}
+)FIN"),
+              "isqrt ok\n");
+}
+
+TEST(Soundness_Math, ADegreeOfNegativeIntInputIsStillRefused) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    // The one refusal `isqrt` states: no integer square root of a negative
+    // number. It must abort rather than answer a made-up root, which is the
+    // shape a `while` with a signed bound would otherwise take.
+    const std::string out = buildBundledAndRun(
+        "import { isqrt } from math::std;\n"
+        "fun main() <noret> {\n"
+        "    isqrt(0 - 1);\n"
+        "    printf(\"unreachable\\n\");\n"
+        "}\n");
+    EXPECT_EQ(out.find("program exited non-zero"), 0u) << out;
+    EXPECT_NE(out.find("no integer square root of a negative number"), std::string::npos) << out;
+    EXPECT_EQ(out.find("unreachable"), std::string::npos) << out;
+}
+
+TEST(Soundness_ArgParse, AParseCountLargerThanItsArrayRefusesInsteadOfReadingPastIt) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    // `parse(args, count)` walks `args[i]` for every `i < count`. A `count` the
+    // caller measured from somewhere other than this array is the ordinary way
+    // to be wrong here (`main(args)` hands one number, a sliced buffer wants
+    // another), and reading past the array's extent is a segfault in a language
+    // whose parse failures are supposed to be `error_msg` + `false`. The
+    // module's own style is the answer: set the message, answer false, let the
+    // caller print it. Nothing here may crash, and nothing may print
+    // "unreachable".
+    const std::string out = buildBundledAndRun(R"FIN(
+import { ArgParser, new_arg_parser, free_arg_parser } from argparse::std;
+import { equals } from strings::std;
+fun main() <noret> {
+    let parser <ArgParser> = new_arg_parser("prog", "d");
+    parser.add_flag("verbose", "-v", "noisy");
+    let short <[string]> = new [string, 1]{};
+    short[0] = "-v";
+    let ok <bool> = parser.parse(short, 4);
+    blame !ok;
+    blame equals(parser.error_msg, "parse count exceeds the argument array");
+    // A count that fits is still honoured, so the refusal is about the extent
+    // and not a blanket rejection.
+    let again <bool> = parser.parse(short, 1);
+    blame again;
+    blame parser.get_flag("verbose");
+    free_arg_parser(parser);
+    printf("argparse extent ok\n");
+}
+)FIN");
+    EXPECT_EQ(out, "argparse extent ok\n");
+}
+
+TEST(Soundness_ArgParse, ANegativeCountRefusesInsteadOfParsingNothing) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    // `while (i < count)` with a negative `count` runs zero times and answers
+    // true, so a caller whose extent arithmetic went below zero is told their
+    // command line parsed. Refusing is the only answer that does not launder a
+    // bad extent into a successful empty parse.
+    const std::string out = buildBundledAndRun(R"FIN(
+import { ArgParser, new_arg_parser, free_arg_parser } from argparse::std;
+import { equals } from strings::std;
+fun main() <noret> {
+    let parser <ArgParser> = new_arg_parser("prog", "d");
+    parser.add_flag("verbose", "-v", "noisy");
+    let args <[string]> = ["-v"];
+    let ok <bool> = parser.parse(args, 0 - 1);
+    blame !ok;
+    blame equals(parser.error_msg, "parse count cannot be negative");
+    free_arg_parser(parser);
+    printf("argparse negative ok\n");
+}
+)FIN");
+    EXPECT_EQ(out, "argparse negative ok\n");
+}
+
+TEST(Soundness_ArgParse, ANullArgumentRefusesInsteadOfReachingStrncmp) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    // `new [string, n]{}` zero-fills, so a caller who allocates a table and only
+    // fills part of it hands `parse` a null element. The positional check calls
+    // `arg_strncmp(arg, "-", 1)` on whatever is there, and passing null to libc
+    // is a crash rather than a refusal. Every other parse failure in this module
+    // is `error_msg` + `false`; a null argument is one more of those.
+    const std::string out = buildBundledAndRun(R"FIN(
+import { ArgParser, new_arg_parser, free_arg_parser } from argparse::std;
+import { equals } from strings::std;
+fun main() <noret> {
+    let parser <ArgParser> = new_arg_parser("prog", "d");
+    parser.add_flag("verbose", "-v", "noisy");
+    let args <[string]> = new [string, 2]{};
+    args[0] = "-v";
+    let ok <bool> = parser.parse(args, 2);
+    blame !ok;
+    blame equals(parser.error_msg, "parse argument is null");
+    free_arg_parser(parser);
+    printf("argparse null ok\n");
+}
+)FIN");
+    EXPECT_EQ(out, "argparse null ok\n");
+}
+
+TEST(Soundness_Math, GcdNeverAnswersANegativeOrAWrappedMagnitude) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    // `gcd`'s header says why it takes absolute values: "without it `gcd(-12, 18)`
+    // would be -6". So a non-negative answer is the module's stated contract, and
+    // the one input that breaks it is the `int` edge: gcd(-2147483648, 0) is
+    // 2^31, which does not fit in an `int`, and negating the minimum wraps to
+    // itself. This module refuses an unrepresentable result elsewhere
+    // (`ipow`'s negative exponent, `isqrt`'s negative radicand), so the edge is
+    // held to the same rule: name it, do not answer a wrong sign.
+    const std::string out = buildBundledAndRun(R"FIN(
+import { gcd, lcm } from math::std;
+fun main() <noret> {
+    blame gcd(12, 18) == 6;
+    blame gcd(-12, 18) == 6;
+    blame gcd(12, -18) == 6;
+    blame gcd(-12, -18) == 6;
+    blame gcd(0, 5) == 5;
+    blame gcd(5, 0) == 5;
+    blame gcd(0, 0) == 0;
+    blame gcd(1, 0) == 1;
+    // Multiples of the minimum's magnitude are still representable.
+    blame gcd(-2147483648, 4) == 4;
+    blame gcd(-2147483648, 8) == 8;
+    printf("gcd ok\n");
+}
+)FIN");
+    EXPECT_EQ(out, "gcd ok\n");
+}
+
+TEST(Soundness_Math, GcdOfTheMinimumsMagnitudeBlamesRatherThanWrapping) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    // gcd(-2147483648, 0) is 2^31. The alternative to refusing is returning
+    // -2147483648 -- a negative "greatest common divisor", which is a wrong
+    // answer instead of an honest refusal.
+    const std::string out = buildBundledAndRun(
+        "import { gcd } from math::std;\n"
+        "fun main() <noret> {\n"
+        "    gcd(-2147483648, 0);\n"
+        "    printf(\"unreachable\\n\");\n"
+        "}\n");
+    EXPECT_EQ(out.find("program exited non-zero"), 0u) << out;
+    EXPECT_NE(out.find("gcd of these inputs is not representable as an int"), std::string::npos)
+        << out;
+    EXPECT_EQ(out.find("unreachable"), std::string::npos) << out;
 }
