@@ -138,6 +138,18 @@ and each reported with a reproduction rather than a complaint.
   `install(TARGETS ...)` named only `finc`, so no archive, package or installer has ever
   contained it. It now installs to `bin/` beside `finc`.
 
+Two more are documented rather than fixed, because both are language gaps rather than defects
+in a 1.0.x patch's reach. Neither is new in this release; both are recorded here because a
+reader deserves to know they exist:
+
+- **A `&char` parameter cannot be indexed with a literal.** `info[4]` on a `[char]` lowers;
+  the same index on a `&char` parameter is refused with `this index expression is not lowered
+  yet`, while `&info[0]` on an array works. It pushed a cleanup in `fin-ssg` into a worse
+  signature, which is how it was found. See `docs/known-issues.md`.
+- **Hex literals do not exist.** `0x10` lexes as `0`, then `x10`, and the parser reports
+  `expected ';'`. Code that reads naturally with hex constants has to spell them in decimal
+  and keep the hex form in a comment.
+
 If you maintained a workaround for any of the first three — a `FIN_LDFLAGS` override, a null
 guard at every call site, a module-level value passed as an out-parameter — it can go.
 
