@@ -3502,3 +3502,79 @@ TEST(Soundness_Math, GcdOfTheMinimumsMagnitudeBlamesRatherThanWrapping) {
         << out;
     EXPECT_EQ(out.find("unreachable"), std::string::npos) << out;
 }
+
+// An imported `const` is a real global, not a name that only its own module can see.
+//
+// `declareGlobals` walked only the root program's statements, so a module-scope `let` or
+// `const` never became an llvm::GlobalVariable. A function inside the module could not
+// read it either -- the reference to the name reached codegen and was refused:
+//
+//   error: codegen: the name 'PREC_OR' is not lowered yet
+//
+// 168 `pub const` declarations across lib/std are unusable from outside their module
+// because of this: parse's precedence table, token's kinds, ascii's classes. The fix walks
+// the loaded modules after the root, matching the first-wins rule `declareInterfaces`
+// already follows, so a root declaration of the same name keeps its storage.
+TEST(Soundness_Modules, AnImportedConstIsReadableFromTheImportingProgram) {
+    TempModuleDir d;
+    d.write("constmod.fin",
+            "namespace constmod {\n"
+            "pub const PREC_OR <int> = 1;\n"
+            "pub const PREC_AND <int> = 2;\n"
+            "}\n");
+    EXPECT_EQ(buildWithModuleAndRun("import { PREC_OR, PREC_AND } from constmod::constmod;\n"
+                                    "fun main() <noret> {\n"
+                                    "    printf(\"%d %d\\n\", PREC_OR, PREC_AND);\n"
+                                    "}\n", d.path()),
+              "1 2\n");
+}
+
+TEST(Soundness_Modules, AModuleScopeLetIsReadableThroughItsOwnFunction) {
+    // The `let` form, reached through the module's own accessor rather than by name. This
+    // is the shape zhttp needed for a process-wide default and had to work around with an
+    // out-parameter: `let z_t <int> = 30000;` in a module, read by a function in that
+    // module, called from the root.
+    TempModuleDir d;
+    d.write("statemod.fin",
+            "namespace statemod {\n"
+            "let counter <int> = 30000;\n"
+            "#[export] pub fun get_counter() <int> { return counter; }\n"
+            "}\n");
+    EXPECT_EQ(buildWithModuleAndRun("import { get_counter } from statemod::statemod;\n"
+                                    "fun main() <noret> {\n"
+                                    "    printf(\"%d\\n\", get_counter());\n"
+                                    "}\n", d.path()),
+              "30000\n");
+}
+
+TEST(Soundness_Modules, ARootDeclarationAndAModuleDeclarationDoNotBothAllocate) {
+    // Two units may declare the same name: `shared` here exists in the root and in a
+    // loaded module. This pins what happens rather than deciding what should.
+    //
+    // Observed: the root's value answers everywhere, so the module's accessor returns 3
+    // and not its own 900. That is a *name resolution* result -- the module's reference to
+    // `shared` binds to the root's global -- not a storage result: the backend allocates
+    // one symbol, and the module's accessor reads it.
+    //
+    // Whether a module's own declaration should shadow the root's inside that module is an
+    // open language question, not a codegen bug, so it is recorded here instead of being
+    // settled by an implementation accident. What this test does prove is the invariant
+    // that matters for the imported-const fix above: a duplicate does not allocate two
+    // symbols and does not fail the link.
+    TempModuleDir d;
+    d.write("sharedmod.fin",
+            "namespace sharedmod {\n"
+            "pub const shared <int> = 900;\n"
+            "#[export] pub fun module_shared() <int> { return shared; }\n"
+            "}\n");
+    const std::string out = buildWithModuleAndRun(
+        "import { module_shared } from sharedmod::sharedmod;\n"
+        "const shared <int> = 3;\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d\\n\", shared, module_shared());\n"
+        "}\n", d.path());
+    EXPECT_EQ(out, "3 3\n")
+        << "today the root's global answers for both names. If a ruling makes the module's "
+           "own declaration shadow the root's inside that module, this becomes \"3 900\" "
+           "and that is the line to change.";
+}

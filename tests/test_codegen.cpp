@@ -377,22 +377,66 @@ std::string expectedLlvmLib() {
 }  // namespace
 
 TEST(LinkCommand, AppendsLlvmLibrariesAfterTheOutput) {
+    // The ordering rule: whatever library set the link needs comes after `-o <output>`,
+    // so a library name can never be consumed as the output path.
+    //
+    // This test used to pass a nonexistent object and still expect `-lLLVM`, because the
+    // flag was unconditional. It is not any more: the flag follows the objects, and an
+    // object no file can be read from cannot say it needs LLVM. The object below names an
+    // LLVM symbol the way the self-hosted stage's own output does, which is the case the
+    // flag exists for.
     ScopedEnv cc("FIN_CC", nullptr);
     ScopedEnv ldflags("FIN_LDFLAGS", nullptr);
+    const std::string object = uniqueTempPath("fin_link_llvm", ".o");
+    {
+        std::ofstream out(object, std::ios::binary);
+        out << "not a real object, but it names LLVMContextCreate the way one would";
+    }
 #ifdef __APPLE__
     // Same fate, different words: Apple ld(1) rejects --as-needed and the
     // Homebrew keg is libLLVM.dylib under -L<keg>, so the words differ while
     // the contract (LLVM libs after the output) holds.
-    std::vector<std::string> expected{"cc", "a.o", "-o", "a.out"};
+    std::vector<std::string> expected{"cc", object, "-o", "a.out"};
     const std::string keg = fin::brewLlvmLibDir();
     if (!keg.empty()) expected.push_back("-L" + keg);
     expected.push_back("-lLLVM");
     expected.push_back("-lm");
 #else
-    const std::vector<std::string> expected{"cc", "a.o", "-o", "a.out",
+    const std::vector<std::string> expected{"cc", object, "-o", "a.out",
                                             "-Wl,--as-needed", expectedLlvmLib(), "-lm"};
 #endif
-    EXPECT_EQ(fin::linkCommand({"a.o"}, "a.out"), expected);
+    EXPECT_EQ(fin::linkCommand({object}, "a.out"), expected);
+    std::error_code ec;
+    fs::remove(object, ec);
+}
+
+TEST(LinkCommand, OmitsLlvmWhenTheObjectsDoNotNameIt) {
+    // A reference-compiled program references no LLVM symbol, and naming the library
+    // anyway is what made `finc -o app` fail on every machine without the LLVM
+    // *development* package -- which is most machines, since a released finc needs only
+    // the runtime. `-Wl,--as-needed` cannot help: it decides whether to record the
+    // dependency after the linker has already found the library.
+    ScopedEnv cc("FIN_CC", nullptr);
+    ScopedEnv ldflags("FIN_LDFLAGS", nullptr);
+    const std::string object = uniqueTempPath("fin_link_plain", ".o");
+    {
+        std::ofstream out(object, std::ios::binary);
+        out << "an object whose only undefined symbol is printf";
+    }
+    const auto args = fin::linkCommand({object}, "a.out");
+    const std::string joined = [&] {
+        std::string s;
+        for (const auto& a : args) s += a + " ";
+        return s;
+    }();
+    EXPECT_EQ(joined.find("LLVM"), std::string::npos)
+        << "no LLVM library may be named for objects that reference none: " << joined;
+    // `-lm` stays: the stdlib's math module calls into libm.
+#ifndef _WIN32
+    EXPECT_NE(joined.find("-lm"), std::string::npos) << joined;
+#endif
+    std::error_code ec;
+    fs::remove(object, ec);
 }
 
 TEST(LinkCommand, FinLdflagsReplacesTheDefaultLibraries) {

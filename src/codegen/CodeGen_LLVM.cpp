@@ -1571,8 +1571,20 @@ public:
         // After the signatures, because a global of struct type needs the struct and
         // nothing else here needs a function -- an initialiser that called one is
         // refused. Before the bodies, because every body may read every global.
+        //
+        // The root first, then every loaded module (ADR 0032): first-wins, the same rule
+        // `declareInterfaces` and `Scope` follow. Without the module walk a module-scope
+        // `let`/`const` never became an llvm::GlobalVariable, so importing one compiled to
+        //   codegen: the name 'PREC_OR' is not lowered yet
+        // and every `pub const` in lib/std was unusable outside its own file -- parse's
+        // precedence table, token's kinds, ascii's classes. 168 declarations.
         declareGlobals(program);
         if (failed_) return false;
+        for (const Program* moduleUnit : modules_) {
+            if (!moduleUnit || moduleUnit == &program) continue;
+            declareGlobals(*moduleUnit);
+            if (failed_) return false;
+        }
         bindSymbolAliases();
         if (failed_) return false;
         // The destructor claimant's one shared generation, if it supplies
@@ -5868,10 +5880,15 @@ private:
     // build even if nothing reads it. A global quietly skipped is a name that later
     // resolves to nothing, and a read of nothing is not a diagnostic, it is a load
     // from wherever the linker put the next symbol.
-    void declareGlobals(Program& program) {
+    void declareGlobals(const Program& program) {
         for (auto& stmt : program.statements) {
             auto* var = dynamic_cast<VariableDeclaration*>(stmt.get());
             if (!var) continue;
+            // A name already given storage keeps it: the root wins over a module, and an
+            // earlier module wins over a later one. Two modules exporting one name is the
+            // import question and belongs to the analyzer; this pass only has to not
+            // overwrite what it already stored.
+            if (globals_.count(var->name)) continue;
 
             for (auto& attr : var->attributes) {
                 // Flag-form `#[export]` is import-visibility only (ADR 0033): the
