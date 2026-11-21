@@ -469,8 +469,7 @@ ExprResult Interpreter::evaluateStruct(const StructInstantiation& node, const En
             return ExprResult{ExprStatus::Gap, {}, "unknown struct '" + node.struct_name + "'"};
         }
     }
-    std::vector<std::pair<std::string, Value>> fields;
-    fields.reserve(node.fields.size());
+    std::map<std::string, Value> fields;
     for (const auto& [fieldName, fieldExpr] : node.fields) {
         if (!fieldExpr)
             return ExprResult{ExprStatus::Gap, {},
@@ -479,16 +478,9 @@ ExprResult Interpreter::evaluateStruct(const StructInstantiation& node, const En
         ExprResult field = evaluateExpression(*fieldExpr, env);
         if (field.status != ExprStatus::Ok) return field;
         // Last wins on a duplicate: the analyzer owns the diagnostic, so
-        // evaluation never reports one.
-        bool replaced = false;
-        for (auto& [name, value] : fields) {
-            if (name == fieldName) {
-                value = field.value;
-                replaced = true;
-                break;
-            }
-        }
-        if (!replaced) fields.emplace_back(fieldName, std::move(field.value));
+        // evaluation never reports one. `operator[]`-style assignment does that
+        // in one step, where the vector needed a scan to find the existing entry.
+        fields[fieldName] = std::move(field.value);
     }
     // Declared defaults fill the unlisted members, evaluated closed: a
     // default is struct scope, not caller scope, so a caller local of the
@@ -496,18 +488,11 @@ ExprResult Interpreter::evaluateStruct(const StructInstantiation& node, const En
     // the whole construction — there is no value to claim.
     for (const auto& member : decl->members) {
         if (!member || !member->default_value) continue;
-        bool present = false;
-        for (const auto& [name, value] : fields) {
-            if (name == member->name) {
-                present = true;
-                break;
-            }
-        }
-        if (present) continue;
+        if (fields.count(member->name) != 0) continue;
         Env closed;
         ExprResult filled = evaluateExpression(*member->default_value, closed);
         if (filled.status != ExprStatus::Ok) return filled;
-        fields.emplace_back(member->name, std::move(filled.value));
+        fields[member->name] = std::move(filled.value);
     }
     Value built = Value::makeStruct(actualName, std::move(fields));
     for (const auto& [name, value] : built.fields) inheritTaint(built, value);

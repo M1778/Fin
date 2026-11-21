@@ -35,6 +35,7 @@
 #pragma once
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -101,7 +102,19 @@ struct Value {
     // order (explicit fields first, then declared defaults for the rest).
     // Values are type-erased — generics need no substitution to evaluate.
     std::string struct_name;
-    std::vector<std::pair<std::string, Value>> fields;
+    // A `std::map`, not a `std::vector<std::pair<...>>`, and the reason is a real
+    // portability defect rather than taste. A vector of pairs whose element type is the
+    // enclosing struct asks libstdc++ to instantiate `std::pair<std::string, Value>`
+    // while `Value` is still incomplete. GCC tolerates that; Clang rejects it, so a
+    // Clang build of the compiler failed in three translation units (issue #159) while
+    // GCC's succeeded -- which is why the fuzzer, which needs Clang for libFuzzer, could
+    // not be built at all.
+    //
+    // `std::map` is fine because it never needs the pair type complete in the same way,
+    // and it is a better fit regardless: field lookup by name was a linear scan here and
+    // an O(n^2) dedupe loop in the constructor, and iteration order is by name, which is
+    // deterministic across runs in a way a vector of insertion order was not.
+    std::map<std::string, Value> fields;
     // Array only, in element order.
     std::vector<Value> elements;
     // Host taint (ADR 0017, Q11): true when the value derives from a host
@@ -134,8 +147,7 @@ struct Value {
     static Value makeStructHandle(const std::string& structName) {
         return Value{ValueKind::Opaque, "$struct:" + structName, nullptr};
     }
-    static Value makeStruct(std::string name,
-                            std::vector<std::pair<std::string, Value>> fields) {
+    static Value makeStruct(std::string name, std::map<std::string, Value> fields) {
         Value v;
         v.kind = ValueKind::Struct;
         v.struct_name = std::move(name);
