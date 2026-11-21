@@ -133,6 +133,37 @@ Unchanged from 1.0.0 unless listed above.
   sidecars and `index.json`; authenticity rests on GitHub TLS and the tag's
   commit. `SECURITY.md` says so plainly.
 
+## Installing it with `finn`
+
+`finn 1.0.1` installs this release, and this release fixes two defects that
+made that impossible to trust before:
+
+- `finn download` with no version read `/releases/latest/`, which GitHub never
+  resolves to a **prerelease** — so it reported "No finc release has been
+  published yet" about a release anyone could download in a browser. It now
+  asks the releases API for the newest published release, prefers a stable one
+  when both exist, and still reads a named version's tag index directly, which
+  needs no API call.
+- `finn download` used to exit 0 after unpacking the 1.0.0 glibc archive, a
+  binary that segfaults. It printed a warning and left the toolchain installed,
+  where the next `finn build` would select it and die in a subprocess with no
+  explanation. A toolchain that cannot answer `--version` is now refused and
+  removed, and the error names the broken target.
+
+`finn download --source [--git-ref <ref>]` builds the compiler from this
+repository with `build.sh` for a triple with no published artifact, and installs
+it in the same layout so nothing downstream can tell the difference.
+
+If you already have a 1.0.0 toolchain from `finn`, remove it — it is the broken
+artifact, and `finn download` will not replace it while it is the newest one
+installed. Ask for the version explicitly:
+
+```sh
+rm -rf ~/.finn/toolchains/1.0.0
+finn download 1.0.1
+```
+
+
 ## Install
 
 Prefer the artifact for your platform from this release's assets. Every one has
