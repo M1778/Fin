@@ -1927,7 +1927,7 @@
           "nullable": false,
           "signature": "pub fun json_decode_int(text: string) <Outcome<int>>",
           "doc": "",
-          "line": 579
+          "line": 587
         },
         {
           "kind": "fun",
@@ -1935,7 +1935,7 @@
           "nullable": false,
           "signature": "pub fun json_decode_bool(text: string) <Outcome<bool>>",
           "doc": "",
-          "line": 591
+          "line": 599
         },
         {
           "kind": "fun",
@@ -1943,7 +1943,7 @@
           "nullable": false,
           "signature": "pub fun json_decode_float(text: string) <Outcome<double>>",
           "doc": "",
-          "line": 603
+          "line": 611
         },
         {
           "kind": "fun",
@@ -1951,7 +1951,7 @@
           "nullable": false,
           "signature": "pub fun json_decode_str(text: string) <Outcome<string>>",
           "doc": "The decoded string is fresh malloc: the source's bytes were scanned, not\naliased, so even an identity decode (no escapes) answers a copy.",
-          "line": 617
+          "line": 625
         },
         {
           "kind": "fun",
@@ -1959,7 +1959,7 @@
           "nullable": false,
           "signature": "pub fun json_encode_int_array(vals: [int], count: int) <string>",
           "doc": "",
-          "line": 629
+          "line": 637
         },
         {
           "kind": "fun",
@@ -1967,7 +1967,7 @@
           "nullable": false,
           "signature": "pub fun json_decode_int_array(text: string) <Outcome<[int]>>",
           "doc": "",
-          "line": 643
+          "line": 651
         },
         {
           "kind": "fun",
@@ -1975,7 +1975,7 @@
           "nullable": false,
           "signature": "pub fun json_encode_intmap(m:",
           "doc": "The `{string, int}` engine pair. Encode sorts by strcmp (byte order), so\nthe same map answers the same bytes on every run; decode answers the\nlikewise-named map and does not sort (header); the payload is the\nnamed generic the GAPS bullet owns.",
-          "line": 703
+          "line": 721
         },
         {
           "kind": "fun",
@@ -1983,7 +1983,7 @@
           "nullable": false,
           "signature": "pub fun json_decode_intmap(text: string) <Outcome<HashMap<string, int>>>",
           "doc": "",
-          "line": 749
+          "line": 767
         },
         {
           "kind": "fun",
@@ -1991,7 +1991,7 @@
           "nullable": false,
           "signature": "pub fun json_encode_strmap(m:",
           "doc": "`{string, string}` is the manifest shape: both sides quoted text. Encode\nescapes both sides (json_escape), decode unescapes both (take_str), so a\nkey/value round-trips through either splice.",
-          "line": 798
+          "line": 822
         },
         {
           "kind": "fun",
@@ -1999,7 +1999,7 @@
           "nullable": false,
           "signature": "pub fun json_decode_strmap(text: string) <Outcome<HashMap<string, string>>>",
           "doc": "",
-          "line": 846
+          "line": 870
         }
       ],
       "skipped_public_lines": 0,
@@ -2696,7 +2696,7 @@
           "nullable": false,
           "signature": "pub struct ProcessResult",
           "doc": "",
-          "line": 79
+          "line": 101
         },
         {
           "kind": "fun",
@@ -2704,7 +2704,7 @@
           "nullable": false,
           "signature": "pub fun run_command(command: string) <int>",
           "doc": "Executes a shell command synchronously and returns its exit status code.",
-          "line": 87
+          "line": 109
         },
         {
           "kind": "fun",
@@ -2712,7 +2712,7 @@
           "nullable": false,
           "signature": "pub fun exec_command(command: string) <ProcessResult>",
           "doc": "Executes a command and captures its standard output.",
-          "line": 93
+          "line": 116
         },
         {
           "kind": "fun",
@@ -2720,7 +2720,7 @@
           "nullable": false,
           "signature": "pub fun is_success(res: ProcessResult) <bool>",
           "doc": "Checks whether the process finished with a successful exit code (0).",
-          "line": 142
+          "line": 166
         },
         {
           "kind": "fun",
@@ -2728,7 +2728,7 @@
           "nullable": false,
           "signature": "pub fun free_process_result(res: ProcessResult) <noret>",
           "doc": "Releases the memory allocated for the process output string.",
-          "line": 148
+          "line": 172
         }
       ],
       "skipped_public_lines": 0,
