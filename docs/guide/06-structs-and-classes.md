@@ -86,10 +86,38 @@ fun main() <noret> {
 }
 ```
 
-Use one constructor per struct: constructor overload resolution is incomplete and
-multiple constructors are refused. `Type{...}` uses field initialization rather
-than invoking that constructor. Pass all constructor arguments explicitly even
-when the frontend accepts a default.
+**More than one constructor is allowed, and the call is resolved by arity and argument
+type.** Constructors whose parameter lists differ in count dispatch cleanly:
+
+```fin
+struct Thing {
+    pub value <int>,
+    constructor() { self.value = 1; }
+    constructor(initial: int) { self.value = initial; }
+}
+
+fun main() <noret> {
+    let a <Thing> = Thing();      // 1
+    let b <Thing> = Thing(7);     // 7
+    blame a.value == 1 && b.value == 7;
+}
+```
+
+Two constructors that **the same arguments fit** are refused rather than picked arbitrarily:
+
+```
+error: two constructors of struct 'S' take 1 argument(s) these arguments fit;
+       make their parameter shapes disjoint
+```
+
+That is the rule worth remembering: the compiler will not guess, and it names both the
+ambiguity and the fix. Give the overloads different arities, or types the argument cannot
+match both.
+
+`Type{...}` uses field initialization and **does not invoke the constructor** — a struct with
+`constructor(initial: int) { self.value = initial; }` built as `Thing{value: 3}` keeps `3`,
+while `Thing(3)` runs the constructor. Both spellings are legitimate; the difference is
+whether initialization code runs.
 
 ## Destructors and ownership
 
