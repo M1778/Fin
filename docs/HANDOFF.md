@@ -723,3 +723,81 @@ The receiving agent has finished the release gate when: all six required lanes a
 measurements); and the owner decisions above are either recorded or explicitly listed as
 still-open. If a lane cannot go green, the blocker must be named, evidenced, and owned — never
 worked around silently.
+
+---
+
+# 2026-11-21 — `v1.0.1` cut, and ten ecosystem repositories hardened
+
+Everything below supersedes the "GATE" section above for the 1.0.1 release. The sections
+above are kept because they carry held rulings, ADR bookings and historical checkpoints that
+nothing here replaces.
+
+## What shipped
+
+| Artifact | State |
+| --- | --- |
+| `finc 1.0.1` (contract 3) | Tagged **signed**, release workflow green |
+| `finc 1.0.0` | Published, **prerelease**, kept as a record — do not repair it |
+| `finn 1.0.1` | Two user-facing defects fixed; `--source` download route added |
+| Eight libraries | All merged, all green on Linux/macOS/Windows |
+| `fin-vscode` | Real `.vsix`, 56 tests, three-OS CI |
+| `fin-lsp` | 86 tests, verified over a live stdio session |
+
+Local suite **3,278 tests, 100%**; nine CI jobs green on `a580c63`.
+
+## The four compiler defects 1.0.1 fixes
+
+1. **A null `[char]` handle segfaulted before `main`.** `let a <[char]> = null;` emitted
+   `strlen(null)`. `Soundness_Codegen.ANullStringToCharArrayDoesNotCallStrlen` pins it.
+   The first fix did NOT work: a runtime null check still crashed because LLVM hoisted the
+   `strlen` above the comparison guarding it. The call must be emitted inside a block the
+   test selects. If you touch this, keep it there.
+2. **`-lLLVM-22` on every link.** A reference-compiled object references no LLVM symbol, so
+   the flag broke `finc -o app` on any machine without the LLVM *development* package.
+   `-Wl,--as-needed` never helped: it decides after the linker has already found the library.
+3. **An imported `const` was never declared.** `declareGlobals` walked only the root, so 168
+   `pub const` declarations in `lib/std` were unusable outside their own file.
+4. **`finfmt` was never installed.** No earlier release contained the formatter at all.
+
+## New traps, on top of the ones above
+
+- **Pushing to `master` cancels the running CI** (`cancel-in-progress: true`). I cancelled my
+  own gate three times. Land everything, push once, wait.
+- **The release tag must be signed.** `release.yml` refuses an unsigned tag; `v1.0.1`'s first
+  attempt was refused. SSH signing works: `git config gpg.format ssh`,
+  `git config user.signingkey ~/.ssh/id_ed25519.pub`, then `git tag -s`. `v1.0.0` is
+  annotated but unsigned because it predates the rule.
+- **The contract's `column` is a UTF-8 byte offset**, not a character offset, and the JSONL
+  goes to **stderr**. Both were undocumented until the editor work; both are now pinned.
+- **A platform-guarded branch is code only one platform parses.** `tests/tools/check_foreign_branches.py`
+  flips the guards so any host can type-check the other branch, and restores the file.
+- **`::add-path::` is retired**; printing it fails the step. Use `$GITHUB_PATH`.
+- **macOS x86_64 runners can die silently** — in-progress with no active step and no logs.
+  Re-dispatch; both times it passed.
+- **A stale `fin_tests` binary produces phantom failures.** Rebuild before believing a
+  failure that names a test you cannot find in the source.
+
+## Known-broken, deliberately shipped
+
+Full reproductions in `docs/known-issues.md`. Summary: macOS/glibc artifacts need LLVM at run
+time (documented, gated by `check_runtime_deps.py`, not made self-contained); a `&char`
+parameter cannot be indexed with a literal; hex literals do not exist; a Fin `string` cannot
+express an embedded NUL; the Windows CRT's `"ab"` is not an atomic append; a 64 KiB stack
+buffer plus a spawned thread aborts on Windows; the stage `parse_float` defect; the fuzzer
+does not build under Clang (#159).
+
+## Ecosystem and editor tooling
+
+`docs/ECOSYSTEM-HARDENING.md` records the per-repository work. The two patterns worth keeping:
+CI installs a pinned release (`FINC_VERSION` + `install_finc.py` + `install_finc_runtime.py`)
+rather than building the compiler, and every test was proven load-bearing by mutation — which
+is how `fin-validate`'s untested `max_len` and fin-ssg's unparsed Windows branch were found.
+
+`fin-vscode` and `fin-lsp` build on `docs/stdlib-index.json` (49 modules, 543 members,
+`--check`ed in CI). Neither is in a package registry, and the site says so.
+
+## Not done
+
+macOS/glibc artifacts are not self-contained; `fields_of` is a signature-only marker (ADR
+0057); struct `==` stays declared-only (ADR 0036); self-hosted stage agreement is Linux-only;
+neither editor tool is published; the `macos-x86_64` runner flake has no fix.
