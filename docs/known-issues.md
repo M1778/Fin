@@ -172,3 +172,55 @@ and are allowed to.
 Not root-caused. A future reader should start at how the stage carries a
 module's declaration list across files: the bogus line number suggests
 positions from one module's AST are rendered against another module's source.
+
+---
+
+# Known release defect: `finc 1.0.0` reports contract 3 and lacks `--explain`
+
+Status: **confirmed on the published `v1.0.0` artifacts**. Found 2026-11-21 by the VS Code
+extension work, which implements an "explain this diagnostic" action.
+
+## Symptom
+
+`docs/finc-interface-contract.md` documents `--explain <code>` and `--explain list` as part
+of contract 3, and `finc --version` on the v1.0.0 artifacts answers `finc 1.0.0
+(contract 3)`. The flag is not there:
+
+```
+$ finc-1.0.0-x86_64-unknown-linux-musl/bin/finc --explain E0301
+error: unknown option '--explain'
+   = help: run `finc --help` for usage.
+
+$ finc-1.0.0-.../bin/finc --explain list
+error: unknown option '--explain'
+```
+
+`finc 1.0.1` has it:
+
+```
+$ finc --explain E0301
+E0301 (error): a name was used that nothing in scope declares
+```
+
+## Why this matters more than a missing convenience
+
+The contract integer is the one thing a consumer is told to branch on, and this release
+demonstrates the failure mode it exists to prevent: a tool that reads `contract 3`, offers a
+feature the contract promises, and gets `unknown option` from the compiler.
+
+Nothing about v1.0.0 is being repaired — see the note at the top of this file. What this
+entry adds is the reason **1.0.1 is the first release a tool should target**, and a concrete
+instance of the rule that a consumer should treat `--version` as a claim to verify rather
+than a fact to trust. The extension was written to probe `--explain` before offering the
+action, which is the behaviour to copy.
+
+## Test gap this exposed
+
+Nothing asserted that the flags named in the contract exist in a binary that reports the
+contract number. `tests/test_cli.cpp` covers `--explain` against the current build, which is
+correct and does not catch this: the defect is in the *released* artifact, produced by a
+commit whose CMake version had not moved while the feature was absent.
+
+The check that would have caught it is the release pipeline comparing the flags in
+`finc --help` against a list the contract names. That is not implemented; this entry records
+it as a gap rather than implying coverage exists.
