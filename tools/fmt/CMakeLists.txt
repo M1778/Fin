@@ -32,3 +32,17 @@ add_test(NAME "finfmt:ugly-drifts"
 set_tests_properties(finfmt:ugly-drifts PROPERTIES WILL_FAIL TRUE)
 add_test(NAME "finfmt:expected-clean"
     COMMAND $<TARGET_FILE:finfmt> --check "${CMAKE_CURRENT_SOURCE_DIR}/corpus/expected.fin")
+
+# `finfmt` ships with the compiler.
+#
+# It was built and tested but never installed, so no release archive, .deb, .rpm, .dmg or
+# .zip contained it: a user who installed a released finc had no formatter, and every
+# editor integration that formats had to either build from source or fall back to doing
+# nothing. Found by the VS Code extension work, which needed `finfmt` on the same PATH as
+# `finc` and had only the source build's copy.
+#
+# Into `bin/` beside `finc`, because both are executables a user runs and the archive
+# layout is `tar -C stage bin lib`: anywhere else would be installed and then silently
+# dropped from every portable artifact, which is the defect the LICENSE rule already
+# documents at the top level.
+install(TARGETS finfmt RUNTIME DESTINATION bin)
