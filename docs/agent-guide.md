@@ -1,7 +1,7 @@
 # Writing working Fin programs
 
 Give this file to an AI agent working on a Fin application. It describes the
-compiler in this repository, targeting version 1.0.0. Use `finc --version` to identify your
+compiler in this repository, targeting version 1.0.1. Use `finc --version` to identify your
 binary; a version number alone does not identify the source revision of a local
 build. Fin syntax resembles several languages but does not follow all their rules.
 

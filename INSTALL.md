@@ -187,13 +187,13 @@ commit instead:
 ```sh
 curl -o install.sh https://raw.githubusercontent.com/M1778/Fin/master/install.sh
 sh install.sh                          # newest published release, or refuse
-FIN_REF=v1.0.0 sh install.sh           # a specific tag
+FIN_REF=v1.0.1 sh install.sh           # a specific tag
 FIN_DIR=/opt/Fin sh install.sh         # somewhere other than $HOME/Fin
 ```
 
-At `1aa4a8f` (2026-11-20) the no-`FIN_REF` form refuses, because the tags
-`v0.4.0` and `v1.0.0` exist but no release is published yet. That is the script
-working as designed, not a bug:
+The no-`FIN_REF` form resolves the newest **published** release, and refuses when there is
+none. It refused for the whole of 1.0.0's life, because the script asks the releases API and
+1.0.0 was marked prerelease; the message it printed then was:
 
 ```
 install.sh: no published finc release found at https://github.com/M1778/Fin.
@@ -201,7 +201,11 @@ install.sh: run with FIN_REF=<full commit or vX.Y.Z tag> naming a ref
 install.sh: you have inspected (e.g. by reading the source at that commit).
 ```
 
-With `FIN_REF=v0.4.0`, run on this host, the same script printed:
+That is history rather than current behaviour: `v1.0.1` is a published, non-prerelease
+release, so the no-argument form resolves it. The refusal is still worth knowing, because it
+is what you will see on a fork with no releases.
+
+## What the installer prints
 
 ```
 install.sh: compiling Fin at ref v0.4.0
