@@ -212,7 +212,9 @@ file — a bad flag, a file that could not be read. Check for null; do not print
 --no-check             Skip semantic analysis (unsafe)
 --no-fin-guard         Reject bare 'let x = ...'; default rewrites to '<auto>' with a warning
 --explain <code>       Explain a diagnostic code on stdout; '--explain list' lists them
---version / --help
+--version              Print the semver and contract integer; exit 0
+--help                 Print this message; exit 0
+-h                     Same as --help. The only short alias: there is no -v for --version
 ```
 
 **An unknown flag is an error (`2`), never ignored.** A toolchain whose flags fail silently is the worst
