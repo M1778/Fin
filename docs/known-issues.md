@@ -224,3 +224,65 @@ commit whose CMake version had not moved while the feature was absent.
 The check that would have caught it is the release pipeline comparing the flags in
 `finc --help` against a list the contract names. That is not implemented; this entry records
 it as a gap rather than implying coverage exists.
+
+---
+
+# Known compiler limitation: a `&char` parameter cannot be indexed with a literal
+
+Status: **confirmed, minimal repro**, found 2026-11-21 by fin-ssg's macOS fix.
+
+## Symptom
+
+The same index lowers on an array and is refused on a pointer parameter:
+
+```fin
+// refused
+priv fun helper(info: &char) <int> {
+    return cast<int>(info[4]);
+}
+// error: codegen: this index expression is not lowered yet
+
+// accepted
+priv fun helper(info: [char]) <int> {
+    return cast<int>(info[4]);
+}
+```
+
+`&info[0]` on an existing array works, which is why the original code -- which read
+`info[24]` where `info` had come from `let info <[char]> = new [char, 256]{}` -- compiled and
+a refactor that extracted the same expression into a helper taking `&char` did not.
+
+## Why it matters
+
+It pushed a real fix into a worse shape. The cleanup that prompted it wanted to name a
+`struct stat` offset once instead of twice, and the natural signature for that is
+`(info: &char)`. Taking `[char]` instead works and is what the library now does, but it
+means a pointer cannot be treated as an array for indexing, which is the opposite of what
+`&info[0]` → `info[24]` implies.
+
+## Not root-caused
+
+No test pins it yet, because pinning a refusal makes it normative and this reads like a gap
+rather than a decision. The route in is the index-expression lowering path: find where an
+index on a `[T]` is handled and check whether a `&T` base reaches it at all, or is rejected
+earlier for having no length recorded.
+
+Worked around in `M1778/fin-ssg` (`src/vendor/platform.fin`), with a comment naming the
+compiler rather than presenting the array parameter as a design choice.
+
+---
+
+# Known compiler limitation: `-lLLVM` was named unconditionally (fixed in 1.0.1)
+
+This one is recorded because it shaped three ecosystem repositories before it was fixed, and
+because the workaround outlived the bug.
+
+`finc program.fin -o program` passed `-lLLVM-22` on every link. A reference-compiled object
+references no LLVM symbol -- `nm -u hello.o` shows `printf` alone -- so the flag bought
+nothing and made the link fail on any machine without the LLVM *development* package.
+`-Wl,--as-needed` did not help: it decides whether to record a dependency after the linker
+has already found the library.
+
+Fixed in `1c0c658`: the library is named only when an object being linked mentions an LLVM
+symbol. Repositories that added `FIN_LDFLAGS` overrides can drop them; the release notes for
+1.0.1 say so.
