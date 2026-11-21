@@ -1,3 +1,27 @@
+# Known issues
+
+Everything here is a defect or limitation that was reproduced and written down rather than
+worked around silently. Each section states whether it is fixed, open, or an operating note,
+because a list that mixes them without saying so stops being useful the moment it grows.
+
+| Subject | Status |
+| --- | --- |
+| `1.0.0` x86_64-linux-gnu segfaults before `main` | **Fixed in 1.0.1** (PIC on `fin_core`); 1.0.0 stays prerelease |
+| `1.0.0` reports contract 3 without `--explain` | **Fixed in 1.0.1**; 1.0.0 stays as published |
+| `-lLLVM` named unconditionally on every link | **Fixed in 1.0.1** |
+| macOS reports a NUL in source as a syntax error | **Open**, observed, not root-caused |
+| The stage invents type errors after `parse_float` | **Open**, pinned by a test, documented |
+| A `&char` parameter cannot be indexed with a literal | **Open**, a language gap; worked around in `fin-ssg` |
+| The Windows CRT's `"ab"` is not an atomic append | **Open**, documented in `lib/std/fs.fin` |
+| A 64 KiB stack buffer plus a thread aborts on Windows | **Open**, worked around in `logg` |
+| `macos-15-intel` runner stalls with no log | **Operating note**, cancel and re-run |
+
+**Read the status before the detail.** Three are fixed and those fixes ship in 1.0.1; five are
+open limits a caller has to design around, three of them Windows-specific; and one is a runner
+problem that has nothing to do with Fin.
+
+---
+
 # Known release defect: x86_64-linux-gnu `finc 1.0.0` segfaults before `main`
 
 Status: **confirmed, reproduced, root-caused**. Affects the published `v1.0.0`
