@@ -12,7 +12,7 @@ The compiler's semver and the machine-contract integer move independently;
 
 Nothing yet.
 
-## [1.0.1] - 2026-11-20
+## [1.0.1] - 2026-11-21
 
 The 1.0.0 release published broken glibc Linux x86_64 binaries and was marked
 prerelease as soon as that was found; this release is the first 1.0.x that is
@@ -40,6 +40,24 @@ safe to install on every platform it ships for.
 - Fixed `json_encode_float` emitting `inf` and `-nan`, which are not JSON. A
   non-finite double now blames and names the value rather than substituting
   `null`, which would have silently turned a computed number into absence.
+- Fixed `let a <[char]> = null;` segfaulting before the program's first
+  statement. The string-to-array conversion emitted `strlen` with a null
+  pointer, and no Fin-level guard could run first because the crash was in the
+  conversion. A constant null now returns the zero pair with no call emitted;
+  a non-constant one is measured inside the non-null branch, which is where the
+  call has to live -- LLVM hoists it above a comparison that guards it.
+- Fixed `-lLLVM-<major>` being named on every link. A reference-compiled object
+  references no LLVM symbol, so the flag broke `finc -o app` on any machine
+  without the LLVM *development* package while buying nothing. The library is
+  now named only when an object being linked mentions it.
+- Fixed an imported `const` never becoming a global, so importing one failed
+  with `codegen: the name '...' is not lowered yet`. That made 168 `pub const`
+  declarations in `lib/std` unusable outside their own file -- `parse`'s
+  precedence table, `token`'s kinds, `ascii`'s classes. The root is walked
+  first, then each module, first-wins.
+- Fixed `finfmt` never being installed. `install(TARGETS ...)` named only
+  `finc`, so no archive, package or installer had ever contained the formatter
+  this project documents as the way to format Fin code.
 - Fixed the shipped TextMate grammar declaring `repository.comment` as an
   array. TextMate requires one rule object, so the real engine silently
   ignored it and comments and strings never highlighted. The generator, the
