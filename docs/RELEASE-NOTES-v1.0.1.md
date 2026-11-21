@@ -112,6 +112,35 @@ which had mirrored the same wrong assumption — are all corrected.
   differs. The threshold is 20%, derived from a measured 10.3% worst-case
   deviation on an idle machine.
 
+## Compiler fixes this release carries
+
+Four defects, each found by an ecosystem repository trying to use the compiler for real work
+and each reported with a reproduction rather than a complaint.
+
+- **A null `[char]` handle segfaulted before `main`.** `let a <[char]> = null;` lowered
+  through the string-to-array conversion, which measured the bytes with `strlen(s)`. The
+  emitted object called `strlen` with `%edi` zero. A security library that validates input
+  could not so much as declare a null handle. A constant null now returns the zero pair with
+  no call emitted; a non-constant one is measured inside the non-null branch, because LLVM is
+  free to hoist a call above the compare that guards it and does — which is why the first
+  version of this fix still crashed.
+- **`-lLLVM-22` was named on every link.** A reference-compiled object references no LLVM
+  symbol (`nm -u hello.o` shows `printf` alone), so the flag bought nothing and broke
+  `finc -o app` on any machine without the LLVM *development* package — most machines. The
+  library is now named only when an object being linked actually mentions it. Proven with a
+  `FIN_CC` wrapper that rejects `-lLLVM*` and exits 1, which is what such a machine does.
+- **An imported `const` could not be read.** `declareGlobals` walked only the root program,
+  so a module-scope `let`/`const` never became an LLVM global and importing one failed with
+  `the name 'PREC_OR' is not lowered yet`. That made 168 `pub const` declarations in
+  `lib/std` unusable outside their own file — `parse`'s precedence table, `token`'s kinds,
+  `ascii`'s classes. The root is walked first, then each module, first-wins.
+- **`finfmt` was never installed.** The formatter was built and tested and
+  `install(TARGETS ...)` named only `finc`, so no archive, package or installer has ever
+  contained it. It now installs to `bin/` beside `finc`.
+
+If you maintained a workaround for any of the first three — a `FIN_LDFLAGS` override, a null
+guard at every call site, a module-level value passed as an out-parameter — it can go.
+
 ## Known limitations
 
 Unchanged from 1.0.0 unless listed above.
