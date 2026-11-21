@@ -217,6 +217,20 @@ version that does not exist is a 404 at the first CI step, which is at least a l
 
 ---
 
+## The downstream consumers
+
+`fin-sdk` and `Linf` both work against `finc 1.0.1`, verified rather than assumed:
+
+- **`fin-sdk` re-vendored to 3.3.0** from the v1.0.1 tree
+  (`bf7fe48b72babba31aa6ba302bc3e3d395b4ad99`), 23 modules byte-exact with every sha256 in
+  `MANIFEST.md` checked against the copied file. The snapshot gained `read_line`, `read_all`,
+  `strings::parse_float`, and `math::floor_div`'s named blame. Its `proof/` still reports
+  exactly three findings and exits 1.
+- **`Linf` 3.0.0** builds and passes **all 55 regression checks and all self-checks**. It was
+  already current; a local checkout from October made it look broken, and chasing that was a
+  wasted hour worth recording as a trap: check `git fetch` before believing a downstream
+  failure.
+
 ## Open, and deliberately not settled here
 
 - **macOS/glibc artifacts are not self-contained.** Documented and gated; making them static is
