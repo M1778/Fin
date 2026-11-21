@@ -199,6 +199,35 @@ compiler older than the one in the working tree.
 
 ---
 
+### A consumer can install and use them
+
+The packaging question the audit raised was whether `finn add` produces a package a program can
+actually import. Verified end to end, against the published `finn 1.0.1` and a released
+`finc 1.0.1`:
+
+```sh
+finn init proj --yes
+cd proj && finn add --yes M1778/finson        # --yes because no registry resolves the name
+```
+
+then, with `import { ParseResult, json_parse, json_object_get, json_free_result } from
+finson::fin;`:
+
+```sh
+finn build   -> [OK] Built executable: out/proj
+./out/proj   -> ok=1
+```
+
+`finn build --verbose` shows what it passes: `--fin-libs <toolchain>/lib/std .finn/packages
+.finn/packages/finson`. The package root carries the module, so `finson::fin` resolves without
+the consumer naming a path — which was not true before the libraries moved their module out of
+`src/`.
+
+One defect found on the way: my first attempt used `parse`, which is not an exported name. The
+README's example is correct (`json_parse`); I had guessed. Worth stating because it is the
+common failure — an import that resolves to the right module and the wrong symbol reports
+`Module 'finson' does not export 'parse'`, which is a good error.
+
 ## Editor tooling
 
 Two new repositories. Neither is merged, published, or claimed as done.
