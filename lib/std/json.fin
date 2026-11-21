@@ -570,6 +570,14 @@ priv struct json_scan {
 // Every decoder wraps one scanner run: staging buffer in, scanner out,
 // trailing-data check, Err wrapping the scanner's reason. The staging
 // buffer dies here; the decoded string survives the function.
+//
+// "Every" is load-bearing and was once a lie. The four scalar decoders check
+// `at_end` and the three collection decoders did not, so `"[1,2] junk"` decoded
+// successfully while `"5 junk"` did not -- a prefix match wearing a
+// complete-document contract (issue #149). All seven check now, including the
+// empty-collection early exits, so `"[] junk"` and `"{} junk"` are refused too.
+// A decoder added here needs the same line, and
+// `Soundness_Serde.ACollectionDecoderRefusesTrailingData` is what says so.
 priv fun json_alive(text: string) <[char]> {
     let buf <[char]> = to_chars(text);
     return buf;
@@ -649,6 +657,10 @@ pub fun json_decode_int_array(text: string) <Outcome<[int]>> {
     }
     if (st.peek_char(']')) {
         st.pos = st.ws() + 1;
+        if (!st.at_end()) {
+            delete buf;
+            return Err::<[int]>("json_decode_int_array: trailing data after the value");
+        }
         let empty <[int]> = new [int, 0]{};
         delete buf;
         return Ok::<[int]>(empty);
@@ -692,6 +704,12 @@ pub fun json_decode_int_array(text: string) <Outcome<[int]>> {
     }
     delete stage;
     delete buf;
+    // The complete-document rule the scalar decoders already enforce. Without it a caller's
+    // `"[1,2] junk"` decoded successfully while `"5 junk"` did not, which is the wrong half of
+    // the contract lib/std/json.fin promises (issue #149).
+    if (!st.at_end()) {
+        return Err::<[int]>("json_decode_int_array: trailing data after the value");
+    }
     return Ok::<[int]>(out);
 }
 
@@ -757,6 +775,9 @@ pub fun json_decode_intmap(text: string) <Outcome<HashMap<string, int>>> {
         st.pos = st.ws() + 1;
         let q <HashMap<string, int>> = HashMap::<string, int>();
         delete buf;
+        if (!st.at_end()) {
+            return Err::<HashMap<string, int>>("json_decode_intmap: trailing data after the value");
+        }
         return Ok::<HashMap<string, int>>(q);
     }
     let p <{string, int}>;
@@ -788,6 +809,9 @@ pub fun json_decode_intmap(text: string) <Outcome<HashMap<string, int>>> {
     }
     delete buf;
     let q <HashMap<string, int>> = HashMap::from_prototype(p);
+    if (!st.at_end()) {
+        return Err::<HashMap<string, int>>("json_decode_intmap: trailing data after the value");
+    }
     return Ok::<HashMap<string, int>>(q);
 }
 
@@ -854,6 +878,9 @@ pub fun json_decode_strmap(text: string) <Outcome<HashMap<string, string>>> {
         st.pos = st.ws() + 1;
         let q <HashMap<string, string>> = HashMap::<string, string>();
         delete buf;
+        if (!st.at_end()) {
+            return Err::<HashMap<string, string>>("json_decode_strmap: trailing data after the value");
+        }
         return Ok::<HashMap<string, string>>(q);
     }
     let p <{string, string}>;
@@ -885,6 +912,9 @@ pub fun json_decode_strmap(text: string) <Outcome<HashMap<string, string>>> {
     }
     delete buf;
     let q <HashMap<string, string>> = HashMap::from_prototype(p);
+    if (!st.at_end()) {
+        return Err::<HashMap<string, string>>("json_decode_strmap: trailing data after the value");
+    }
     return Ok::<HashMap<string, string>>(q);
 }
 

@@ -1986,6 +1986,38 @@ fun main() <noret> {
         << "the serde contract's names stopped resolving:\n" << err;
 }
 
+TEST(Soundness_Serde, ACollectionDecoderRefusesTrailingData) {
+    // Issue #149: the scalar decoders refuse a remainder after the value and the
+    // collection decoders did not, so `"[1,2] junk"` decoded successfully while
+    // `"5 garbage"` did not. `lib/std/json.fin` documents a complete-document
+    // contract -- a caller's bad data is a named Err, not a prefix match -- and a
+    // decoder that accepts a prefix is the wrong half of that promise.
+    //
+    // All three collection decoders are asserted, because the fix is one rule and a
+    // test that covered only the array would let the other two drift apart again.
+    const std::string out = buildBundledAndRun(R"FIN(
+import { json_decode_int_array, json_decode_intmap, json_decode_strmap,
+         json_decode_int } from json::std;
+fun main() <noret> {
+    // The scalar is the control: it already refused, and still must.
+    printf("scalar=%d\n", cast<int>(json_decode_int("5 junk").ok));
+    printf("array=%d\n", cast<int>(json_decode_int_array("[1,2] junk").ok));
+    printf("intmap=%d\n", cast<int>(json_decode_intmap("{\"a\":1} junk").ok));
+    printf("strmap=%d\n", cast<int>(json_decode_strmap("{\"a\":\"b\"} junk").ok));
+    // And a clean document still decodes, so the check is a tail check rather
+    // than a refusal of everything.
+    printf("array_clean=%d\n", cast<int>(json_decode_int_array("[1,2]").ok));
+}
+)FIN");
+    EXPECT_EQ(out,
+              "scalar=0\n"
+              "array=0\n"
+              "intmap=0\n"
+              "strmap=0\n"
+              "array_clean=1\n")
+        << out;
+}
+
 TEST(Soundness_Serde, TheRoundTripTheIssueNamesRuns) {
     // The motivating spell, run: encode 42, decode "42", receive 42 through
     // the `Outcome`, and a caller's bad document answers `Err` naming the
