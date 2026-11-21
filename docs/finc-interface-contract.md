@@ -119,6 +119,26 @@ One diagnostic:
 {"kind":"diagnostic","severity":"error","code":null,"message":"syntax error, unexpected SEMICOLON, expecting IDENTIFIER","file":"bad.fin","line":1,"column":26,"endLine":1,"endColumn":27,"help":null,"attribution":null}
 ```
 
+**Positions are 1-based, and `column` is a byte offset within the line, not a character
+offset.** `endColumn` is exclusive. This is a property of the lexer's position tracking
+rather than a decision, and it is stated here because the consequence is a misplaced
+squiggle that only appears after non-ASCII text:
+
+```fin
+fun main() <noret> {
+    printf("😀é"); Unknown();
+}
+```
+
+The emoji is 4 bytes and `é` is 2, so `Unknown` is reported at column 23 — the 23rd **byte**
+of the line. Its character position is 21 and its UTF-16 position is 20. An editor that
+treats the value as a character count is right for ASCII and progressively wrong after the
+first multi-byte sequence.
+
+Converting to a UTF-16 offset, which is what LSP positions are, means slicing the line's
+UTF-8 bytes at `column - 1` and then counting UTF-16 code units in that prefix. Subtracting
+one is correct only for a line that is entirely ASCII.
+
 The run always ends with exactly one summary, on every exit path:
 
 ```json

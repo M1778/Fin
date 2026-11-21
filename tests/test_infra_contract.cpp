@@ -209,6 +209,49 @@ TEST(ContractConformance, StdoutIsReservedOnEveryContractPath) {
     }
 }
 
+TEST(ContractConformance, ColumnsAreByteOffsetsNotCharacters) {
+    // `column` is 1-based and counts BYTES within the line, which the contract now says
+    // explicitly because an editor that treats it as a character count is right for ASCII
+    // and progressively wrong after the first multi-byte sequence.
+    //
+    // The line below puts an emoji (4 bytes, 2 UTF-16 units) and an e-acute (2 bytes, 1
+    // unit) before the undefined name. Character position and byte position therefore
+    // disagree, and the assertion pins which one the compiler reports.
+    //
+    // Without this test the documented sentence could drift from the lexer silently, and
+    // the only symptom would be a misplaced squiggle in someone else's editor.
+    const std::string line = "    printf(\"\xF0\x9F\x98\x80\xC3\xA9\"); Unknown();";
+    TempFin nonAscii("fun main() <noret> {\n" + line + "\n}\n", "bytecol");
+    // No `--fin-libs=`: this test needs the bundled stdlib so `printf` resolves, and the
+    // only diagnostic is then the undefined name the assertion is about.
+    auto r = runFinc({nonAscii.str(), "--diagnostics=json"});
+    ASSERT_NE(r.exitCode, 0) << r.err;
+    auto lines = splitLines(r.err);
+    ASSERT_FALSE(lines.empty()) << r.err;
+
+    // The column is a number in the JSON, not a string, so valueOf (which reads quoted
+    // strings) does not apply; read it directly. The first diagnostic must be the one
+    // about Unknown -- printf resolving is what makes that true.
+    const std::string& d = lines.front();
+    ASSERT_NE(d.find("Unknown"), std::string::npos) << "expected the Unknown diagnostic: " << d;
+    const std::string needle = "\"column\":";
+    size_t at = d.find(needle);
+    ASSERT_NE(at, std::string::npos) << d;
+    at += needle.size();
+    size_t after = d.find_first_not_of("0123456789", at);
+    const int column = std::stoi(d.substr(at, after - at));
+
+    // Byte offset of `Unknown` in that line, 1-based: the line is indented 4, `printf("`
+    // is 8, the emoji is 4, e-acute is 2, `")` is 2, `;` and a space are 2 -- 22 bytes
+    // precede the U, so the column is 23.
+    const size_t bytePrefix = 4 + 8 + 4 + 2 + 2 + 2;
+    EXPECT_EQ(column, (int)bytePrefix + 1)
+        << "column must be a 1-based byte offset; character position here is "
+        << (4 + 8 + 1 + 1 + 2 + 2 + 1) << " and UTF-16 position is "
+        << (4 + 8 + 2 + 1 + 2 + 2 + 1) << ". Got " << column << " from " << d;
+
+}
+
 TEST(ContractConformance, ExecutableLinkWithJsonDiagnosticsIsRefused) {
     // The contract-3 point: `-o` (without `-c`) together with `--diagnostics=json`
     // is refused by name with exit 2, and the refusal is JSONL like any other
