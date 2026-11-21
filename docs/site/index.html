@@ -442,6 +442,36 @@ finfmt program.fin        # the formatter; --check writes nothing</code></pre>
             members is published at <code>docs/stdlib-index.json</code> for tools that want
             hovers and completions without embedding a Fin parser.
           </p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr><th style="width: 26%;">Editor</th><th style="width: 40%;">Install</th><th style="width: 34%;">What you get</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Visual Studio Code</td>
+                  <td><code>code --install-extension fin-vscode-1.0.0.vsix</code></td>
+                  <td>Highlighting, live diagnostics, formatting, hover and completion, outline, snippets</td>
+                </tr>
+                <tr>
+                  <td>Neovim, Helix, Emacs, Zed</td>
+                  <td><code>npm install -g fin-lsp</code>, then point your client at <code>fin-lsp --stdio</code></td>
+                  <td>The same server the extension uses; per-editor config in its README</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="callout callout-tip">
+            <svg class="icon callout-icon" aria-hidden="true"><use href="assets/icons.svg#bulb"></use></svg>
+            <div class="callout-body">
+              <strong>Neither is in a package registry yet</strong>
+              <p>The extension is a <code>.vsix</code> from the release page, and the language
+              server is an <code>npm pack</code> tarball. Diagnostics come from the compiler, so
+              a hover and a squiggle can never disagree about what is valid. Hover and
+              completion are built from the standard library's own sources &mdash; the same 543
+              declarations the index carries.</p>
+            </div>
+          </div>
         </article>
 
         <!-- Hello World -->
