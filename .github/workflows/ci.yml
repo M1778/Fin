@@ -85,6 +85,15 @@ jobs:
           # on the Windows runners.
           uv run --no-project python tests/tools/check_licensing.py
 
+      - name: Standard library index is current
+        run: |
+          # docs/stdlib-index.json is what editor tooling and the site read instead of
+          # parsing lib/std with a full Fin parser. A stale index shows a hover for a
+          # function that was renamed and silently omits the new one, which is worse than
+          # no index because it looks authoritative. `--check` regenerates in memory and
+          # compares, so this costs a second and never writes to the tree.
+          uv run --no-project python tests/tools/gen_stdlib_index.py --check
+
       - name: Conan install
         run: |
           # conan/profiles/fin does `include(default)`, so a detected default
