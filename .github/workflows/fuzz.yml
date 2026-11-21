@@ -97,13 +97,29 @@ jobs:
       - name: Configure with FIN_FUZZ
         run: |
           set -eu
-          # No `-G Ninja`: the Conan toolchain sets the generator and the make program, and
-          # asking for one here fights it -- "CMake was unable to find a build program
-          # corresponding to Ninja" is what that looked like on a fresh runner.
-          cmake -S . -B build-fuzz \
+          # `find`, not a guessed path: single-config generators put the toolchain under
+          # build/build/<config>/ and multi-config ones under build/build/. Hardcoding
+          # "Debug" is what failed twice -- once because Ninja was not found after the
+          # toolchain's own generator was overridden, and once because the path did not exist
+          # on a runner that configured differently from this machine. `ci.yml` already finds
+          # it; this is the same three lines.
+          # Prefer the Debug toolchain this run generated: `find | head -1` can return a
+          # Release one a cached build left behind, and a Release fmt linked into a Debug
+          # fin_core is the kind of mismatch that fails at link time with no useful message.
+          tc="$(find build -name conan_toolchain.cmake -path '*Debug*' -print | head -n 1)"
+          if [ -z "$tc" ]; then
+            tc="$(find build -name conan_toolchain.cmake -print | head -n 1)"
+          fi
+          if [ -z "$tc" ]; then
+            echo "::error::conan_toolchain.cmake was not generated under build/"
+            find build -maxdepth 4 -type d | head -20
+            exit 1
+          fi
+          echo "toolchain: $tc"
+          cmake -S . -B build-fuzz -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang \
-            -DCMAKE_TOOLCHAIN_FILE="$PWD/build/build/Debug/generators/conan_toolchain.cmake" \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/$tc" \
             -DLLVM_DIR=/usr/lib/llvm-22/lib/cmake/llvm \
             -DFIN_FUZZ=ON -DFIN_BUILD_TESTS=OFF
 
