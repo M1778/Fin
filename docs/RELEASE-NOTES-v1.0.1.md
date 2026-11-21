@@ -175,6 +175,26 @@ reader deserves to know they exist:
 If you maintained a workaround for any of the first three — a `FIN_LDFLAGS` override, a null
 guard at every call site, a module-level value passed as an out-parameter — it can go.
 
+## Verified from the published artifacts
+
+Not from the build that produced them — that is the lesson 1.0.0 taught. Each row was a
+download of the release asset and a command run against it.
+
+| Artifact | Check | Result |
+| --- | --- | --- |
+| `x86_64-unknown-linux-musl` | `finc --version` | `finc 1.0.1 (contract 3)`, exit 0, static-pie |
+| | compiles a program importing `strings::std` and `parse::std` | `V1.0.1 WORKS PREC_OR=2` |
+| | `bin/finfmt` present | **yes** — no earlier release contained it |
+| `x86_64-unknown-linux-gnu` | `finc --version` | `finc 1.0.1 (contract 3)`, exit 0 — **the artifact that segfaulted in 1.0.0** |
+| | compiles the same program | `V1.0.1 WORKS PREC_OR=2` |
+| | `ldd` | `libLLVM.so.22.1` present (documented requirement) |
+| `.deb` | control fields | `Depends: libllvm22` — the runtime is pulled in |
+| `aarch64-apple-darwin` | load commands | `/opt/homebrew/opt/llvm@22/lib/libLLVM.dylib`, exactly what `INSTALL.md` says |
+
+One thing this does **not** prove: the macOS artifacts were inspected, not executed, because
+this host cannot run a Mach-O binary. Their dependency list matches `INSTALL.md`, and `finn`'s
+release-smoke job on a real macOS runner is what exercises them.
+
 ## Known limitations
 
 Unchanged from 1.0.0 unless listed above.
