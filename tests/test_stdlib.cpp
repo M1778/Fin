@@ -3638,11 +3638,13 @@ fun main() <noret> {
     let ok <ProcessResult> = exec_command("true");
     printf("is_success=%d\n", cast<int>(is_success(ok)));
     free_process_result(&ok);
-    // A signalled child is asserted through `exec_command` rather than `run_command`, because
-    // the shell narrates a `run_command` kill on stdout and the wording is the shell's, not
-    // Fin's: "Killed" appeared in the capture on some runners and not others. `exec_command`
-    // captures the child's own output, which for `kill -9 $$` is nothing, so the assertion is
-    // about the decoded status and nothing else.
+    // A signalled child, asserted for its STATUS only.
+    //
+    // The capture carries whatever the shell says about its child's death, and which shell
+    // says what is not Fin's contract: "Killed" appeared on the CI runners and not here,
+    // because /bin/sh is dash there and bash here. Asserting the output would be asserting
+    // dash's stderr handling. The exit code is the property under test, and 137 (128 + 9) is
+    // Fin's documented answer.
     let killed <ProcessResult> = exec_command("sh -c 'kill -9 $$'");
     printf("signal=%d\n", killed.exit_code);
     free_process_result(&killed);
@@ -3650,12 +3652,19 @@ fun main() <noret> {
 )FIN");
     // 7 and 3 and 1 rather than 1792, 768 and 256; 137 is 128 + SIGKILL(9), the shell's
     // convention for a signalled child.
-    EXPECT_EQ(out,
-              "exec=7\n"
-              "run=3\n"
-              "zero=0\n"
-              "nonzero=1\n"
-              "is_success=1\n"
-              "signal=137\n")
-        << out;
+    //
+    // The capture may also carry the shell's own report of the kill ("Killed", or "Killed" with
+    // a pid): `runProcess` sends the child's stderr to the same file as its stdout, and what a
+    // shell writes there is not Fin's contract. So the assertion is that each expected line is
+    // present IN ORDER, not that they are the whole capture -- asserting the whole capture is
+    // asserting the host's /bin/sh, which is dash on the CI runners and bash here.
+    const std::vector<std::string> expected{
+        "exec=7", "run=3", "zero=0", "nonzero=1", "is_success=1", "signal=137"};
+    std::size_t at = 0;
+    for (const auto& line : expected) {
+        const std::size_t found = out.find(line, at);
+        ASSERT_NE(found, std::string::npos)
+            << "expected \"" << line << "\" after offset " << at << " in:\n" << out;
+        at = found + line.size();
+    }
 }

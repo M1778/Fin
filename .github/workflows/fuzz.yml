@@ -97,7 +97,10 @@ jobs:
       - name: Configure with FIN_FUZZ
         run: |
           set -eu
-          cmake -S . -B build-fuzz -G Ninja \
+          # No `-G Ninja`: the Conan toolchain sets the generator and the make program, and
+          # asking for one here fights it -- "CMake was unable to find a build program
+          # corresponding to Ninja" is what that looked like on a fresh runner.
+          cmake -S . -B build-fuzz \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang \
             -DCMAKE_TOOLCHAIN_FILE="$PWD/build/build/Debug/generators/conan_toolchain.cmake" \
