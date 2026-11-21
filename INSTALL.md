@@ -93,6 +93,27 @@ that `bin` on `PATH` is the whole install — replace the `tar` line with
 The `.deb` and `.rpm` put `finc` in `/usr/bin` and the library in `/usr/lib/std`,
 which is the same `<exe>/../lib/std` rule, so they need no wrapper.
 
+### The LLVM runtime is a dependency of some artifacts, not all
+
+The prebuilt binaries are not uniform in what they need at run time. Verified by
+reading the shipped binaries' dynamic dependency lists, not by reading the build:
+
+| Artifact | LLVM at run time |
+| --- | --- |
+| `x86_64-unknown-linux-musl.tar.gz` | **No.** Statically linked (~93 MB): no loader, no LLVM, no distro packages. |
+| `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc` | **No.** LLVM is linked in. |
+| `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` (and the `.deb`/`.rpm`) | **Yes.** Link `libLLVM.so.22.1`; needs the `llvm-22` runtime package from <https://apt.llvm.org>. |
+| `x86_64-apple-darwin`, `aarch64-apple-darwin` (and the `.dmg`) | **Yes**, at `/opt/homebrew/opt/llvm@22/lib` (arm) or `/usr/local/opt/llvm@22/lib` (intel). `brew install llvm@22`. |
+
+A missing shared library is a `dyld`/`ld.so` failure at startup, before `finc`
+parses a single argument. On Linux, `ldd bin/finc` says which one is missing. On
+macOS the absolute path is baked into the binary, so `finc` will not start on a
+machine where LLVM is installed somewhere else.
+
+This is why `finn download --source` exists and why the musl archive is the
+portable choice on Linux. If you want a compiler that runs anywhere with no
+dependencies, take the musl archive.
+
 <!-- fin-verify-asset: finc-*-x86_64-unknown-linux-gnu.tar.gz -->
 ```sh
 # expect: finc 1.

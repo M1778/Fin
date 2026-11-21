@@ -284,10 +284,9 @@ sh install.sh  # pins the newest PUBLISHED release, or refuses; the commit is pr
 
           <h3 id="prebuilt">Prebuilt binaries <a href="#prebuilt" class="header-anchor">#</a></h3>
           <p>
-            Every release ships a build for each supported platform, so a toolchain
-            can be installed without a compiler or LLVM on the machine. Each asset
-            has a <code>.sha256</code> sidecar, and the release's <code>index.json</code>
-            is the authoritative checksum list that <code>finn</code> reads.
+            Every release ships a build for each supported platform. Each asset has a
+            <code>.sha256</code> sidecar, and the release's <code>index.json</code> is the
+            authoritative checksum list that <code>finn</code> reads.
           </p>
           <div class="table-wrapper">
             <table>
@@ -295,12 +294,28 @@ sh install.sh  # pins the newest PUBLISHED release, or refuses; the commit is pr
                 <tr><th style="width: 30%;">Platform</th><th style="width: 38%;">Asset</th><th style="width: 32%;">Notes</th></tr>
               </thead>
               <tbody>
-                <tr><td>Linux, glibc, x86_64 / aarch64</td><td><code>finc-&lt;ver&gt;-&lt;triple&gt;.tar.gz</code></td><td>Also as <code>.deb</code> and <code>.rpm</code> on x86_64.</td></tr>
-                <tr><td>Linux, any distro, x86_64</td><td><code>finc-&lt;ver&gt;-x86_64-unknown-linux-musl.tar.gz</code></td><td>Fully static: no dynamic loader, no LLVM runtime.</td></tr>
-                <tr><td>macOS, Intel / Apple silicon</td><td><code>.tar.gz</code> and <code>.dmg</code></td><td>Drag-to-install image, or unpack the archive.</td></tr>
-                <tr><td>Windows, x64 / arm64</td><td><code>.zip</code> and <code>-setup.exe</code></td><td>The installer adds an optional <code>PATH</code> entry.</td></tr>
+                <tr><td>Linux, glibc, x86_64 / aarch64</td><td><code>finc-&lt;ver&gt;-&lt;triple&gt;.tar.gz</code></td><td>Also as <code>.deb</code> and <code>.rpm</code> on x86_64. Needs the pinned LLVM runtime; see the note below.</td></tr>
+                <tr><td>Linux, any distro, x86_64</td><td><code>finc-&lt;ver&gt;-x86_64-unknown-linux-musl.tar.gz</code></td><td>Statically linked: needs no loader, no LLVM, no distro packages. ~93&nbsp;MB.</td></tr>
+                <tr><td>macOS, Intel / Apple silicon</td><td><code>.tar.gz</code> and <code>.dmg</code></td><td>Needs the pinned LLVM runtime at its Homebrew path; see the note below.</td></tr>
+                <tr><td>Windows, x64 / arm64</td><td><code>.zip</code> and <code>-setup.exe</code></td><td>Links LLVM statically. The installer adds an optional <code>PATH</code> entry.</td></tr>
               </tbody>
             </table>
+          </div>
+          <div class="callout callout-important">
+            <svg class="icon callout-icon" aria-hidden="true"><use href="assets/icons.svg#shield-check"></use></svg>
+            <div class="callout-body">
+              <strong>Which artifact needs LLVM installed</strong>
+              <p>The portable Linux glibc archives, <code>.deb</code> and <code>.rpm</code>, and both macOS
+              archives link the LLVM 22 shared library at run time. They need that library present on
+              the machine &mdash; the <code>llvm-22</code> package on Linux, or
+              <code>brew install llvm@22</code> on macOS, whose absolute install path is baked into the
+              binary. The <strong>static musl archive and the Windows builds do not</strong>: those link
+              LLVM in and run with nothing else installed.</p>
+              <p>On a machine where the shared library is missing, <code>finc</code> fails to start rather
+              than failing at build time. <code>finn download</code> runs <code>finc --version</code> after
+              installing and refuses a toolchain that cannot answer, so it reports this as a refused
+              install instead of leaving a binary that crashes later.</p>
+            </div>
           </div>
           <p>
             <a href="https://github.com/M1778/Fin/releases/latest">Download the latest release &#8594;</a>
