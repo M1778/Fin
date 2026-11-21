@@ -336,3 +336,48 @@ parent frame's size in the `CreateThread` path; that is a hypothesis, not a meas
 Workaround: allocate the buffer on the heap (`new [char, n]{}`) rather than as a local, which
 is what `logg` does. Recorded because the failure mode is a fail-fast abort with no diagnostic
 naming the buffer, so a reader hitting it has nothing to search for.
+
+---
+
+# Operational note: the `macos-15-intel` runner is unreliable, and the release gate is all-or-nothing
+
+Status: **observed across four release attempts on 2026-11-21**, not a compiler defect.
+
+## Symptom
+
+The `x86_64-apple-darwin` lane starts, gets through `Set up job`, `checkout` and
+`setup-toolchain`, then stops making progress. The job reports `in_progress` with **no step in
+progress** and `completed_at` null, and its log endpoint answers:
+
+```
+<?xml version="1.0" encoding="utf-8"?><Error><Code>BlobNotFound</Code>
+<Message>The specified blob does not exist.</Message>
+```
+
+That last part is the diagnostic that matters. A job that is genuinely running has a live log;
+a `BlobNotFound` log with no active step means the runner is gone and GitHub has not yet
+noticed. Waiting does not help -- one attempt sat for over forty minutes.
+
+The same lane succeeded on `44808655283`, so the label is valid and the code is fine. It is the
+runner.
+
+## What to do
+
+Cancel the run and re-run it. The tag is unchanged, so the artifacts are identical; nothing
+about the release is being decided differently. Two reruns passed after one such stall.
+
+## Why this is written down
+
+The release gate is `publish`, which needs all eight build lanes. One flaky runner therefore
+blocks the whole release, and the failure looks like a build problem: `publish` is marked
+failed, and the obvious reading is "something is wrong with the macOS x86_64 build".
+
+It is worth distinguishing these before investigating the compiler:
+
+- a lane with an **active step** and no log access is still building (logs are uploaded at the
+  end for some steps);
+- a lane with **no active step** and `BlobNotFound` is dead.
+
+A future improvement would make `publish` name the missing artifact rather than failing with a
+generic error, and offer `workflow_dispatch` a way to publish from the six lanes that succeeded
+when one runner is down. Neither is implemented; this note is the workaround.
