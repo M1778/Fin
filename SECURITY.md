@@ -116,8 +116,24 @@ file/network/process access, and C FFI. Treat it accordingly:
   *Released archives and packages* — every release carries
   `<asset>.sha256` sidecars and a generated `index.json` (the authoritative
   sums `finn` checks), so "did the download arrive intact?" is answerable —
-  but nothing is **signed**: GPG/Sigstore is deliberately not in this
-  fix's scope, and remains a separate maintainer decision.
+  but the **archives are not signed**: GPG/Sigstore over assets is
+  deliberately not in this fix's scope, and remains a separate maintainer
+  decision.
+  *The release tag* — annotated and signed with an SSH key, and the release
+  workflow refuses to build from a tag that carries no signature. So "who cut
+  this release, and from which commit?" is answerable even though the assets
+  are not individually signed:
+
+  ```sh
+  git tag -v v1.0.1        # with the signer's public key in allowedSignersFile
+  git cat-file -t v1.0.1   # `tag`, not `commit`: an annotated tag, not a bare pointer
+  ```
+
+  The distinction matters. A checksum answers "did these bytes arrive intact?",
+  and it answers it against the same server the bytes came from. A signature on
+  the tag answers "did the maintainer intend these bytes?", which the checksums
+  cannot. `v1.0.0` was cut before this rule was enforced and is annotated but
+  unsigned; every release from `v1.0.1` on is signed.
   *The source installer `install.sh`* — it never compiles a moving branch:
   without `FIN_REF` it pins the newest released tag and refuses when no
   release exists, and it prints the resolved commit, so "what did I just
