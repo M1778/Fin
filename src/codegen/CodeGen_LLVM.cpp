@@ -6712,9 +6712,18 @@ private:
         // pointer need not terminate -- and only dynamic char arrays going
         // out: a fixed extent has no static length, and any other element is
         // not what bytes are.
+        //
+        // `null` never reaches the measurement: `strlen(null)` is undefined behaviour and
+        // segfaults on every platform, which made `let a <[char]> = null;` abort before the
+        // program's first statement ran. A null string is the zero pair, and it is decided
+        // here rather than inside the branch below because a runtime guard is too late --
+        // LLVM is free to hoist the call above the comparison that guards it, and it does.
+        // A constant null is known before any IR is built, so no call is emitted at all.
         if (from.type.isPointer() && !from.type.pointee && to.isDynamicArray &&
             to.element && to.element->kind == CgType::Kind::Int &&
             to.element->bits == 8) {
+            if (llvm::isa<llvm::ConstantPointerNull>(from.value))
+                return llvm::Constant::getNullValue(to.llvmType);
             llvm::FunctionCallee measure = runtimeFn(
                 node, "strlen",
                 llvm::FunctionType::get(llvm::Type::getInt64Ty(ctx_),
@@ -6723,13 +6732,41 @@ private:
             if (!measure) return nullptr;
             llvm::Value* data = builder_.CreateBitCast(
                 from.value, llvm::PointerType::getUnqual(ctx_), "strdata");
-            llvm::Value* length = builder_.CreateCall(measure, {data}, "strlen");
+            // A non-constant string can still be null at run time, and the measurement
+            // cannot be hoisted past this test because the call is emitted in the branch
+            // that the test selects.
+            llvm::BasicBlock* nullBlock =
+                llvm::BasicBlock::Create(ctx_, "strarray.null", builder_.GetInsertBlock()->getParent());
+            llvm::BasicBlock* measureBlock =
+                llvm::BasicBlock::Create(ctx_, "strarray.measure", builder_.GetInsertBlock()->getParent());
+            llvm::BasicBlock* joinBlock =
+                llvm::BasicBlock::Create(ctx_, "strarray.join", builder_.GetInsertBlock()->getParent());
+
+            llvm::Value* isNull = builder_.CreateICmpEQ(
+                data, llvm::ConstantPointerNull::get(
+                          llvm::cast<llvm::PointerType>(data->getType())), "strdata.isnull");
+            builder_.CreateCondBr(isNull, nullBlock, measureBlock);
+
+            builder_.SetInsertPoint(measureBlock);
+            llvm::Value* measured = builder_.CreateCall(measure, {data}, "strlen");
+            llvm::Value* measuredTrunc =
+                builder_.CreateTrunc(measured, llvm::Type::getInt32Ty(ctx_));
+            builder_.CreateBr(joinBlock);
+            llvm::BasicBlock* measureEnd = builder_.GetInsertBlock();
+
+            builder_.SetInsertPoint(nullBlock);
+            builder_.CreateBr(joinBlock);
+
+            builder_.SetInsertPoint(joinBlock);
+            llvm::PHINode* lengthPhi = builder_.CreatePHI(
+                llvm::Type::getInt32Ty(ctx_), 2, "strarray.len");
+            lengthPhi->addIncoming(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 0),
+                                   nullBlock);
+            lengthPhi->addIncoming(measuredTrunc, measureEnd);
+
             llvm::Value* pair = llvm::UndefValue::get(to.llvmType);
             pair = builder_.CreateInsertValue(pair, data, {0u});
-            pair = builder_.CreateInsertValue(
-                pair,
-                builder_.CreateTrunc(length, llvm::Type::getInt32Ty(ctx_)),
-                {1u});
+            pair = builder_.CreateInsertValue(pair, lengthPhi, {1u});
             return pair;
         }
         // An `any` blob represents an existential type packed into `{i8* payload, i64 typeid}`.

@@ -6104,6 +6104,45 @@ BACKEND_TEST(Soundness_Codegen, APointerToAPointerIsDereferencedTwice) {
     EXPECT_EQ(b.out, "500 500 500\n") << b.why();
 }
 
+// A `null` string converted to a `[char]` must not be measured.
+//
+// `let a <[char]> = null;` lowers through the string-to-dynamic-array conversion, which
+// emits `strlen(s)` to get the length. `strlen` on a null pointer is undefined behaviour
+// and segfaults on every platform, so the program died before its first statement printed.
+//
+// Found by the fin-crypto work: a security library that validates input cannot inspect a
+// null array handle, because merely declaring one aborts the process. The guard has to be
+// in codegen -- no Fin-level check runs before the conversion that crashes.
+BACKEND_TEST(Soundness_Codegen, ANullStringToCharArrayDoesNotCallStrlen) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[char]> = null;\n"
+        "    if (a == null) {\n"
+        "        printf(\"null array is null\\n\");\n"
+        "    } else {\n"
+        "        printf(\"null array is not null\\n\");\n"
+        "    }\n"
+        "    printf(\"survived\\n\");\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "null array is null\nsurvived\n") << b.why();
+}
+
+// The non-null case must keep its length: the guard above is worthless if it turns every
+// string-to-array conversion into an empty array. `strings::to_chars` is the Fin-level route
+// (a string literal is not implicitly a `[char]`), so this pins the length it computes.
+BACKEND_TEST(Soundness_Codegen, AStringToCharArrayStillMeasuresItsLength) {
+    const Built b = build(std::string(kPrintf) +
+        "import { to_chars } from strings::std;\n"
+        "fun main() <noret> {\n"
+        "    let a <[char]> = to_chars(\"hello\");\n"
+        "    printf(\"len=%d\\n\", a.length);\n"
+        "    delete a;\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "len=6\n") << b.why() << " (5 bytes plus the NUL the copy includes)";
+}
+
 BACKEND_TEST(Soundness_Codegen, NullComparesEqualToNullAndAnAddressDoesNot) {
     // tests/samples/deeptest3.fin:62-76. `null` reaches the callee as an argument,
     // which is the case that has no declared type at the literal to take a
