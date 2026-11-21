@@ -816,3 +816,86 @@ opposite reason.
 macOS/glibc artifacts are not self-contained; `fields_of` is a signature-only marker (ADR
 0057); struct `==` stays declared-only (ADR 0036); self-hosted stage agreement is Linux-only;
 neither editor tool is published; the `macos-x86_64` runner flake has no fix.
+
+---
+
+# 2026-11-22 — post-release: five more defects, and the fuzzer finally builds
+
+The day after 1.0.1, working through the open issue list. Every item below was reproduced
+before it was touched, and every fix has a test that was red first.
+
+## The fuzzer builds, and that closed a real portability hole
+
+`Value::fields` was `std::vector<std::pair<std::string, Value>>` — a vector whose element type
+names the enclosing struct. libstdc++ tolerates the incomplete type there; Clang does not, so
+three translation units failed under Clang, so the compiler did not build under Clang at all,
+so `FIN_FUZZ=ON` (which needs Clang for libFuzzer) could never succeed. The claim "we fuzz the
+parser" was false.
+
+It is a `std::map<std::string, Value>` now. That is portable, and better on its own terms:
+field lookup was a linear scan and the constructor hand-rolled an O(n²) last-wins dedupe that
+`fields[name] = ...` does in one step.
+
+Verified: the Clang build links `fuzz/fin_parse_fuzz` (11 MB, libFuzzer + ASan + UBSan), and
+`./fin_parse_fuzz -max_total_time=30` ran **21,679 iterations with no crash**. A nightly job
+(`.github/workflows/fuzz.yml`) now keeps that true, with a persistent corpus so coverage
+accumulates.
+
+## String escapes were silently dropping their backslash
+
+`"caf\xc3\xa9"` produced `cafxc3xa9` — nine bytes instead of five — and `"caf\u00e9"` produced
+`cafu00e9`. Both decoders (codegen and the comptime interpreter) had a `default:` arm that kept
+the character and dropped the backslash, which is a silent wrong answer of the kind the backend
+invariant forbids.
+
+There are now **one** decoder, `src/utils/StringEscapes.{hpp,cpp}`, used by both, supporting
+`\xNN` (a raw byte) and `\uNNNN` / `\u{NNNNNN}` (a code point, encoded as UTF-8). Duplicated
+tables drift, and a literal that meant one thing at run time and another under `comptime` was
+the drift this removed.
+
+Verified: `\xc3\xa9` is 5 bytes, `\u00e9` and `\u{e9}` both 5, `\u{1F600}` is 4 (the emoji case
+that catches a two-byte-only encoder). A malformed `\x9` or an unpaired surrogate keeps its
+character rather than emitting half a character.
+
+## `process::std` reported the wait status as the exit code
+
+`exec_command("sh -c 'exit 7'").exit_code` was **1792**, not 7. `pclose` and `system` answer a
+wait status on POSIX and both were returned raw, so every caller comparing `== 1` was reading
+256 and `is_success` was the only predicate that happened to work. Present since the standard
+library's second day; nothing tested it.
+
+Decoded now: `(status >> 8) & 255`, with a signalled child answering 128 + signal — the shell
+convention. Windows returns the code directly and is passed through by `#c_ifdef`.
+
+## Four guide pages said features were missing that work
+
+Each was verified by compiling and running before the page was rewritten:
+
+| Claim | Reality |
+| --- | --- |
+| "multiple constructors are refused" | arity-distinct ones dispatch; same-arity ambiguity is refused *by name* |
+| "the compound-assign forms are not in the grammar" | five of six work; only `^=` is absent |
+| "`match` is not implemented" | it is an expression, `=>` arms, `_` wildcard (ADR 0050) |
+| "the backend cannot box or cast through `any`" | boxing, exact-type unbox, equality all work, and a mismatched unbox blames |
+
+All four examples are compiled by the docs gate: 80 examples pass, up from 76.
+
+## The collection JSON decoders accepted trailing junk
+
+`json_decode_int("5 junk")` refused and `json_decode_int_array("[1,2] junk")` succeeded. The
+module header claimed every decoder made a trailing-data check; three did not. Six call sites
+fixed (two per decoder, including the empty-collection exits), pinned by
+`Soundness_Serde.ACollectionDecoderRefusesTrailingData`.
+
+## Also
+
+The v1.0.1 release page carried 14 lines of packaging notes while a 247-line narrative sat in
+the repository; it now carries the narrative plus the generated asset block.
+
+## Not settled, and deliberately
+
+`base64_decode` **blames** on malformed input rather than refusing with a value. That aborts a
+caller parsing untrusted bytes, which is worth a ruling — but `blame` is a documented raise
+(ADR 0053), the existing test asserts the abort, and the function returns a non-nullable
+`string`. Changing it is a signature decision, not a bug fix. Issue #140 is closed with the
+question recorded rather than answered unilaterally.
