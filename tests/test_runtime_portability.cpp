@@ -152,22 +152,17 @@ import { run_command, exec_command, ProcessResult, is_success, free_process_resu
 import { equals } from strings::std;
 fun main() <noret> {
     blame run_command("exit 0") == 0;
-    #c_ifdef FIN_TARGET_WINDOWS
+    // 7 on every platform. This asserted 1792 on POSIX, which is 7 << 8 -- the raw wait
+    // status `system` returns. Pinning the encoding as if it were the answer is what let
+    // the defect stand: the test agreed with the bug. Issue #126.
     blame run_command("exit 7") == 7;
-    #c_else
-    blame run_command("exit 7") == 1792;
-    #c_endif
     let captured <ProcessResult> = exec_command("echo first&&echo second");
     blame is_success(captured);
     blame equals(captured.output, "first\nsecond\n");
     free_process_result(captured);
     let failed <ProcessResult> = exec_command("exit 7");
     blame !is_success(failed);
-    #c_ifdef FIN_TARGET_WINDOWS
     blame failed.exit_code == 7;
-    #c_else
-    blame failed.exit_code == 1792;
-    #c_endif
     blame equals(failed.output, "");
     free_process_result(failed);
     printf("process ok\n");
