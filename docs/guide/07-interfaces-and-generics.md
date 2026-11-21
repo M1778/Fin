@@ -99,11 +99,31 @@ fun identity<T: Number>(value: T) <T> { return value; }
 
 ## Erasure and meta-types
 
-An erasure marker such as `Castable` changes the generic strategy. The backend
-cannot perform general boxing, casts, or calls through `any` yet. Some opaque
-`any` storage can have a layout without supporting reads or writes; that is not
-a dynamically typed application value. A template that nobody instantiates may
-check and build while a call to it fails.
+An erasure marker such as `Castable` changes the generic strategy.
+
+`any` supports **value boxing, exact-type unboxing, and equality**. Boxing a scalar stores it
+inline, so no allocation happens:
+
+```fin
+fun main() <noret> {
+    let a <any> = 42;
+    let b <any> = "text";
+    blame cast<int>(a) == 42;
+    blame cast<string>(b) == "text";
+}
+```
+
+An unbox names the held type **exactly**, and a mismatch blames rather than reading the wrong
+type:
+
+```
+Fin blames an 'any' unbox to 'a pointer' holding another type
+```
+
+What `any` is not: it is not a promise of general dynamic dispatch. Calling a method through
+`any` without first unboxing to a concrete type is not something to rely on, and `object` does
+not change that. A template that nobody instantiates may check and build while a call to it
+fails.
 
 `$type`, `$struct`, `$interface`, and `$enum_member` describe compile-time values.
 They are distinct types. Their presence in a signature does not imply that the
