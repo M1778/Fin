@@ -3638,7 +3638,14 @@ fun main() <noret> {
     let ok <ProcessResult> = exec_command("true");
     printf("is_success=%d\n", cast<int>(is_success(ok)));
     free_process_result(&ok);
-    printf("signal=%d\n", run_command("sh -c 'kill -9 $$'"));
+    // A signalled child is asserted through `exec_command` rather than `run_command`, because
+    // the shell narrates a `run_command` kill on stdout and the wording is the shell's, not
+    // Fin's: "Killed" appeared in the capture on some runners and not others. `exec_command`
+    // captures the child's own output, which for `kill -9 $$` is nothing, so the assertion is
+    // about the decoded status and nothing else.
+    let killed <ProcessResult> = exec_command("sh -c 'kill -9 $$'");
+    printf("signal=%d\n", killed.exit_code);
+    free_process_result(&killed);
 }
 )FIN");
     // 7 and 3 and 1 rather than 1792, 768 and 256; 137 is 128 + SIGKILL(9), the shell's
