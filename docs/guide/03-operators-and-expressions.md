@@ -25,8 +25,21 @@ Assignment forms include `=`, `+=`, `-=`, `*=`, and `/=`. Prefix and postfix
 `++`/`--` work on integers. `<<` and `>>` shift integers. Binary bitwise
 `&`, `|`, and `^` work on integer operands: `|` binds loosest, `&` tightest,
 below shifts and above `==`. Unary `&` still takes an address, and `|` still
-separates types in a constraint set. The compound-assign forms (`&=`, `|=`,
-`^=`, `%=`, `<<=`, `>>=`) are not in the grammar; write `a = a & b` instead.
+separates types in a constraint set. Five compound-assign forms work — `&=`, `|=`, `%=`,
+`<<=` and `>>=` — and **`^=` does not**: it is not in the grammar, so write `a = a ^ b` for
+that one. Each of the five was compiled and run to check this table rather than read off the
+grammar:
+
+```fin
+fun main() <noret> {
+    let a <int> = 12; a &= 10;   // 8
+    let b <int> = 12; b |= 3;    // 15
+    let c <int> = 12; c %= 5;    // 2
+    let d <int> = 1;  d <<= 4;   // 16
+    let e <int> = 32; e >>= 2;   // 8
+    blame a == 8 && b == 15 && c == 2 && d == 16 && e == 8;
+}
+```
 
 ```fin
 fun main() <noret> {
