@@ -286,3 +286,53 @@ has already found the library.
 Fixed in `1c0c658`: the library is named only when an object being linked mentions an LLVM
 symbol. Repositories that added `FIN_LDFLAGS` overrides can drop them; the release notes for
 1.0.1 say so.
+
+---
+
+# Known limitation: the Windows CRT's `"ab"` mode is not an atomic append
+
+Status: **confirmed on `windows-msvc`**, found 2026-11-21 by the `logg` hardening.
+
+Four threads appending to one log file through `fopen(path, "ab")` lost 6 of 80 records while
+every call returned success. The CRT implements append as seek-to-end followed by write, so two
+threads that seek before either writes land on the same offset and one record overwrites the
+other. The file is well-formed; it is simply missing lines.
+
+A logger that silently drops records under concurrency is the one failure a log cannot afford,
+because the missing lines are exactly the ones that would have explained what happened.
+
+## What works instead
+
+`FILE_APPEND_DATA` in a `CreateFileA` disposition is an atomic append on Windows, and
+`O_APPEND` is atomic on POSIX. `logg` uses the former; the workaround is recorded here because
+`lib/std`'s `fs::append_string` uses `fopen(..., "ab")` and inherits the same behaviour.
+
+## Does this affect `fs::append_string`
+
+Yes, on Windows, for concurrent appenders. It is documented in `lib/std/fs.fin` beside the
+function; the note points at `stdio::std`'s `File` operations for a caller who needs atomic
+append. Making `append_string` itself atomic means either a Windows-only `CreateFileA` path or
+an `O_APPEND` path, which is a signature-preserving change worth doing and not done here.
+
+## Not fixed in this release
+
+Changing the append path is a behavioural change to a shipped stdlib function on a platform the
+release cannot test locally, and 1.0.1 is a patch. Recorded rather than risked.
+
+---
+
+# Known limitation: a large stack buffer plus a spawned thread overflows the Windows stack
+
+Status: **confirmed on `windows-msvc`** by the same work.
+
+A 64 KiB `[char]` buffer declared as a function local overflows the default Windows thread
+stack (`0xC0000409`, STACK_BUFFER_OVERRUN fail-fast) when that function also spawns a thread.
+The same buffer is fine single-threaded, and the same code is fine on Linux and macOS.
+
+The interaction is the surprising part: the buffer is not on the spawned thread's stack, so the
+failure is not the obvious one. Presumably the thread's stack reservation interacts with the
+parent frame's size in the `CreateThread` path; that is a hypothesis, not a measurement.
+
+Workaround: allocate the buffer on the heap (`new [char, n]{}`) rather than as a local, which
+is what `logg` does. Recorded because the failure mode is a fail-fast abort with no diagnostic
+naming the buffer, so a reader hitting it has nothing to search for.
