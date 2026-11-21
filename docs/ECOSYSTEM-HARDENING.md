@@ -199,6 +199,22 @@ compiler older than the one in the working tree.
 
 ---
 
+### Every library passes from a fresh clone
+
+Not from a working tree that has been built and rebuilt during the work, which is where a
+missing file hides. A `git clone --depth 1` of each, against `finc 1.0.1`:
+
+| Repository | Result |
+| --- | --- |
+| `finson` | `finson: all tests passed` |
+| `xtest` | `SELF-TESTS PASSED` |
+| `zhttp` | `zhttp: all tests passed` (real loopback traffic) |
+| `fin-crypto` | `all fin-crypto tests passed at -O0 and -O2` |
+| `fin-kv` | `SMOKE OK` |
+| `fin-validate` | 11 scenarios, 4 boundary groups, 10,000 reuse cycles |
+| `fin-ssg` | `E2E OK` |
+| `logg` | `logg: all tests passed` |
+
 ### A consumer can install and use them
 
 The packaging question the audit raised was whether `finn add` produces a package a program can
