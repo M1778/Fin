@@ -86,8 +86,23 @@ must preserve the relationship between status and fields.
 
 ## Reflection and matching
 
-Fin has no `match` statement. Use `if` and plain-enum comparisons for executable
-branches. `enums::std` declares `getkeyid(value)` and `keyidof(member)`; `keyidof`
+`match` is an expression and returns a value. Arms use `=>`, and the wildcard is `_`:
+
+```fin
+fun main() <noret> {
+    let x <int> = 2;
+    let label <string> = match (x) {
+        1 => "one",
+        2 => "two",
+        _ => "many"
+    };
+    blame label == "two";
+}
+```
+
+It dispatches over enum members, nullable presence, and integer, string and bool constants.
+Arms must be exhaustive, and a match over constants needs the wildcard. Guards (`case x if
+cond`) are not implemented (ADR 0050). `enums::std` declares `getkeyid(value)` and `keyidof(member)`; `keyidof`
 expects the `$enum_member` meta-type. A bare alias to the member can type-check
 where a qualified expression resolves as a constructor or value instead. The
 builtin macro `enum_from!(value)` answers a value's member name
