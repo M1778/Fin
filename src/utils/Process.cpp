@@ -36,6 +36,8 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <sstream>
 
 #ifdef _WIN32
@@ -81,9 +83,17 @@ std::vector<std::string> splitFlags(const char* text) {
     return flags;
 }
 
-// What the pre-port Driver::runLinker appended after `-o <output>`: the
-// self-host compiler's object calls the LLVM C API, so the link needs libLLVM.
-std::vector<std::string> defaultLinkLibs() {
+// Adjustable per host: whether `-lLLVM-<major>` belongs on the link line depends on what
+// the objects being linked actually reference.
+//
+// It used to be unconditional, on the grounds that "the self-host compiler's object calls
+// the LLVM C API". That is true of an object built from the self-hosted stage's own source
+// and false of everything the reference compiler emits: `finc hello.fin -c` produces an
+// object whose only undefined symbol is `printf`. The cost of adding it anyway was a build
+// failure on any machine without the LLVM *development* package -- which is every CI
+// runner and most users' machines, since a released finc needs only the runtime. Matching
+// the flag to the need is what makes `finc -o app` work with nothing but a C toolchain.
+std::vector<std::string> defaultLinkLibs(bool objectsReferenceLLVM) {
 #ifdef FIN_LLVM_MAJOR
 #define FIN_STRINGIFY_HELPER(x) #x
 #define FIN_STRINGIFY(x) FIN_STRINGIFY_HELPER(x)
@@ -93,6 +103,15 @@ std::vector<std::string> defaultLinkLibs() {
 #else
     const std::string llvmLib = "-lLLVM-22";
 #endif
+    if (!objectsReferenceLLVM) {
+#ifdef _WIN32
+        // ws2_32 is not an LLVM matter: the stdlib's networking layer calls Winsock, and
+        // the import library has to be named for the linker to resolve it.
+        return {"-lws2_32"};
+#else
+        return {"-lm"};
+#endif
+    }
 #ifdef __APPLE__
     // Apple ld(1) rejects the GNU --as-needed option, and Homebrew's keg
     // ships libLLVM.dylib rather than libLLVM-<major>: -L<keg> -lLLVM -lm,
@@ -216,6 +235,31 @@ int runProcess(const std::vector<std::string>& args,
 #endif
 }
 
+// Whether the objects being linked reference the LLVM C API.
+//
+// The cheap and honest test: read each object's symbol table and look for an undefined
+// `LLVM`-prefixed entry. `--as-needed` only helps after the linker has already found the
+// library, so an unconditional `-lLLVM-<major>` still fails on a machine without the
+// development package -- which is what it did for every user and every CI runner whose
+// compiler came from a release artifact.
+//
+// Deliberately a scan of the file's bytes rather than an ELF/COFF/Mach-O parser: this
+// answers one question, and a false positive costs the same `-lLLVM` the code used to add
+// unconditionally, while a false negative would drop a library something needs. Checking
+// for the presence of any `LLVM` identifier is therefore the safe direction -- and the
+// object a reference-compiled program produces contains none, because the C API belongs to
+// the self-hosted stage's own build.
+bool objectsReferenceLLVM(const std::vector<std::string>& objects) {
+    for (const auto& path : objects) {
+        std::ifstream in(path, std::ios::binary);
+        if (!in) continue;
+        std::string bytes((std::istreambuf_iterator<char>(in)),
+                          std::istreambuf_iterator<char>());
+        if (bytes.find("LLVM") != std::string::npos) return true;
+    }
+    return false;
+}
+
 std::vector<std::string> linkCommand(const std::vector<std::string>& objects,
                                      const std::string& output) {
     const char* override = std::getenv("FIN_CC");
@@ -237,7 +281,7 @@ std::vector<std::string> linkCommand(const std::vector<std::string>& objects,
         const auto flags = splitFlags(ldflags);
         args.insert(args.end(), flags.begin(), flags.end());
     } else {
-        const auto libs = defaultLinkLibs();
+        const auto libs = defaultLinkLibs(objectsReferenceLLVM(objects));
         args.insert(args.end(), libs.begin(), libs.end());
     }
     return args;
