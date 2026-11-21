@@ -88,6 +88,9 @@ jobs:
         run: |
           set -eu
           export PATH="$HOME/.local/bin:$PATH"
+          # A fresh runner has no default profile; this machine had one left over from an
+          # earlier build, which is why the workflow worked here and not in CI.
+          conan profile detect --force
           conan install . --build=missing -s build_type=Debug \
             -c tools.cmake.cmaketoolchain:generator=Ninja
 
