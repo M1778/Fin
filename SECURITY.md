@@ -124,10 +124,17 @@ file/network/process access, and C FFI. Treat it accordingly:
   this release, and from which commit?" is answerable even though the assets
   are not individually signed:
 
+  The public key is at `docs/m1778-release-signing-keys.pub`, so the check does
+  not depend on trusting a key fetched from somewhere else:
+
   ```sh
-  git tag -v v1.0.1        # with the signer's public key in allowedSignersFile
+  echo "m1778.pc@gmail.com $(cat docs/m1778-release-signing-keys.pub)" > /tmp/allowed
+  git config gpg.ssh.allowedSignersFile /tmp/allowed
+  git tag -v v1.0.1        # Good "git" signature for m1778.pc@gmail.com
   git cat-file -t v1.0.1   # `tag`, not `commit`: an annotated tag, not a bare pointer
   ```
+
+  Fingerprint: `SHA256:EL+/YH7aQLwXyWuJ8UIrzMXn0YHrPJY9nJ3ogUE/nxs` (ED25519).
 
   The distinction matters. A checksum answers "did these bytes arrive intact?",
   and it answers it against the same server the bytes came from. A signature on
