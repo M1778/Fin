@@ -1,10 +1,14 @@
 # Fin ecosystem: production hardening
 
 A record of what was changed, what was proven, and what is still open, across the compiler,
-the package manager, eight standard-library projects, and two editor tools.
+the package manager, eight libraries, two editor tools, and the two downstream consumers.
 
-Written to be read by someone who was not here. Every claim names its evidence; where there
-is no evidence, the entry says so.
+Written to be read by someone who was not here. Every claim names its evidence; where there is
+no evidence, the entry says so.
+
+**Status: v1.0.1 is published**, and every repository below is green. The four compiler defects
+found along the way are fixed and shipped; five platform limitations are documented rather than
+fixed, and the sections say which is which.
 
 ---
 
@@ -12,9 +16,9 @@ is no evidence, the entry says so.
 
 | | State |
 | --- | --- |
-| `finc 1.0.1`, contract 3 | Source complete; local suite **3,269/3,269** |
+| `finc 1.0.1`, contract 3 | **Published**, 41 assets, signed tag, 3,278 tests green |
 | v1.0.0 | Published, **marked prerelease**, kept as a record |
-| v1.0.1 | Gate-first: tagged only after CI is green on the commit |
+| v1.0.1 artifacts | Verified by download, not by the build machine |
 | v1.0.0's defect | glibc x86_64 segfaulted on every host but the builder |
 
 v1.0.0 is not being repaired. Rewriting a published artifact is how two different binaries
@@ -52,6 +56,25 @@ binary on the one machine where its dependencies exist.
 
    Making the macOS builds self-contained is a real piece of work (static LLVM on darwin) and
    is **not** done. Naming it is the honest interim state.
+
+### Verified from the downloads
+
+Each row is a download of the published asset and a command run against it. This is the check
+that would have caught 1.0.0, which was green because the only machine that ran it was the one
+that built it.
+
+| Artifact | Result |
+| --- | --- |
+| `x86_64-unknown-linux-musl` | `finc 1.0.1 (contract 3)`, static-pie; compiles a program importing `strings::std` and `parse::std`, so the imported-const fix is exercised in a release binary; `bin/finfmt` present |
+| `x86_64-unknown-linux-gnu` | **The artifact that segfaulted in 1.0.0** answers `--version` and compiles the same program; `ldd` shows the documented `libLLVM.so.22.1` |
+| `.deb` | `Depends: libllvm22` — the runtime is pulled in rather than assumed |
+| `aarch64-apple-darwin` | Load command is `/opt/homebrew/opt/llvm@22/lib/libLLVM.dylib`, exactly what `INSTALL.md` says |
+| `finn download` (no arguments) | installs 1.0.1; `finn init` → `finn build` → the program runs |
+| `finn`'s release-smoke CI | green on Linux, macOS and Windows against the published release |
+
+The macOS artifacts were **inspected, not executed** here: this host cannot run a Mach-O
+binary. Their dependency list matches the documentation, and finn's release-smoke job on a real
+macOS runner is what runs them — which is why that job exists.
 
 ### Other compiler-repo work
 
