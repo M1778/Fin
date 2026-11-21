@@ -796,6 +796,21 @@ is how `fin-validate`'s untested `max_len` and fin-ssg's unparsed Windows branch
 `fin-vscode` and `fin-lsp` build on `docs/stdlib-index.json` (49 modules, 543 members,
 `--check`ed in CI). Neither is in a package registry, and the site says so.
 
+## Proven, in the way that counts
+
+`v1.0.1` is published: 41 assets, signed tag, not a prerelease. What follows was verified by
+downloading the assets and running them, because 1.0.0 was green and broken for exactly the
+opposite reason.
+
+- musl x86_64: `finc 1.0.1 (contract 3)`, static-pie, compiles a program importing both
+  `strings::std` and `parse::std`, and ships `bin/finfmt` -- which no earlier release had.
+- gnu x86_64: **the artifact that segfaulted in 1.0.0 answers `--version` and compiles.**
+- `.deb`: `Depends: libllvm22`.
+- darwin aarch64: the load command is the Homebrew path `INSTALL.md` documents. Inspected, not
+  executed; this host cannot run Mach-O.
+- `finn download` with no arguments installs 1.0.1, and `finn init` → `finn build` → run works.
+  Its release-smoke CI job is green on Linux, macOS and Windows against the published release.
+
 ## Not done
 
 macOS/glibc artifacts are not self-contained; `fields_of` is a signature-only marker (ADR
