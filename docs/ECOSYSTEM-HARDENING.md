@@ -109,16 +109,51 @@ Each was hardened in its own repository. The pattern is the same: fix what is ac
 prove it by compiling and running, header every file, and make the README say what the library
 does **and does not** do.
 
+All eight are green on Linux, macOS and Windows, and each lane executes tests rather than
+type-checking.
+
 | Repository | The work that mattered |
 | --- | --- |
-| `finson` | Bounded parsing: depth limits enforced rather than documented, malformed input rejected, owned values leak-free on error paths |
-| `xtest` | Portable regression tests; JUnit output checked for well-formedness; the framework made to fail when it should |
-| `zhttp` | Socket reads/writes at an offset, loopback tests served from a thread, bounded reads against hostile input |
-| `fin-crypto` | Windows secure randomness; test vectors; a corrected claim about a compiler blocker (see below) |
-| `fin-kv` | Safe Linux file flags on x86-64 and ARM64; POSIX-only status stated honestly |
-| `fin-validate` | Precise, reusable validation with explicit result ownership; 10,000 failure/success reuse cycles |
-| `fin-ssg` | Deterministic output, escaping, portable smoke suite |
-| `logg` | Windows/macOS logging regression runs without POSIX assumptions; stream-safe escaping |
+| `finson` | Bounded parsing: depth limits enforced rather than documented, malformed input rejected, owned values leak-free on error paths; three segfaults fixed; 7,508 differential cases against Python's `json` |
+| `xtest` | Returned invalid XML 1.0 text in JUnit attributes and segfaulted on null input; now 6 lanes executing, 224 external checks, and proven to fail when the framework is weakened |
+| `zhttp` | Headers could be injected through a value, reads could be short, and there was no request deadline; 118 protocol cases over real loopback traffic |
+| `fin-crypto` | FIPS 180-4 and RFC 4231 vectors, Windows `rand_s`, and a corrected claim about a compiler blocker (see below) |
+| `fin-kv` | Boundary tests at every frame, key and value limit; byte cap enforced and measured |
+| `fin-validate` | An untested `max_len` was the one proven correctness hole (see below); 10,000 reuse cycles; email shape limits |
+| `fin-ssg` | Two platform branches that had never been parsed, both with real syntax errors (see below); deterministic output; portable smoke suite |
+| `logg` | O0/O2 runs, JSON round-trip parsing of every emitted record, fatal and error subprocess checks |
+
+### fin-ssg: a platform branch nobody had ever parsed
+
+The Windows branch of `src/vendor/platform.fin` had never been compiled by any lane, and it
+did not compile. Three defects, all in code that only Windows can see:
+
+- `@define platform_rename(from: string, ...)` -- `from` is a hard keyword, so the lexer emits
+  `KW_FROM` before the parser reads a parameter list.
+- `if ((attributes & 0x10) != ...)` -- Fin has no hex literals at all. `0x10` lexes as `0`,
+  then `x10`, and the parser says `expected ';'`.
+- `open_in_directory` and `platform_open_directory` were missing an argument every call site
+  passes, and `DirHandle` (a `long` on Windows, an `int` on POSIX) was stored in `int` locals.
+
+Then the macOS branch turned out to name glibc's `__errno_location` for the `errno` accessor,
+where Darwin has `__error`, so the whole module failed to link; and `struct stat` offsets were
+hardcoded to Linux's layout, which would have answered the wrong kind for every name on macOS.
+
+That last pair is a wrong-value bug rather than a crash, which is the worse kind: a directory
+walk that quietly stops early looks like an empty site, not a broken one.
+
+The fix that keeps this from recurring is a script, `tests/tools/check_foreign_branches.py`,
+which flips the guards so the other platform's branch becomes the live one, runs the front end
+on any host, and restores the file in a `finally`. It runs in CI on every Linux lane. What
+used to cost a ten-minute round trip that reported one error at a time is now a local check.
+
+### fin-validate: the one proven correctness hole
+
+A mutation adding 100 to the `max_len` comparison passed the entire suite. `min_len` had a
+test and `max_len` did not, so the upper bound of a validation library was never exercised --
+the one thing an upper bound exists for. Four boundary cases were added (exactly at the limit,
+one over, well over, and a field declared `-1` accepting 5,000 bytes), and the mutation now
+fails by name.
 
 ### One agent found a bug that did not exist, and that is worth recording
 
