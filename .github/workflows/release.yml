@@ -23,8 +23,15 @@
 # Each sha256 is published twice -- as an `<asset>.sha256` sidecar next to the
 # asset, and inside the version index.  The index is authoritative; the sidecar
 # is for a human with curl.  The index is generated here on every release and is
-# never hand-maintained, and it is fetched by `finn` at runtime from
-# <server>/<repo>/releases/latest/download/index.json.
+# never hand-maintained.
+#
+# It is fetched by `finn` at runtime two ways, and the difference is load-bearing:
+# a named version reads `<server>/<repo>/releases/download/v<version>/index.json`,
+# while no version asks the releases API for the newest published release and
+# then reads that tag's index.  The `<server>/<repo>/releases/latest/download/`
+# shortcut is deliberately NOT used: GitHub only resolves it to a stable release,
+# so while every Fin release is a prerelease it 404s on a release that exists.
+# That is exactly the bug `finn download` shipped with.
 #
 # Supply chain: every target also ships a CycloneDX SBOM
 # (`finc-<semver>-<target>.cdx.json`, hashed like every other asset), and the
