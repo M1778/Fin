@@ -414,6 +414,34 @@ finc --debug-codegen program.fin -o program
 # 5. Inspect AST structure
 finc --debug-ast program.fin</code></pre>
           </div>
+
+          <h3 id="editors">Editors <a href="#editors" class="header-anchor">#</a></h3>
+          <p>
+            The compiler emits machine-readable diagnostics, and the editor support is built on
+            that contract rather than on a second, divergent analyser:
+          </p>
+          <div class="code-block">
+            <div class="code-header">
+              <span class="code-lang">bash</span>
+              <button type="button" class="copy-btn"><span>Copy</span></button>
+            </div>
+            <pre><code class="language-bash">finc program.fin --diagnostics=json --color=never
+# {"kind":"diagnostic","severity":"error","code":"E0301","message":"...",
+#  "file":"program.fin","line":2,"column":5,"endLine":2,"endColumn":21,
+#  "help":null,"attribution":null}
+# {"kind":"summary","errors":1,"warnings":0,"exitCode":1,"status":"failed"}
+
+finc --explain E0301      # the long form of one code
+finc --explain list       # all 34
+finfmt program.fin        # the formatter; --check writes nothing</code></pre>
+          </div>
+          <p>
+            Grammars for TextMate, highlight.js and Pygments ship in the
+            <code>editors/</code> directory, and <code>finfmt</code> is the same formatter used
+            in CI. A machine-readable index of the standard library's 49 modules and 543 public
+            members is published at <code>docs/stdlib-index.json</code> for tools that want
+            hovers and completions without embedding a Fin parser.
+          </p>
         </article>
 
         <!-- Hello World -->
@@ -1134,6 +1162,7 @@ fun calculate() &lt;int&gt; {
         <li class="toc-item"><a href="#installation" class="toc-link">Installation &amp; Build</a></li>
         <li class="toc-item"><a href="#prebuilt" class="toc-link">Prebuilt Binaries</a></li>
         <li class="toc-item"><a href="#quickstart" class="toc-link">Quickstart Guide</a></li>
+        <li class="toc-item"><a href="#editors" class="toc-link">Editors</a></li>
         <li class="toc-item"><a href="#hello-world" class="toc-link">Hello, World!</a></li>
         <li class="toc-item"><a href="#variables-types" class="toc-link">Variables &amp; Types</a></li>
         <li class="toc-item"><a href="#control-flow" class="toc-link">Control Flow</a></li>
