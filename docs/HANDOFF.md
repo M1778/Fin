@@ -892,6 +892,27 @@ fixed (two per decoder, including the empty-collection exits), pinned by
 The v1.0.1 release page carried 14 lines of packaging notes while a 247-line narrative sat in
 the repository; it now carries the narrative plus the generated asset block.
 
+## Three tests encoded something other than what they were named for
+
+Worth recording as a pattern, because all three looked fine and all three allowed a defect to
+stand or made a fix look like a regression:
+
+1. `Soundness_RuntimePortability.ProcessCapturesOutputAndPreservesFailureStatus` asserted
+   `run_command("exit 7") == 1792` on POSIX and `== 7` on Windows. The platform split was the
+   tell: `exit 7` cannot mean two numbers. It was pinning the raw wait status as if it were the
+   exit code.
+2. `Soundness_Encoding.Base64RejectsMalformedPaddingStructure` asserts a non-zero exit and a
+   `blame` message. That is arguably correct — `blame` is a documented raise (ADR 0053) — but
+   it means the "does this decoder refuse untrusted input by value" question is answered by the
+   test rather than by the language, and a change to that answer would have to rewrite it.
+3. My own `Soundness_Process.TheExitCodeIsDecodedNotTheRawWaitStatus` passed locally and failed
+   on every CI lane because the shell prepends `Killed` to the capture. Every value it asserted
+   was right; the test was asserting dash's stderr handling.
+
+The checks that catch this class: does the assertion name a property or a number, and does it
+pass on more than one platform? A test that passes only on the machine it was written on is
+usually testing the machine.
+
 ## Not settled, and deliberately
 
 `base64_decode` **blames** on malformed input rather than refusing with a value. That aborts a
