@@ -90,6 +90,28 @@ engine silently ignores. **Comments and strings never highlighted in any editor
 consuming the shipped grammar.** The generator, the grammar and the validator —
 which had mirrored the same wrong assumption — are all corrected.
 
+Two editors ship separately and are built on the diagnostic contract above rather
+than on a second analyser, so a hover and a squiggle cannot disagree:
+
+- **`fin-vscode`** — highlighting, live diagnostics, formatting, hover and
+  completion from the standard library's own sources, an outline, and snippets.
+  Packs to a `.vsix`; not on the Marketplace yet, which needs a publisher token.
+- **`fin-lsp`** — the same support as a standalone Language Server, so Neovim,
+  Helix, Emacs and Zed get it too. Dependency-free, one `npm pack` tarball.
+
+Both were verified against this compiler rather than against a description of it,
+and the work found two contract facts that had never been written down:
+
+- `--diagnostics=json` writes its JSONL to **stderr**, not stdout. The contract
+  says so; the guidance circulating around it did not, and an editor that reads
+  stdout sees zero bytes.
+- `column` is a **UTF-8 byte** offset, not a character offset. After a non-ASCII
+  character every naive `column - 1` is wrong, and the squiggle lands to the left
+  of the word. The contract now states this and a test pins it.
+
+`finfmt`, which both tools use, was not in any release before this one — see
+below.
+
 ## Toolchain and operations
 
 - `install.sh` resolves the newest **published release** rather than the newest
