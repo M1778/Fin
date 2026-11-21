@@ -293,6 +293,11 @@ jobs:
           # `--version` below cannot catch it -- the trap needs a differently
           # linked library to appear, which is exactly what a user has.
           uv run --no-project python .github/scripts/check_elf_copy_relocs.py "$binary"
+          # What the binary needs from a *user's* machine. `--version` below cannot see
+          # this: it runs on the one machine where every dependency is present. The
+          # v1.0.0 macOS artifacts link an absolute Homebrew LLVM path, which passes on
+          # the runner and fails on a user's Mac.
+          uv run --no-project python .github/scripts/check_runtime_deps.py "$binary" --target "$FIN_TARGET"
           uv run --no-project python tests/tools/check_docs.py --finc "$binary"
           # Every artifact class below repackages these same bytes, so the
           # version proof lives here once: the binary that ships answers.
