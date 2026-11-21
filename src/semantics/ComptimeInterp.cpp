@@ -39,6 +39,7 @@
 #include <limits>
 
 #include "CompilerApi.hpp"
+#include "../utils/StringEscapes.hpp"
 #include "../ast/NodeKind.hpp"
 #include "../ast/StructuralWalk.hpp"
 #include "../ast/decls/FunctionDecl.hpp"
@@ -163,25 +164,9 @@ std::string decodeStringLiteral(const std::string& lexeme) {
         body.back() == body.front()) {
         body = body.substr(1, body.size() - 2);
     }
-    std::string out;
-    for (std::size_t i = 0; i < body.size(); ++i) {
-        if (body[i] != '\\' || i + 1 >= body.size()) {
-            out += body[i];
-            continue;
-        }
-        const char c = body[++i];
-        switch (c) {
-            case 'n': out += '\n'; break;
-            case 't': out += '\t'; break;
-            case 'r': out += '\r'; break;
-            case '0': out += '\0'; break;
-            case '\\': out += '\\'; break;
-            case '\'': out += '\''; break;
-            case '"': out += '"'; break;
-            default: out += c; break;
-        }
-    }
-    return out;
+    // The same decoder codegen uses: a literal must not mean one thing at run time and
+    // another under `comptime`, and two copies of this switch is how that happened.
+    return fin::utils::decodeEscapes(body);
 }
 
 // The loop forms, by source spelling. `if`/`else` evaluates (S2) and is

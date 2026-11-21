@@ -43,6 +43,28 @@ namespace std {
 #[llvm_name="system"]
 @define proc_system(command: string) <int>;
 
+// The exit code from a wait status.
+//
+// `pclose` and `system` do not return the child's exit code on POSIX: they return a wait
+// status, where the code is the high byte (`exit(7)` arrives as 1792) and a signal death is
+// a low byte. Every caller that compared `exit_code == 1` was reading 256, and a program
+// killed by SIGSEGV read as 11 rather than as a failure.
+//
+// The decode is POSIX: `status >> 8 & 0xff`, with a signal death reported as the shell's
+// 128 + signal, which is what a caller of `system` already expects from a shell. Windows'
+// `_pclose` and `system` return the code directly and are passed through unchanged.
+priv fun proc_decode_status(status: int) <int> {
+    #c_ifdef FIN_TARGET_WINDOWS
+    return status;
+    #c_else
+    if (status < 0) { return -1; }
+    // WIFSIGNALED: the low seven bits are the signal number and are non-zero.
+    let term_signal <int> = status & 127;
+    if (term_signal != 0) { return 128 + term_signal; }
+    return (status >> 8) & 255;
+    #c_endif
+}
+
 #[export]
 #c_ifdef FIN_TARGET_WINDOWS
 #[llvm_name="_popen"]
@@ -85,7 +107,8 @@ pub struct ProcessResult {
 // Executes a shell command synchronously and returns its exit status code.
 #[export]
 pub fun run_command(command: string) <int> {
-    return proc_system(command);
+    // Decoded, not raw: see `proc_decode_status`. `system` answers a wait status on POSIX.
+    return proc_decode_status(proc_system(command));
 }
 
 // Executes a command and captures its standard output.
@@ -132,7 +155,8 @@ pub fun exec_command(command: string) <ProcessResult> {
     delete out_buf;
 
     return ProcessResult {
-        exit_code: status,
+        // `pclose` answers a wait status on POSIX; the caller wants the exit code.
+        exit_code: proc_decode_status(status),
           output: res_str
     };
 }

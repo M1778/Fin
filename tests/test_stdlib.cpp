@@ -3610,3 +3610,45 @@ TEST(Soundness_Modules, ARootDeclarationAndAModuleDeclarationDoNotBothAllocate) 
            "own declaration shadow the root's inside that module, this becomes \"3 900\" "
            "and that is the line to change.";
 }
+
+// `process::std` reports the child's exit code, not the raw wait status.
+//
+// `pclose` and `system` answer a wait status on POSIX, where the code is the high byte:
+// `exit(7)` arrives as 1792. Every caller comparing `exit_code == 1` was reading 256, and a
+// program killed by a signal read as the signal number rather than as a failure -- so
+// `is_success` was the only comparison that happened to work, because zero is zero either
+// way. Nothing tested it, which is why it survived from day two of the standard library.
+//
+// A signal death is asserted at 128 + signal rather than as the raw signalled status: that is
+// what a caller of the shell's `system` already sees, and it is the number a script checks.
+TEST(Soundness_Process, TheExitCodeIsDecodedNotTheRawWaitStatus) {
+#ifndef FIN_TESTS_HAVE_BACKEND
+    GTEST_SKIP() << "Executable library checks need the LLVM backend";
+#endif
+    const std::string out = buildBundledAndRun(R"FIN(
+import { ProcessResult, exec_command, run_command, is_success,
+         free_process_result } from process::std;
+fun main() <noret> {
+    let r <ProcessResult> = exec_command("sh -c 'exit 7'");
+    printf("exec=%d\n", r.exit_code);
+    free_process_result(&r);
+    printf("run=%d\n", run_command("sh -c 'exit 3'"));
+    printf("zero=%d\n", run_command("true"));
+    printf("nonzero=%d\n", run_command("sh -c 'exit 1'"));
+    let ok <ProcessResult> = exec_command("true");
+    printf("is_success=%d\n", cast<int>(is_success(ok)));
+    free_process_result(&ok);
+    printf("signal=%d\n", run_command("sh -c 'kill -9 $$'"));
+}
+)FIN");
+    // 7 and 3 and 1 rather than 1792, 768 and 256; 137 is 128 + SIGKILL(9), the shell's
+    // convention for a signalled child.
+    EXPECT_EQ(out,
+              "exec=7\n"
+              "run=3\n"
+              "zero=0\n"
+              "nonzero=1\n"
+              "is_success=1\n"
+              "signal=137\n")
+        << out;
+}

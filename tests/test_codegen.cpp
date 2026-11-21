@@ -17371,3 +17371,52 @@ BACKEND_TEST(Soundness_Codegen, UnsignedOverflowWrapsToZero) {
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "0\n") << b.why();
 }
+
+// A `\xNN` escape is a raw byte, and `\uNNNN` is a code point encoded as UTF-8.
+//
+// Neither worked: both decoders had a `default:` arm that kept the character and dropped the
+// backslash, so `"caf\xc3\xa9"` became `cafxc3xa9` -- nine bytes instead of five -- and
+// `"caf\u00e9"` became `cafu00e9`. The two copies of that switch (codegen and the comptime
+// interpreter) are now one function, because a table duplicated is a table that drifts and a
+// literal could mean different things at run time and under `comptime`.
+//
+// Asserting the LENGTH is the point: a decoder that emitted the right glyph by accident would
+// still be wrong about the bytes, and the byte count is what a C boundary sees.
+BACKEND_TEST(Soundness_Codegen, HexAndUnicodeEscapesAreDecodedNotDropped) {
+    const Built b = build(std::string(kPrintf) +
+        "import { len } from strings::std;\n"
+        "fun main() <noret> {\n"
+        "    let hex <string> = \"caf\\xc3\\xa9\";\n"
+        "    printf(\"hex=%d\\n\", len(hex));\n"
+        "    let u4 <string> = \"caf\\u00e9\";\n"
+        "    printf(\"u4=%d\\n\", len(u4));\n"
+        "    let brace <string> = \"caf\\u{e9}\";\n"
+        "    printf(\"brace=%d\\n\", len(brace));\n"
+        "    let emoji <string> = \"\\u{1F600}\";\n"
+        "    printf(\"emoji=%d\\n\", len(emoji));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    // Three ASCII bytes plus the two UTF-8 bytes of e-acute, all three ways of spelling it.
+    // The emoji is four bytes, which is the case that catches a two-byte-only encoder.
+    EXPECT_EQ(b.out, "hex=5\nu4=5\nbrace=5\nemoji=4\n") << b.why();
+}
+
+// The malformed forms follow the shipped rule -- keep the character, drop the backslash --
+// rather than producing half a character or reading past the literal.
+BACKEND_TEST(Soundness_Codegen, AMalformedEscapeKeepsItsCharacter) {
+    const Built b = build(std::string(kPrintf) +
+        "import { len } from strings::std;\n"
+        "fun main() <noret> {\n"
+        "    let short_hex <string> = \"\\x9\";\n"
+        "    printf(\"short=%d\\n\", len(short_hex));\n"
+        "    let surrogate <string> = \"\\uD800\";\n"
+        "    printf(\"surrogate=%d\\n\", len(surrogate));\n"
+        "    let unknown <string> = \"\\q\";\n"
+        "    printf(\"unknown=%d\\n\", len(unknown));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    // `\x9` has one hex digit where two are required: the `x` is kept and the `9` follows as
+    // an ordinary character. `\uD800` is an unpaired surrogate, which cannot be encoded, so
+    // the `u` and its four digits survive as text. `\q` is simply unknown.
+    EXPECT_EQ(b.out, "short=2\nsurrogate=5\nunknown=1\n") << b.why();
+}

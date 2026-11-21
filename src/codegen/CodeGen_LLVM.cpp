@@ -49,6 +49,7 @@
 #include "../semantics/ComptimeInterp.hpp"
 #include "../types/Layout.hpp"
 #include "../utils/IntegerConstant.hpp"
+#include "../utils/StringEscapes.hpp"
 
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/DIBuilder.h>
@@ -1416,28 +1417,10 @@ std::string decodeLiteral(const std::string& lexeme) {
         body.back() == body.front()) {
         body = body.substr(1, body.size() - 2);
     }
-    std::string out;
-    for (size_t i = 0; i < body.size(); ++i) {
-        if (body[i] != '\\' || i + 1 >= body.size()) {
-            out += body[i];
-            continue;
-        }
-        char c = body[++i];
-        switch (c) {
-            case 'n':  out += '\n'; break;
-            case 't':  out += '\t'; break;
-            case 'r':  out += '\r'; break;
-            case '0':  out += '\0'; break;
-            case '\\': out += '\\'; break;
-            case '\'': out += '\''; break;
-            case '"':  out += '"';  break;
-            // An unknown escape keeps the character it introduced rather than the
-            // backslash. Nothing in the corpus writes one; guessing the other way
-            // would put a stray backslash in the output.
-            default:   out += c;    break;
-        }
-    }
-    return out;
+    // One decoder for both this and the comptime interpreter, so a literal cannot mean one
+    // thing at run time and another under `comptime`. It handles \xNN and \uNNNN, which the
+    // two copies it replaced did not -- they dropped the backslash and emitted `xc3`.
+    return fin::utils::decodeEscapes(body);
 }
 
 // Binds a substitution into the mapper for one scope and restores what was there.

@@ -196,6 +196,7 @@ add_library(fin_core STATIC
     src/driver/Driver.cpp
     src/utils/ModuleLoader.cpp
     src/utils/IntegerConstant.cpp
+    src/utils/StringEscapes.cpp
     src/utils/Process.cpp
 
     # AST Base & Utilities
