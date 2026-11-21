@@ -1,0 +1,135 @@
+# Nightly parser fuzzing.
+#
+# WHY THIS IS A SEPARATE WORKFLOW
+# ------------------------------
+# `FIN_FUZZ=ON` needs Clang, because libFuzzer is `-fsanitize=fuzzer` and GCC does not
+# implement it. It also needs ASan and UBSan, which make a full build several times slower.
+# Neither belongs in the per-push matrix, where the point is fast feedback on whether the
+# change compiles and the suite passes.
+#
+# Until 2026-11-22 this could not run at all: `ComptimeInterp.hpp` held a
+# `std::vector<std::pair<std::string, Value>>`, which Clang rejects and GCC tolerates, so a
+# Clang build of the compiler failed in three translation units (issue #159). With that fixed
+# the harness builds, and "we fuzz the parser" became a true statement -- this job is what
+# keeps it true.
+#
+# WHAT A FAILURE MEANS
+# --------------------
+# A crash here is a real defect in the parser, the lexer, or the AST, with a reproducer saved
+# as an artifact. Download `crash-*` from the run, and the exact bytes are in `artifact_prefix`
+# format: feed the file straight back to the binary.
+#
+# A run that finds nothing for a night is not evidence of correctness, only of no *new* crash
+# on the seeds and mutations that run touched. The corpus persists between runs through the
+# cache so coverage accumulates rather than restarting from the same seed nightly.
+
+name: Fuzz
+
+on:
+  schedule:
+    # 03:17 UTC, off the hour: GitHub's scheduler queues on-the-hour jobs first.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      max_total_time:
+        description: "Seconds to fuzz"
+        type: number
+        default: 600
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  parser:
+    name: libFuzzer (Clang, ASan+UBSan)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      FIN_LLVM_MAJOR: "22"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install the pinned LLVM and the build tools
+        run: |
+          set -eu
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
+          codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] https://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-22 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm22.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq llvm-22-dev clang-22 libllvm22 cmake ninja-build bison flex python3 pipx
+          pipx install "conan>=2.4,<3"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Cache the Conan dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2
+          key: fuzz-conan-${{ hashFiles('conanfile.py', 'conan/profiles/*') }}
+          restore-keys: fuzz-conan-
+
+      # The compiler *building the fuzz target* must be Clang, because libFuzzer is
+      # `-fsanitize=fuzzer` and GCC does not implement it. The third-party dependencies
+      # (fmt, gtest, ...) are built by the default profile's GCC, which is deliberate: they
+      # are plain C++ libraries linked into the same libstdc++ ABI, and asking Conan to
+      # rebuild all of them with Clang costs several minutes and buys nothing. That is the
+      # combination verified locally -- `clang++` building fin_core against GCC-built deps
+      # linked and ran 21,679 fuzz iterations.
+      - name: Build the dependencies
+        run: |
+          set -eu
+          export PATH="$HOME/.local/bin:$PATH"
+          conan install . --build=missing -s build_type=Debug \
+            -c tools.cmake.cmaketoolchain:generator=Ninja
+
+      - name: Configure with FIN_FUZZ
+        run: |
+          set -eu
+          cmake -S . -B build-fuzz -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/build/build/Debug/generators/conan_toolchain.cmake" \
+            -DLLVM_DIR=/usr/lib/llvm-22/lib/cmake/llvm \
+            -DFIN_FUZZ=ON -DFIN_BUILD_TESTS=OFF
+
+      - name: Build the harness
+        run: cmake --build build-fuzz -j2 --target fin_parse_fuzz
+
+      # A persistent corpus is what turns one hour of fuzzing into an hour of *new* coverage
+      # rather than the same hour again. Keyed on the commit so a cache restore cannot hide a
+      # regression behind stale inputs; the prefix lets an older corpus still seed a new run.
+      - name: Restore the corpus
+        uses: actions/cache@v4
+        with:
+          path: corpus
+          key: fuzz-corpus-${{ github.sha }}
+          restore-keys: fuzz-corpus-
+
+      - name: Fuzz
+        run: |
+          set -eu
+          mkdir -p corpus artifacts
+          seconds="${{ inputs.max_total_time || 600 }}"
+          ./build-fuzz/fuzz/fin_parse_fuzz \
+            -max_total_time="$seconds" \
+            -max_len=4096 \
+            -artifact_prefix=artifacts/ \
+            -print_final_stats=1 \
+            corpus
+
+      - name: Upload any crash
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash
+          path: artifacts/
+          if-no-files-found: warn
