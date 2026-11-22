@@ -3638,16 +3638,21 @@ fun main() <noret> {
     let ok <ProcessResult> = exec_command("true");
     printf("is_success=%d\n", cast<int>(is_success(ok)));
     free_process_result(&ok);
-    // A signalled child, asserted for its STATUS only.
+    // A signalled child, on POSIX only.
     //
-    // The capture carries whatever the shell says about its child's death, and which shell
-    // says what is not Fin's contract: "Killed" appeared on the CI runners and not here,
-    // because /bin/sh is dash there and bash here. Asserting the output would be asserting
-    // dash's stderr handling. The exit code is the property under test, and 137 (128 + 9) is
-    // Fin's documented answer.
+    // Windows has no SIGKILL and its `_pclose` returns the exit code directly rather than a
+    // wait status, so there is nothing to decode and no 128+n convention to assert. Guarding
+    // the witness rather than the expectation keeps the shared lines shared.
+    //
+    // The capture also carries whatever the shell says about its child's death -- "Killed"
+    // appeared on the CI runners because /bin/sh is dash there and bash here -- which is why
+    // the assertion below checks the exit code and not the text.
+    #c_ifdef FIN_TARGET_WINDOWS
+    #c_else
     let killed <ProcessResult> = exec_command("sh -c 'kill -9 $$'");
     printf("signal=%d\n", killed.exit_code);
     free_process_result(&killed);
+    #c_endif
 }
 )FIN");
     // 7 and 3 and 1 rather than 1792, 768 and 256; 137 is 128 + SIGKILL(9), the shell's
@@ -3658,8 +3663,14 @@ fun main() <noret> {
     // shell writes there is not Fin's contract. So the assertion is that each expected line is
     // present IN ORDER, not that they are the whole capture -- asserting the whole capture is
     // asserting the host's /bin/sh, which is dash on the CI runners and bash here.
+    // The signal line is POSIX-only, matching the witness above.
+#ifdef _WIN32
+    const std::vector<std::string> expected{
+        "exec=7", "run=3", "zero=0", "nonzero=1", "is_success=1"};
+#else
     const std::vector<std::string> expected{
         "exec=7", "run=3", "zero=0", "nonzero=1", "is_success=1", "signal=137"};
+#endif
     std::size_t at = 0;
     for (const auto& line : expected) {
         const std::size_t found = out.find(line, at);
