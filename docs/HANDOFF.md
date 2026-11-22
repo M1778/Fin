@@ -932,6 +932,40 @@ Two things to know before trusting a lane's green:
     `docs/known-issues.md` has the `BlobNotFound` signature that distinguishes it from a slow
     build.
 
+## 2026-11-22, second pass: three codegen gaps closed
+
+Thirteen issues closed in total today. The three below are features rather than fixes, and each
+was refused at codegen while its opposite direction worked -- which is what made them read as
+defects:
+
+- **`cast<int>(3.9)`** truncated toward zero. int-to-float worked and float-to-int refused. The
+  care was in the range: `fptosi` is undefined for out-of-range values and NaN, so the lowering
+  clamps on the float side where the bounds are exactly representable, and NaN answers 0. A
+  caller converting a computed ratio no longer has an undefined answer.
+- **`s.length` on a string** is the byte count, agreeing with `strings::len` and answering 0 for
+  null. `lib/std/strings.fin` had documented the refusal as a fact of life and told readers to
+  use `len`; that comment is now corrected. A `[T]`'s `.length` is untouched -- it has its own
+  length word and this arm must not shadow it.
+- **A `ulong` literal's upper half** works. `std::stoll` threw above int64 max, so a `ulong`
+  could not spell ULONG_MAX. Parsed unsigned when it does not fit signed, which the declared
+  type makes the right reading rather than a guess.
+
+Also confirmed already fixed and closed with evidence: #135 (a BTreeMap with no comparator
+blames by name instead of segfaulting) and #138 (`random_int` over the full int32 range).
+
+### The pattern this pass produced
+
+A test whose **premise is a gap** becomes wrong when the gap closes.
+`AGenericFunctionsBodyIsCheckedAtEachBinding` proved "a template body is checked per binding" by
+relying on `cast<int>(float)` refusing. Once that cast worked, the test failed for the best
+possible reason. The fix was to move the witness to `cast<int>(a struct)`, which still refuses --
+never to restore the gap so the test keeps passing.
+
+Two more of today's tests failed on first CI run for a variation of the same reason: they
+asserted something the platform does not promise (the raw wait status; a SIGKILL number Windows
+does not have). A test is a claim about a contract, and the contract has to be the one that
+holds on the machine it runs on.
+
 ## Not settled, and deliberately
 
 `base64_decode` **blames** on malformed input rather than refusing with a value. That aborts a
