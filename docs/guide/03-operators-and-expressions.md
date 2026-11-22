@@ -89,8 +89,18 @@ fun main() <noret> {
     let small <int> = cast<int>(wide);
     blame small == 42;
     blame sizeof(int) == 4;
+    // Float to int truncates toward zero, and both directions work.
+    blame cast<int>(3.9) == 3;
+    blame cast<int>(-3.9) == -3;
+    blame cast<long>(100000.75) == 100000;
 }
 ```
+
+A float-to-int cast **saturates** rather than trapping when the value does not fit: the answer
+is the destination range's own bound, and `nan` answers 0. That matters because the alternative
+in the hardware instruction is undefined behaviour, so a program that computed a ratio from
+untrusted data would have no defined answer at all. `cast<bool>(someFloat)` is refused by the
+front end rather than converted.
 
 `sizeof(T)` measures the target layout. Avoid hardcoding pointer sizes in portable
 code. Use integer widening where it applies; an explicit cast is not necessary

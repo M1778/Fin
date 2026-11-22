@@ -74,7 +74,7 @@ The following entries are **fragments**, not complete files.
 | Derive / member name | `derive_hash(value)` / `enum_from!(value)` |
 | String escapes | `"a\tb\nc"`, `"\\"`, `"\""`, `"\0"` |
 | Byte / code-point escape | `"caf\xc3\xa9"` (raw bytes, `len` is 5) / `"caf\u00e9"` or `"\u{1F600}"` (code point, encoded as UTF-8) |
-| Cast | `cast<double>(1.5)` |
+| Cast | `cast<double>(3)`, `cast<int>(3.9)` (truncates toward zero; saturates rather than trapping when out of range) |
 | Assertion | `blame count >= 0, "count must be nonnegative";` |
 | Foreign function | `@define strlen(text: string) <ulong>;` |
 | Macro declaration / call | `@macro twice(x) { return quote { $x + $x; }; }` / `twice!(3)` |
