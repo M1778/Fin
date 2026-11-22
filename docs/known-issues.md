@@ -9,6 +9,7 @@ because a list that mixes them without saying so stops being useful the moment i
 | `1.0.0` x86_64-linux-gnu segfaults before `main` | **Fixed in 1.0.1** (PIC on `fin_core`); 1.0.0 stays prerelease |
 | `1.0.0` reports contract 3 without `--explain` | **Fixed in 1.0.1**; 1.0.0 stays as published |
 | `-lLLVM` named unconditionally on every link | **Fixed in 1.0.1** |
+| A float-to-int cast answered differently per architecture | **Fixed**, and recorded: the defect was in its own first fix |
 | macOS reports a NUL in source as a syntax error | **Open**, observed, not root-caused |
 | The stage invents type errors after `parse_float` | **Open**, pinned by a test, documented |
 | A `&char` parameter cannot be indexed with a literal | **Open**, a language gap; worked around in `fin-ssg` |
@@ -360,6 +361,55 @@ parent frame's size in the `CreateThread` path; that is a hypothesis, not a meas
 Workaround: allocate the buffer on the heap (`new [char, n]{}`) rather than as a local, which
 is what `logg` does. Recorded because the failure mode is a fail-fast abort with no diagnostic
 naming the buffer, so a reader hitting it has nothing to search for.
+
+---
+
+# Fixed: a float-to-int cast whose answer differed by architecture
+
+Status: **fixed**, and recorded because the defect was in a *fix* and only a second architecture
+caught it.
+
+## What happened
+
+`cast<int>(3.9)` was not lowered at all (issue #120). The first version of the lowering clamped
+the float to `2^(N-1)` and then converted it -- which is still undefined, because `2^31` is one
+past INT32_MAX. The undefined answer differed by target:
+
+```
+x86_64    cast<int>(1e38)  ->  -2147483648
+aarch64   cast<int>(1e38)  ->   2147483647
+```
+
+`linux-x86_64` was green. `linux-arm64` failed my own new test, which had been written from the
+x86_64 answer.
+
+## The rule
+
+`fptosi` and `fptoui` are undefined outside the destination's range and for NaN. Clamping to the
+boundary does not help, because the boundary itself is out of range -- the largest double below
+`2^31` is in range and `2^31` is not.
+
+The lowering now compares against the power-of-two threshold (exactly representable in every
+float type), selects an INTEGER constant at each edge, and only converts a value the comparisons
+proved in range. `nan` answers 0.
+
+```
+cast<int>(1e38)                     ->  2147483647
+cast<long>(1e38)                    ->  9223372036854775807
+cast<int>(-1e38)                    -> -2147483648
+cast<ulong>(-1e38)                  ->  0
+cast<int>(2147483647.0)             ->  2147483647        (in range, exact)
+```
+
+## Why it is written down
+
+Two lessons that cost an afternoon:
+
+1. **A clamp to the boundary is not a guard.** The boundary is in the undefined set. The guard
+   has to select the answer, not the input.
+2. **A test written from one platform's answer agrees with that platform's bug.** The x86_64 run
+   was green and the aarch64 run was the evidence. This repository runs both for exactly this
+   reason; a single-architecture matrix would have shipped it.
 
 ---
 
