@@ -17486,9 +17486,11 @@ BACKEND_TEST(Soundness_Codegen, AnOutOfRangeFloatToIntCastSaturates) {
     const Built b = build(std::string(kPrintf) +
         "fun main() <noret> {\n"
         "    let huge <float> = 99999999999999999999999999999999999999.0;\n"
-        "    printf(\"i32=%d u64=%lu\\n\", cast<int>(huge), cast<ulong>(huge));\n"
+        // `%llu` again: msvcrt's `%lu` is 32-bit, and it truncated the very value this
+        // test exists to check.
+        "    printf(\"i32=%d u64=%llu\\n\", cast<int>(huge), cast<ulong>(huge));\n"
         "    let neg <float> = -99999999999999999999999999999999999999.0;\n"
-        "    printf(\"neg_i32=%d neg_u64=%lu\\n\", cast<int>(neg), cast<ulong>(neg));\n"
+        "    printf(\"neg_i32=%d neg_u64=%llu\\n\", cast<int>(neg), cast<ulong>(neg));\n"
         "}\n");
     ASSERT_TRUE(b.ran) << b.why();
     // INT32_MAX and UINT64_MAX going up; INT32_MIN and 0 going down.
@@ -17534,12 +17536,15 @@ BACKEND_TEST(Soundness_Codegen, AStringLengthLowersToTheByteCount) {
 BACKEND_TEST(Soundness_Codegen, AUlongLiteralAboveInt64MaxLowers) {
     const Built b = build(std::string(kPrintf) +
         "fun main() <noret> {\n"
+        // `%llu`, not `%lu`: msvcrt's `%lu` reads 32 bits, so ULONG_MAX prints as
+        // 4294967295 there. agent-guide.md warns about this; the test did not heed it, and
+        // the value was correct all along.
         "    let top <ulong> = 18446744073709551615;\n"
-        "    printf(\"%lu\\n\", top);\n"
+        "    printf(\"%llu\\n\", top);\n"
         "    let mid <ulong> = 9223372036854775808;\n"
-        "    printf(\"%lu\\n\", mid);\n"
+        "    printf(\"%llu\\n\", mid);\n"
         "    let small <ulong> = 42;\n"
-        "    printf(\"%lu\\n\", small);\n"
+        "    printf(\"%llu\\n\", small);\n"
         "}\n");
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "18446744073709551615\n9223372036854775808\n42\n") << b.why();
