@@ -17468,28 +17468,34 @@ BACKEND_TEST(Soundness_Codegen, AFloatToIntCastWorksAtOtherWidths) {
     EXPECT_EQ(b.out, "100000\n12\n42\n") << b.why();
 }
 
-// An out-of-range float-to-int cast is DEFINED, not undefined.
+// An out-of-range float-to-int cast is DEFINED, not undefined, and the answer is the
+// nearest representable in the direction the value came from.
 //
 // `fptosi` is undefined behaviour when the value is outside the destination's range, and the
-// front end accepts the cast, so without a clamp the answer would be whatever the hardware
-// happened to do. The conversion saturates instead: the range's own bound, which is what every
-// language with a saturating conversion does and what a caller can reason about.
+// front end accepts the cast, so without a guard the answer would be whatever the hardware
+// happened to do. Two things make this test worth its lines:
 //
-// The signed case is the one worth checking: 1e38 to `int` answers INT_MIN, not INT_MAX,
-// because the clamp bound for a signed type is the low end and the value passed the high one.
-// That looks backwards and is what "saturate to the nearest representable" means when the
-// nearest representable below the value's magnitude is the minimum. A test asserting INT_MAX
-// would be asserting a different rule.
+//   * a huge POSITIVE value answers the range MAX, and a huge NEGATIVE one answers 0 for an
+//     unsigned target -- nearest in each direction, not one flat clamp;
+//   * the answer must be the same on every target. An earlier version clamped to `2^(N-1)`
+//     and then converted, and `2^31` is one past INT32_MAX -- so the clamped value was still
+//     undefined and x86_64 answered INT_MIN while aarch64 answered INT_MAX for this very
+//     program. The lowering now selects an integer constant at each edge and only converts a
+//     value the comparisons proved in range.
 BACKEND_TEST(Soundness_Codegen, AnOutOfRangeFloatToIntCastSaturates) {
     const Built b = build(std::string(kPrintf) +
         "fun main() <noret> {\n"
         "    let huge <float> = 99999999999999999999999999999999999999.0;\n"
         "    printf(\"i32=%d u64=%lu\\n\", cast<int>(huge), cast<ulong>(huge));\n"
         "    let neg <float> = -99999999999999999999999999999999999999.0;\n"
-        "    printf(\"neg_u64=%lu\\n\", cast<ulong>(neg));\n"
+        "    printf(\"neg_i32=%d neg_u64=%lu\\n\", cast<int>(neg), cast<ulong>(neg));\n"
         "}\n");
     ASSERT_TRUE(b.ran) << b.why();
-    EXPECT_EQ(b.out, "i32=-2147483648 u64=9223372036854775808\nneg_u64=0\n") << b.why();
+    // INT32_MAX and UINT64_MAX going up; INT32_MIN and 0 going down.
+    EXPECT_EQ(b.out,
+              "i32=2147483647 u64=18446744073709551615\n"
+              "neg_i32=-2147483648 neg_u64=0\n")
+        << b.why();
 }
 
 // `s.length` on a string is the byte count, the same as `strings::len`.

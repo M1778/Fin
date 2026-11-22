@@ -7052,31 +7052,52 @@ private:
             // No `to.isBool` branch: the front end refuses `cast<bool>(someFloat)` outright
             // ("Invalid cast from 'float' to 'bool'"), so a branch for it here would be code
             // nothing can reach. If that rule changes, this is where the conversion goes.
-            const double lo = to.isSigned
-                                  ? -std::ldexp(1.0, static_cast<int>(bits) - 1)
-                                  : 0.0;
-            const double hi = to.isSigned
-                                  ? std::ldexp(1.0, static_cast<int>(bits) - 1)
-                                  : std::ldexp(1.0, static_cast<int>(bits));
-            // Clamp on the float side, where the bounds are exactly representable, before the
-            // conversion. `lo` and `hi` are powers of two, so no rounding creeps in.
-            llvm::Value* loC = llvm::ConstantFP::get(value->getType(), lo);
-            llvm::Value* hiC = llvm::ConstantFP::get(value->getType(), hi);
-            // NaN has no order, so the two `select`s leave whichever operand the comparison
-            // did not choose -- hence a NaN check first, answering 0, which is what a
-            // truncation of "not a number" means for a caller that must get an int.
-            llvm::Value* isNan = builder_.CreateFCmpUNO(
-                value, value, "fptosi.isnan");
-            llvm::Value* clamped = builder_.CreateSelect(
-                builder_.CreateFCmpOLT(value, loC, "fptosi.low"), loC, value, "fptosi.low.sel");
-            clamped = builder_.CreateSelect(
-                builder_.CreateFCmpOGT(clamped, hiC, "fptosi.high"), hiC, clamped,
-                "fptosi.high.sel");
+            // Never convert a value that is out of range: `fptosi`/`fptoui` are undefined
+            // there, and the undefined ANSWER differs per target. That is not hypothetical --
+            // an earlier version of this arm clamped to `2^(N-1)` and then converted, and
+            // `2^31` is one past INT32_MAX, so the clamped value was still undefined:
+            // x86_64 answered INT_MIN and aarch64 answered INT_MAX for the same program.
+            //
+            // So the comparisons use the power-of-two threshold -- which is exactly
+            // representable in every float type -- and select an INTEGER constant. The
+            // conversion itself only ever runs on a value the comparisons proved in range.
+            //
+            //   value >=  2^(N-1)  (signed)   -> INT_MAX of N bits
+            //   value <  -2^(N-1)  (signed)   -> INT_MIN of N bits
+            //   value >=  2^N      (unsigned) -> MAX of N bits
+            //   value <   0        (unsigned) -> 0
+            //
+            // `2^63` is exact as a double and the largest double below it (2^63 - 1024) is in
+            // range, so the strictness of `>=` is what makes the boundary exact.
+            const double twoToN =
+                std::ldexp(1.0, to.isSigned ? static_cast<int>(bits) - 1
+                                            : static_cast<int>(bits));
+            llvm::Value* bound = llvm::ConstantFP::get(value->getType(), twoToN);
+            llvm::Value* isNan = builder_.CreateFCmpUNO(value, value, "fptosi.isnan");
+            llvm::Value* tooHigh = to.isSigned
+                ? builder_.CreateFCmpOGE(value, bound, "fptosi.high")
+                : builder_.CreateFCmpOGE(value, bound, "fptoui.high");
+            llvm::Value* tooLow = to.isSigned
+                ? builder_.CreateFCmpOLT(value, builder_.CreateFNeg(bound), "fptosi.low")
+                : builder_.CreateFCmpOLT(
+                      value, llvm::ConstantFP::get(value->getType(), 0.0), "fptoui.low");
             llvm::Value* converted = to.isSigned
-                ? builder_.CreateFPToSI(clamped, to.llvmType, "fptosi")
-                : builder_.CreateFPToUI(clamped, to.llvmType, "fptoui");
+                ? builder_.CreateFPToSI(value, to.llvmType, "fptosi")
+                : builder_.CreateFPToUI(value, to.llvmType, "fptoui");
+            // The integer bounds, as constants, so no conversion happens at either edge.
+            llvm::Constant* intMax = to.isSigned
+                ? llvm::ConstantInt::getSigned(to.llvmType,
+                      (bits >= 64 ? INT64_MAX : (int64_t{1} << (bits - 1)) - 1))
+                : llvm::ConstantInt::get(to.llvmType,
+                      (bits >= 64 ? UINT64_MAX : (uint64_t{1} << bits) - 1));
+            llvm::Constant* intMin = to.isSigned
+                ? llvm::ConstantInt::getSigned(to.llvmType,
+                      (bits >= 64 ? INT64_MIN : -(int64_t{1} << (bits - 1))))
+                : llvm::ConstantInt::get(to.llvmType, 0);
+            llvm::Value* satHigh = builder_.CreateSelect(tooHigh, intMax, converted, "sat.high");
+            llvm::Value* satLow = builder_.CreateSelect(tooLow, intMin, satHigh, "sat.low");
             return builder_.CreateSelect(
-                isNan, llvm::ConstantInt::get(to.llvmType, 0), converted, "fptosi.final");
+                isNan, llvm::ConstantInt::get(to.llvmType, 0), satLow, "fptosi.final");
         }
         if (from.type.kind == CgType::Kind::Ptr && to.kind == CgType::Kind::Ptr) {
             return from.value;  // opaque pointers: one type, no cast
