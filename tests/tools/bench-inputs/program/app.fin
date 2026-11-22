@@ -1,0 +1,57 @@
+// Benchmark input: realistic multi-import program. Six stdlib modules, a
+// struct value, a loop over an array, and imported calls whose bodies reach
+// the backend -- so this is the closest row to "compile an application", not
+// a synthetic import-only file. Keep it stable: changing it invalidates the
+// baseline. Plans: strings, math, algorithm, fs, time, stdio.
+import { println_str } from stdio::std;
+import { len, to_upper, contains, replace, trim, equals } from strings::std;
+import { gcd, is_even, clamp, min, max, abs, isqrt } from math::std;
+import { sort_ints, reverse_ints, is_sorted_ints } from algorithm::std;
+import { file_exists } from fs::std;
+import { now, diff_sec } from time::std;
+
+struct Report {
+    name <string>,
+    count <int>,
+    ratio <float>
+}
+
+fun sum(values: [int], count: int) <int> {
+    let total <int> = 0;
+    for (let i <int> = 0; i < count; i++) {
+        total += values[i];
+    }
+    return total;
+}
+
+fun main() <noret> {
+    let text <string> = "  Fin language  ";
+    let trimmed <string> = trim(text);
+    blame equals(trimmed, "Fin language");
+    let upper <string> = to_upper(trimmed);
+    blame contains(upper, "FIN");
+    let replaced <string> = replace(upper, " ", "_");
+    blame contains(replaced, "_");
+    let g <int> = gcd(84, 36);
+    blame g == 12;
+    blame is_even(g);
+    blame isqrt(81) == 9;
+    blame clamp(11, 0, 10) == 10;
+    blame min(3, 7) == 3;
+    blame max(3, 7) == 7;
+    blame abs(-4) == 4;
+    let values <[int]> = [5, 3, 9, 1, 7];
+    sort_ints(values, 5);
+    blame is_sorted_ints(values, 5);
+    reverse_ints(values, 5);
+    blame values[0] == 9;
+    let total <int> = sum(values, 5);
+    blame total == 25;
+    blame file_exists(".") == true;
+    let t0 <long> = now();
+    let t1 <long> = now();
+    blame diff_sec(t0, t1) == 0;
+    let report <Report> = Report{name: trimmed, count: len(upper), ratio: 1.5};
+    printf("%s %d %.1f %d %s\n", report.name, report.count, report.ratio, g, replaced);
+    println_str(replaced);
+}

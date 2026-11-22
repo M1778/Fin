@@ -1,0 +1,6 @@
+// Benchmark input: deliberately minimal so the measurement is process startup
+// and pipeline floor, not a language feature. No imports, no stdlib walk.
+fun main() <noret> {
+    let total <int> = 1 + 1;
+    blame total == 2;
+}

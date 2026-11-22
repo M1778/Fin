@@ -1,0 +1,289 @@
+{
+  "schema": 1,
+  "created": "2026-11-23T00:50:53+03:30",
+  "binary": {
+    "path": "build-rel/finc",
+    "sha256": "9f0d8ed75cfcb063",
+    "version": "finc 1.0.1 (contract 3)"
+  },
+  "fingerprint": {
+    "system": "Linux",
+    "machine": "x86_64",
+    "cpu": "Intel(R) Core(TM) i5-14400F",
+    "cores": 16,
+    "build_type": "Release"
+  },
+  "loadavg": 0.2802734375,
+  "runs": 5,
+  "gate": {
+    "threshold_pct": 10.0,
+    "max_loadavg": 1.2802734375
+  },
+  "scenarios": {
+    "startup/--version": {
+      "min_ms": 6.744323996827006,
+      "median_ms": 7.173667981987819,
+      "noise_pct": 19.45
+    },
+    "startup/tiny": {
+      "min_ms": 10.988964000716805,
+      "median_ms": 11.397816997487098,
+      "noise_pct": 4.31
+    },
+    "stdlib/algorithm": {
+      "min_ms": 12.142980005592108,
+      "median_ms": 12.333929975284263,
+      "noise_pct": 11.87
+    },
+    "stdlib/argparse": {
+      "min_ms": 11.884456995176151,
+      "median_ms": 12.097505998099223,
+      "noise_pct": 26.74
+    },
+    "stdlib/ascii": {
+      "min_ms": 11.064638005336747,
+      "median_ms": 11.280372011242434,
+      "noise_pct": 18.37
+    },
+    "stdlib/ast": {
+      "min_ms": 12.400064006214961,
+      "median_ms": 13.90836198697798,
+      "noise_pct": 16.34
+    },
+    "stdlib/bits": {
+      "min_ms": 12.429277005139738,
+      "median_ms": 12.84530499833636,
+      "noise_pct": 4.64
+    },
+    "stdlib/btreemap": {
+      "min_ms": 11.627106025116518,
+      "median_ms": 12.252001004526392,
+      "noise_pct": 12.11
+    },
+    "stdlib/buffer": {
+      "min_ms": 11.572337010875344,
+      "median_ms": 12.048432021401823,
+      "noise_pct": 7.23
+    },
+    "stdlib/cdk": {
+      "min_ms": 28.482699010055512,
+      "median_ms": 30.72845601127483,
+      "noise_pct": 11.22
+    },
+    "stdlib/cli": {
+      "min_ms": 20.600527001079172,
+      "median_ms": 21.471277985256165,
+      "noise_pct": 4.55
+    },
+    "stdlib/collection": {
+      "min_ms": 13.343979022465646,
+      "median_ms": 13.938630989287049,
+      "noise_pct": 5.85
+    },
+    "stdlib/deque": {
+      "min_ms": 11.649924999801442,
+      "median_ms": 12.050101009663194,
+      "noise_pct": 14.48
+    },
+    "stdlib/derive": {
+      "min_ms": 11.123097996460274,
+      "median_ms": 11.471631994936615,
+      "noise_pct": 5.45
+    },
+    "stdlib/diag": {
+      "min_ms": 15.25314201717265,
+      "median_ms": 15.957761992467567,
+      "noise_pct": 4.64
+    },
+    "stdlib/emitter": {
+      "min_ms": 12.671734992181882,
+      "median_ms": 12.957222003024071,
+      "noise_pct": 5.58
+    },
+    "stdlib/encoding": {
+      "min_ms": 18.236511998111382,
+      "median_ms": 18.89967400347814,
+      "noise_pct": 6.93
+    },
+    "stdlib/enums": {
+      "min_ms": 10.966933012241498,
+      "median_ms": 11.824390006950125,
+      "noise_pct": 13.14
+    },
+    "stdlib/env": {
+      "min_ms": 11.327179992804304,
+      "median_ms": 11.855993012432009,
+      "noise_pct": 5.34
+    },
+    "stdlib/error": {
+      "min_ms": 11.152402992593125,
+      "median_ms": 11.897755990503356,
+      "noise_pct": 8.59
+    },
+    "stdlib/fs": {
+      "min_ms": 18.522597005357966,
+      "median_ms": 19.617457001004368,
+      "noise_pct": 8.32
+    },
+    "stdlib/hash": {
+      "min_ms": 12.033306004013866,
+      "median_ms": 12.99196100444533,
+      "noise_pct": 27.07
+    },
+    "stdlib/hashmap": {
+      "min_ms": 16.89179099048488,
+      "median_ms": 18.021483992924914,
+      "noise_pct": 27.05
+    },
+    "stdlib/intern": {
+      "min_ms": 17.70888699684292,
+      "median_ms": 18.463158019585535,
+      "noise_pct": 13.98
+    },
+    "stdlib/ir": {
+      "min_ms": 11.9516660051886,
+      "median_ms": 12.983897002413869,
+      "noise_pct": 24.39
+    },
+    "stdlib/json": {
+      "min_ms": 39.60698301671073,
+      "median_ms": 43.978030007565394,
+      "noise_pct": 17.74
+    },
+    "stdlib/log": {
+      "min_ms": 14.593819010769948,
+      "median_ms": 15.498028980800882,
+      "noise_pct": 17.82
+    },
+    "stdlib/math": {
+      "min_ms": 12.350602977676317,
+      "median_ms": 12.968718976480886,
+      "noise_pct": 14.73
+    },
+    "stdlib/mem": {
+      "min_ms": 12.539692019345239,
+      "median_ms": 12.646550021599978,
+      "noise_pct": 9.16
+    },
+    "stdlib/networking": {
+      "min_ms": 18.740407016593963,
+      "median_ms": 18.881249998230487,
+      "noise_pct": 8.43
+    },
+    "stdlib/operators": {
+      "min_ms": 11.269426002399996,
+      "median_ms": 12.430291011696681,
+      "noise_pct": 13.02
+    },
+    "stdlib/outcome": {
+      "min_ms": 11.392632994102314,
+      "median_ms": 11.906823987374082,
+      "noise_pct": 6.1
+    },
+    "stdlib/parse": {
+      "min_ms": 14.5500990038272,
+      "median_ms": 14.791341993259266,
+      "noise_pct": 11.15
+    },
+    "stdlib/path": {
+      "min_ms": 12.503181991633028,
+      "median_ms": 12.886440992588177,
+      "noise_pct": 11.37
+    },
+    "stdlib/printer": {
+      "min_ms": 15.631938993465155,
+      "median_ms": 16.060337016824633,
+      "noise_pct": 10.73
+    },
+    "stdlib/process": {
+      "min_ms": 11.522169021191075,
+      "median_ms": 12.465670995879918,
+      "noise_pct": 19.72
+    },
+    "stdlib/random": {
+      "min_ms": 11.434497020673007,
+      "median_ms": 11.921580007765442,
+      "noise_pct": 21.12
+    },
+    "stdlib/reflect": {
+      "min_ms": 11.116714013041928,
+      "median_ms": 12.406803987687454,
+      "noise_pct": 23.0
+    },
+    "stdlib/scanner": {
+      "min_ms": 15.493311017053202,
+      "median_ms": 16.329135018168017,
+      "noise_pct": 8.33
+    },
+    "stdlib/scope": {
+      "min_ms": 11.673956003505737,
+      "median_ms": 11.963541997829452,
+      "noise_pct": 16.35
+    },
+    "stdlib/serde": {
+      "min_ms": 11.543298023752868,
+      "median_ms": 11.93720000446774,
+      "noise_pct": 14.87
+    },
+    "stdlib/stdio": {
+      "min_ms": 10.412305011413991,
+      "median_ms": 11.208059004275128,
+      "noise_pct": 26.91
+    },
+    "stdlib/stdptr": {
+      "min_ms": 11.836691002827138,
+      "median_ms": 12.986875983187929,
+      "noise_pct": 10.02
+    },
+    "stdlib/strings": {
+      "min_ms": 16.664756985846907,
+      "median_ms": 18.257420975714922,
+      "noise_pct": 18.25
+    },
+    "stdlib/sync": {
+      "min_ms": 13.131798012182117,
+      "median_ms": 14.382508001290262,
+      "noise_pct": 10.73
+    },
+    "stdlib/testing": {
+      "min_ms": 12.655241007450968,
+      "median_ms": 13.520823005819693,
+      "noise_pct": 9.35
+    },
+    "stdlib/time": {
+      "min_ms": 12.295017979340628,
+      "median_ms": 12.910313991596922,
+      "noise_pct": 7.81
+    },
+    "stdlib/token": {
+      "min_ms": 13.603580999188125,
+      "median_ms": 14.036109991138801,
+      "noise_pct": 4.52
+    },
+    "stdlib/types": {
+      "min_ms": 11.685008008498698,
+      "median_ms": 12.331171979894862,
+      "noise_pct": 8.94
+    },
+    "stdlib/typesys": {
+      "min_ms": 11.655078997137025,
+      "median_ms": 11.99903801898472,
+      "noise_pct": 3.71
+    },
+    "stdlib/typing": {
+      "min_ms": 11.569127993425354,
+      "median_ms": 11.771410994697362,
+      "noise_pct": 5.01
+    },
+    "program/check": {
+      "min_ms": 22.40544301457703,
+      "median_ms": 24.245835025794804,
+      "noise_pct": 11.36
+    },
+    "program/build": {
+      "min_ms": 96.02276599616744,
+      "median_ms": 97.30279800714925,
+      "noise_pct": 14.24
+    }
+  }
+}

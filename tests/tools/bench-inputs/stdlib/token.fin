@@ -1,0 +1,6 @@
+// Benchmark input: token::std imported alone, so this scenario is that
+// module's resolution + analysis cost plus the fixed pipeline floor.
+import token::std;
+
+fun main() <noret> {
+}
