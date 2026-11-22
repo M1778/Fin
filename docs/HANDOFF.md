@@ -920,8 +920,8 @@ usually testing the machine.
   x86_64/arm64, sanitizers, `build.sh`, perf.
 - **The nightly fuzz job ran green for the first time**: Clang built the harness, the corpus
   restored, 120 seconds of fuzzing, no crash.
-- Nine issues closed with reproductions (#159, #149, #140, #134, #133, #132, #131, #126, #123).
-  27 remain open and are real.
+- Thirteen issues closed with reproductions (#159, #149, #140, #135, #134, #133, #132, #131,
+  #129, #126, #123, #122, #120). 23 remain open and are real.
 
 Two things to know before trusting a lane's green:
 
