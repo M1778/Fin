@@ -90,8 +90,9 @@ Keep that order when translating code from another language.
 
 - **Strings:** `string` holds a pointer to NUL-terminated bytes. `==` and `!=`
   compare contents (ADR 0049); `== null` tests absence. `strings::std`'s
-  `equals` also compares bytes. `string` indexing and
-  `.length` are not the same operations as array indexing and length.
+  `equals` also compares bytes. `s.length` is the byte count and agrees with
+  `strings::len`; a null string answers 0. Indexing a `string` does **not**
+  work (`s[0]` is refused) -- use `to_chars` to reach the bytes.
 - **Memory:** `[T]`, pointers, and interface references can share storage. Copying
   an array handle does not copy its elements. Keep the owner alive and free an
   allocation once. Value structs with destructors clean up at scope exit; copying
@@ -112,6 +113,7 @@ Keep that order when translating code from another language.
   Match the real C ABI. Variadic calls such as `printf` have no format checking;
   use `printf("%s", text)` for variable text. Fin `long`/`ulong` are always 64-bit:
   print them with `%lld`/`%llu`; C's `%ld`/`%lu` read only 32 bits on Windows.
+  A `ulong` literal may use the whole range, `18446744073709551615` included.
 
 ## Current limits and usable alternatives
 
