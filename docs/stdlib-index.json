@@ -3125,8 +3125,8 @@
           "name": "len",
           "nullable": false,
           "signature": "pub fun len(s: string) <int>",
-          "doc": "The byte length, not counting the terminator. `s.length` does not lower, so this is\nhow a length is asked for.",
-          "line": 177
+          "doc": "The byte length, not counting the terminator. `s.length` answers the same number and is\nthe spelling to prefer; this exists because it is what the rest of the library calls, and\nbecause a free function can be passed around where a member cannot.",
+          "line": 178
         },
         {
           "kind": "fun",
@@ -3134,7 +3134,7 @@
           "nullable": false,
           "signature": "pub fun is_empty(s: string) <bool>",
           "doc": "",
-          "line": 182
+          "line": 183
         },
         {
           "kind": "fun",
@@ -3142,7 +3142,7 @@
           "nullable": false,
           "signature": "pub fun equals(a: string, b: string) <bool>",
           "doc": "Content comparison, which is what `==` does not do. See the header.",
-          "line": 188
+          "line": 189
         },
         {
           "kind": "fun",
@@ -3150,7 +3150,7 @@
           "nullable": false,
           "signature": "pub fun compare(a: string, b: string) <int>",
           "doc": "Negative, zero or positive, as C's `strcmp` gives it -- the ordering a sort wants.",
-          "line": 194
+          "line": 195
         },
         {
           "kind": "fun",
@@ -3158,7 +3158,7 @@
           "nullable": false,
           "signature": "pub fun free_str(s: string) <noret>",
           "doc": "Frees a string this module returned. Named rather than left to the caller's own\n`@define` of `free`, because every allocating function here says to call this one.",
-          "line": 201
+          "line": 202
         },
         {
           "kind": "fun",
@@ -3166,7 +3166,7 @@
           "nullable": false,
           "signature": "pub fun find(haystack: string, needle: string) <int>",
           "doc": "The byte offset of `needle`, or `-1`. Computed as a difference of lengths rather than of\npointers: pointer subtraction is not an operator this language has, and two `strlen`s\nare.",
-          "line": 209
+          "line": 210
         },
         {
           "kind": "fun",
@@ -3174,7 +3174,7 @@
           "nullable": false,
           "signature": "pub fun contains(s: string, sub: string) <bool>",
           "doc": "",
-          "line": 216
+          "line": 217
         },
         {
           "kind": "fun",
@@ -3182,7 +3182,7 @@
           "nullable": false,
           "signature": "pub fun index_of_char(s: string, c: char) <int>",
           "doc": "",
-          "line": 221
+          "line": 222
         },
         {
           "kind": "fun",
@@ -3190,7 +3190,7 @@
           "nullable": false,
           "signature": "pub fun last_index_of_char(s: string, c: char) <int>",
           "doc": "",
-          "line": 228
+          "line": 229
         },
         {
           "kind": "fun",
@@ -3198,7 +3198,7 @@
           "nullable": false,
           "signature": "pub fun to_chars(s: string) <[char]>",
           "doc": "A `string` as a NUL-terminated `[char]`, which is the only form whose bytes can be read\none at a time -- indexing a `&char` does not lower. The buffer is one longer than the\ncontent, so `.length` is `len(s) + 1`. `delete` frees it.",
-          "line": 238
+          "line": 239
         },
         {
           "kind": "fun",
@@ -3206,7 +3206,7 @@
           "nullable": false,
           "signature": "pub fun from_chars(bytes: [char], start: int, count: int) <string>",
           "doc": "A slice of a `[char]` as a fresh `string`. `&bytes[start]` is what makes a mid-buffer\nslice expressible: a `[char]` does not cast to a `&char`, but the address of one of its\nelements is a `&char`.",
-          "line": 250
+          "line": 251
         },
         {
           "kind": "fun",
@@ -3214,7 +3214,7 @@
           "nullable": false,
           "signature": "pub fun clone(s: string) <string>",
           "doc": "A fresh copy. The caller owns it; `free_str` releases it.",
-          "line": 260
+          "line": 261
         },
         {
           "kind": "fun",
@@ -3222,7 +3222,7 @@
           "nullable": false,
           "signature": "pub fun concat(a: string, b: string) <string>",
           "doc": "`a` then `b`, in fresh memory. This is what `a + b` would be if `+` on a pointer\nlowered.",
-          "line": 269
+          "line": 270
         },
         {
           "kind": "fun",
@@ -3230,7 +3230,7 @@
           "nullable": false,
           "signature": "pub fun substr(s: string, start: int, count: int) <string>",
           "doc": "`count` bytes from `start`, clamped to what is there. A `start` past the end raises\nrather than returning empty, because that is a caller's arithmetic error and an empty\nstring would hide it; a `count` past the end does not, because \"to the end\" is a\nreasonable thing to ask for.",
-          "line": 281
+          "line": 282
         },
         {
           "kind": "fun",
@@ -3238,7 +3238,7 @@
           "nullable": false,
           "signature": "pub fun starts_with(s: string, prefix: string) <bool>",
           "doc": "",
-          "line": 295
+          "line": 296
         },
         {
           "kind": "fun",
@@ -3246,7 +3246,7 @@
           "nullable": false,
           "signature": "pub fun ends_with(s: string, suffix: string) <bool>",
           "doc": "",
-          "line": 302
+          "line": 303
         },
         {
           "kind": "fun",
@@ -3254,7 +3254,7 @@
           "nullable": false,
           "signature": "pub fun trim(s: string) <string>",
           "doc": "",
-          "line": 324
+          "line": 325
         },
         {
           "kind": "fun",
@@ -3262,7 +3262,7 @@
           "nullable": false,
           "signature": "pub fun trim_start(s: string) <string>",
           "doc": "",
-          "line": 341
+          "line": 342
         },
         {
           "kind": "fun",
@@ -3270,7 +3270,7 @@
           "nullable": false,
           "signature": "pub fun trim_end(s: string) <string>",
           "doc": "",
-          "line": 354
+          "line": 355
         },
         {
           "kind": "fun",
@@ -3278,7 +3278,7 @@
           "nullable": false,
           "signature": "pub fun to_upper(s: string) <string>",
           "doc": "Case conversion by comparison and offset, because `&` and `|` are not in the expression\ngrammar and the usual bit trick cannot be written. ASCII only, and that is a limit\nrather than an oversight: a correct Unicode fold needs tables this library has no way to\ncarry.",
-          "line": 371
+          "line": 372
         },
         {
           "kind": "fun",
@@ -3286,7 +3286,7 @@
           "nullable": false,
           "signature": "pub fun to_lower(s: string) <string>",
           "doc": "",
-          "line": 387
+          "line": 388
         },
         {
           "kind": "fun",
@@ -3294,7 +3294,7 @@
           "nullable": false,
           "signature": "pub fun replace_char(s: string, target: char, replacement: char) <string>",
           "doc": "Every occurrence of one character replaced by another. Character-for-character rather\nthan substring-for-substring, because a substring replace changes the length and needs\na second pass to size the result; this is the half that is one pass.",
-          "line": 406
+          "line": 407
         },
         {
           "kind": "fun",
@@ -3302,7 +3302,7 @@
           "nullable": false,
           "signature": "pub fun repeat(s: string, n: int) <string>",
           "doc": "",
-          "line": 418
+          "line": 419
         },
         {
           "kind": "fun",
@@ -3310,7 +3310,7 @@
           "nullable": false,
           "signature": "pub fun reverse(s: string) <string>",
           "doc": "",
-          "line": 435
+          "line": 436
         },
         {
           "kind": "fun",
@@ -3318,7 +3318,7 @@
           "nullable": false,
           "signature": "pub fun is_numeric(s: string) <bool>",
           "doc": "",
-          "line": 454
+          "line": 455
         },
         {
           "kind": "fun",
@@ -3326,7 +3326,7 @@
           "nullable": false,
           "signature": "pub fun parse_int(s: string) <int>",
           "doc": "",
-          "line": 469
+          "line": 470
         },
         {
           "kind": "fun",
@@ -3334,7 +3334,7 @@
           "nullable": false,
           "signature": "pub fun parse_float(s: string) <Outcome<double>>",
           "doc": "A decimal `double` from `[+-]digits[.digits][eE[+-]digits]`, or an `Err`\nnaming why not. No allocation: the rejected case carries a literal, and the\naccepted value is the `double` itself.\n\nWHY THE GRAMMAR IS FIN'S AND NOT C'S. `strtod` accepts `inf`, `nan`, `0x10`,\nleading whitespace, a trailing tail and a bare `.5`; every one of those is\neither not a decimal number a Fin program should treat as a value or a\nsilently accepted half-parse. The walk below admits exactly the decimal\ngrammar and then hands the VETTED text to `strtod`, which is what makes the\nconversion correctly rounded instead of a hand-rolled accumulation -- the\nsame shape json.fin's scanner uses, and the reason a wrong result here is\nnot possible for accepted text.\n\nOVERFLOW AND UNDERFLOW ARE REFUSALS, NOT SATURATION. `strtod(\"1e999\")` is\n`+inf` with `ERANGE`; this module has no `errno`, so the test is the IEEE\none json.fin records (a finite value times zero is zero). An infinity is\n\"float overflow in parse_float\". An exact zero from a mantissa with a\nnonzero digit (\"1e-999\") cannot be told apart from a legitimate value by\nmagnitude alone, so the mantissa is checked: a nonzero significand that\nconverted to zero is \"float underflow in parse_float\". A genuine zero\n(\"0\", \"-0.0\", \"0e10\") has an all-zero significand and is accepted.\n\nThis is an `Outcome` and not a blame because the text is the caller's data;\n`parse_int` blames for the same reason the module header gives it: no\n`Outcome`-returning integer form exists yet, and changing it would break\n1.0.x. The message on an Err is a string literal and must not be freed.",
-          "line": 537
+          "line": 538
         },
         {
           "kind": "fun",
@@ -3342,7 +3342,7 @@
           "nullable": false,
           "signature": "pub fun count(s: string, sub: string) <int>",
           "doc": "",
-          "line": 616
+          "line": 617
         },
         {
           "kind": "fun",
@@ -3350,7 +3350,7 @@
           "nullable": false,
           "signature": "pub fun pad_left(s: string, width: int, pad_char: char) <string>",
           "doc": "",
-          "line": 636
+          "line": 637
         },
         {
           "kind": "fun",
@@ -3358,7 +3358,7 @@
           "nullable": false,
           "signature": "pub fun pad_right(s: string, width: int, pad_char: char) <string>",
           "doc": "",
-          "line": 656
+          "line": 657
         },
         {
           "kind": "fun",
@@ -3366,7 +3366,7 @@
           "nullable": false,
           "signature": "pub fun split(s: string, separator: char) <&Collection<string>>",
           "doc": "Splits on a single character. Always returns at least one part, and a separator at\neither end produces an empty part there -- so `split(\"a,b,\", ',')` is three parts, the\nlast empty, which is what makes `join(split(x, c), c)` give `x` back.\n\nEvery part is fresh memory and so is the `Collection`; a caller frees each part with\n`free_str`.",
-          "line": 681
+          "line": 682
         },
         {
           "kind": "fun",
@@ -3374,7 +3374,7 @@
           "nullable": false,
           "signature": "pub fun join(parts: &Collection<string>, separator: string) <string>",
           "doc": "The inverse of `split`, for any separator rather than a single character. Sizes the\nresult first and copies once, rather than concatenating in a loop -- which would\nallocate and leak one intermediate per part.",
-          "line": 701
+          "line": 702
         },
         {
           "kind": "fun",
@@ -3382,7 +3382,7 @@
           "nullable": false,
           "signature": "pub fun split_str(s: string, sep: string) <&Collection<string>>",
           "doc": "Splits on a whole separator string rather than a single character. Matches\nleft to right without overlapping -- `split_str(\"aaa\", \"aa\")` is `[\"\", \"a\"]` --\nand an empty separator returns the whole string as its one part, so\n`join(split_str(x, s), s)` gives `x` back for any separator, the same round-trip\n`split` documents for its character form.\n\nEvery part is fresh memory and so is the `Collection`; a caller frees each part\nwith `free_str` and the container with `delete`.",
-          "line": 741
+          "line": 742
         },
         {
           "kind": "fun",
@@ -3390,7 +3390,7 @@
           "nullable": false,
           "signature": "pub fun replace(s: string, needle: string, to: string) <string>",
           "doc": "Replaces every non-overlapping occurrence of `needle` with `to`. An empty `needle`\nmatches everywhere, which no caller means, so it returns a fresh copy of `s`\ninstead of looping. The result is fresh memory; `free_str` releases it.",
-          "line": 776
+          "line": 777
         }
       ],
       "skipped_public_lines": 0,

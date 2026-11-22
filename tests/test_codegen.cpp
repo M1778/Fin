@@ -17486,3 +17486,26 @@ BACKEND_TEST(Soundness_Codegen, AnOutOfRangeFloatToIntCastSaturates) {
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "i32=-2147483648 u64=9223372036854775808\nneg_u64=0\n") << b.why();
 }
+
+// `s.length` on a string is the byte count, the same as `strings::len`.
+//
+// `lib/std/strings.fin`'s header records the situation exactly: "`s.length` type-checks and
+// does not lower (`the member 'length' of a non-struct is not lowered yet`), and `s[0]` does
+// not type-check at all. So `len()` calls `strlen` and there is no direct byte access". That
+// is a documented refuge, not a design: `.length` reads like every other length in the
+// language and refusing it at codegen means a program that checks cleanly and cannot build.
+//
+// The value must equal `len`, and the test asserts that directly rather than a hardcoded 5,
+// because the property is "the two spellings agree".
+BACKEND_TEST(Soundness_Codegen, AStringLengthLowersToTheByteCount) {
+    const Built b = build(std::string(kPrintf) +
+        "import { len } from strings::std;\n"
+        "fun main() <noret> {\n"
+        "    let s <string> = \"hello\";\n"
+        "    printf(\"%d %d\\n\", s.length, len(s));\n"
+        "    let empty <string> = \"\";\n"
+        "    printf(\"%d\\n\", empty.length);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5 5\n0\n") << b.why();
+}

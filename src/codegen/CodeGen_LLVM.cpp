@@ -16130,6 +16130,56 @@ private:
             }
         }
 
+        // `.length` on a string: the byte count, measured the same way `strings::len` does.
+        //
+        // `lib/std/strings.fin` documented this as not lowering and `len(s)` as the way round
+        // it. That is a refuge, not a design -- `.length` reads like every other length in the
+        // language, and refusing it means a program that checks cleanly and cannot build.
+        //
+        // Only for a `string` (a pointer with no pointee recorded). A `[T]` already carries its
+        // own length word and answers `.length` through its own path, so this arm must not
+        // shadow that.
+        if (node.member == "length" && object.type.kind == CgType::Kind::Ptr &&
+            !object.type.pointee) {
+            llvm::FunctionCallee measure = runtimeFn(
+                node, "strlen",
+                llvm::FunctionType::get(llvm::Type::getInt64Ty(ctx_),
+                                        {llvm::PointerType::getUnqual(ctx_)}, false),
+                "a string's .length");
+            if (!measure) return;
+            llvm::Value* data = builder_.CreateBitCast(
+                object.value, llvm::PointerType::getUnqual(ctx_), "strlen.arg");
+            // A null string has no bytes to measure; `strlen(null)` is undefined behaviour, so
+            // it answers 0 rather than crashing. `len("")` is 0 and a null string is the same
+            // absence as far as a length is concerned.
+            llvm::Value* isNull = builder_.CreateICmpEQ(
+                data, llvm::ConstantPointerNull::get(
+                          llvm::cast<llvm::PointerType>(data->getType())), "strnull");
+            llvm::BasicBlock* nullBlock =
+                llvm::BasicBlock::Create(ctx_, "strlen.null", builder_.GetInsertBlock()->getParent());
+            llvm::BasicBlock* lenBlock =
+                llvm::BasicBlock::Create(ctx_, "strlen.call", builder_.GetInsertBlock()->getParent());
+            llvm::BasicBlock* joinBlock =
+                llvm::BasicBlock::Create(ctx_, "strlen.join", builder_.GetInsertBlock()->getParent());
+            builder_.CreateCondBr(isNull, nullBlock, lenBlock);
+
+            builder_.SetInsertPoint(lenBlock);
+            llvm::Value* measured = builder_.CreateCall(measure, {data}, "strlen");
+            llvm::Value* asInt = builder_.CreateTrunc(measured, builder_.getInt32Ty(), "strlen.i32");
+            builder_.CreateBr(joinBlock);
+            llvm::BasicBlock* lenEnd = builder_.GetInsertBlock();
+
+            builder_.SetInsertPoint(nullBlock);
+            builder_.CreateBr(joinBlock);
+
+            builder_.SetInsertPoint(joinBlock);
+            llvm::PHINode* length = builder_.CreatePHI(builder_.getInt32Ty(), 2, "length");
+            length->addIncoming(llvm::ConstantInt::get(builder_.getInt32Ty(), 0), nullBlock);
+            length->addIncoming(asInt, lenEnd);
+            value_ = CgVal{length, *types_.byName("int")};
+            return;
+        }
+
         if (!object.type.isStruct() || !object.type.structInfo) {
             unsupported(node, fmt::format("the member '{}' of a non-struct", node.member));
             return;

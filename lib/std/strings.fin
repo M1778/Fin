@@ -56,10 +56,10 @@
 //     false. So `equals(a, b)` here is `strcmp(a, b) == 0` and a caller who writes `a == b`
 //     is asking a different and usually wrong question. This is the same fact
 //     `hashmap.fin` records, from the other side.
-//   * `s.length` type-checks and does not lower (`the member 'length' of a non-struct is
-//     not lowered yet`), and `s[0]` does not type-check at all (`Type 'string' is not an
-//     array or pointer`). So `len()` calls `strlen` and there is no direct byte access;
-//     everything that needs bytes goes through `to_chars`.
+//   * `s.length` lowers to the same byte count `len()` answers, null strings included (a
+//     null string answers 0 rather than measuring a null pointer). `s[0]` still does not
+//     type-check (`Type 'string' is not an array or pointer`), so there is no direct byte
+//     access and everything that needs bytes goes through `to_chars`.
 //   * `a + "b"` type-checks and is refused in codegen (`an operator on a pointer is not
 //     lowered yet`). `concat()` is the operation that works.
 //
@@ -171,8 +171,9 @@ priv fun strings_alloc(bytes: ulong) <string> {
 #[llvm_name="memmove"]
 @define strings_bytes_in(dst: string, src: &char, count: ulong) <string>;
 
-// The byte length, not counting the terminator. `s.length` does not lower, so this is
-// how a length is asked for.
+// The byte length, not counting the terminator. `s.length` answers the same number and is
+// the spelling to prefer; this exists because it is what the rest of the library calls, and
+// because a free function can be passed around where a member cannot.
 #[export]
 pub fun len(s: string) <int> {
     return cast<int>(strings_len(s));
