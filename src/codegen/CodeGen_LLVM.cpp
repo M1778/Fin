@@ -50,6 +50,7 @@
 #include "../types/Layout.hpp"
 #include "../utils/IntegerConstant.hpp"
 #include "../utils/StringEscapes.hpp"
+#include <cmath>
 
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/DIBuilder.h>
@@ -7033,6 +7034,49 @@ private:
                            to.llvmType->getPrimitiveSizeInBits()
                        ? builder_.CreateFPExt(from.value, to.llvmType)
                        : builder_.CreateFPTrunc(from.value, to.llvmType);
+        }
+        // Float to int, truncating toward zero -- the direction that was missing while int to
+        // float worked, which made `cast<double>(3)` legal and `cast<int>(3.9)` a codegen
+        // refusal. A language that can go one way and not back cannot turn a computed ratio
+        // into an index.
+        //
+        // `fptosi`/`fptoui` are UNDEFINED for a value out of the destination's range and for
+        // NaN. The front end takes the cast, so nothing upstream refuses it, and a silent
+        // undefined result is exactly what the backend invariant forbids. The clamp below
+        // makes the answer defined at the cost of one compare and one select per cast:
+        // values beyond the range answer the range's own bound, which is what a saturating
+        // conversion does in every language that has one.
+        if (from.type.kind == CgType::Kind::Float && to.kind == CgType::Kind::Int) {
+            llvm::Value* value = from.value;
+            const unsigned bits = to.bits == 0 ? 32u : to.bits;
+            // No `to.isBool` branch: the front end refuses `cast<bool>(someFloat)` outright
+            // ("Invalid cast from 'float' to 'bool'"), so a branch for it here would be code
+            // nothing can reach. If that rule changes, this is where the conversion goes.
+            const double lo = to.isSigned
+                                  ? -std::ldexp(1.0, static_cast<int>(bits) - 1)
+                                  : 0.0;
+            const double hi = to.isSigned
+                                  ? std::ldexp(1.0, static_cast<int>(bits) - 1)
+                                  : std::ldexp(1.0, static_cast<int>(bits));
+            // Clamp on the float side, where the bounds are exactly representable, before the
+            // conversion. `lo` and `hi` are powers of two, so no rounding creeps in.
+            llvm::Value* loC = llvm::ConstantFP::get(value->getType(), lo);
+            llvm::Value* hiC = llvm::ConstantFP::get(value->getType(), hi);
+            // NaN has no order, so the two `select`s leave whichever operand the comparison
+            // did not choose -- hence a NaN check first, answering 0, which is what a
+            // truncation of "not a number" means for a caller that must get an int.
+            llvm::Value* isNan = builder_.CreateFCmpUNO(
+                value, value, "fptosi.isnan");
+            llvm::Value* clamped = builder_.CreateSelect(
+                builder_.CreateFCmpOLT(value, loC, "fptosi.low"), loC, value, "fptosi.low.sel");
+            clamped = builder_.CreateSelect(
+                builder_.CreateFCmpOGT(clamped, hiC, "fptosi.high"), hiC, clamped,
+                "fptosi.high.sel");
+            llvm::Value* converted = to.isSigned
+                ? builder_.CreateFPToSI(clamped, to.llvmType, "fptosi")
+                : builder_.CreateFPToUI(clamped, to.llvmType, "fptoui");
+            return builder_.CreateSelect(
+                isNan, llvm::ConstantInt::get(to.llvmType, 0), converted, "fptosi.final");
         }
         if (from.type.kind == CgType::Kind::Ptr && to.kind == CgType::Kind::Ptr) {
             return from.value;  // opaque pointers: one type, no cast

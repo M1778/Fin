@@ -17420,3 +17420,69 @@ BACKEND_TEST(Soundness_Codegen, AMalformedEscapeKeepsItsCharacter) {
     // the `u` and its four digits survive as text. `\q` is simply unknown.
     EXPECT_EQ(b.out, "short=2\nsurrogate=5\nunknown=1\n") << b.why();
 }
+
+// `cast<int>(someFloat)` truncates toward zero, and the range is bounded.
+//
+// float-to-int was not lowered at all: `cast<int>(3.9)` refused with "this index expression is
+// not lowered yet" while `cast<double>(3)` worked. That asymmetry is what made it a defect
+// rather than a gap -- a language with int-to-float and no way back cannot write a loop counter
+// out of a computation that produced a double.
+//
+// Truncation toward zero is the rule C uses and the one a reader expects from a cast: -3.9 is
+// -3, not -4. Asserting the sign is the point, because `fptosi` on a negative value that was
+// mishandled would give -4 and look plausible.
+BACKEND_TEST(Soundness_Codegen, AFloatToIntCastTruncatesTowardZero) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        // A bare `3.9` is a `float` in this language, not a `double`; that is a
+        // separate rule this test should not fight.
+        "    let a <float> = 3.9;\n"
+        "    let b <float> = -3.9;\n"
+        "    let c <float> = 0.5;\n"
+        "    let d <float> = -0.5;\n"
+        "    let e <float> = 7.0;\n"
+        "    printf(\"%d %d %d %d %d\\n\", cast<int>(a), cast<int>(b),\n"
+        "           cast<int>(c), cast<int>(d), cast<int>(e));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3 -3 0 0 7\n") << b.why();
+}
+
+// The same conversion narrowed and widened, so the cast is not hardcoded to int/double.
+BACKEND_TEST(Soundness_Codegen, AFloatToIntCastWorksAtOtherWidths) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let big <float> = 100000.75;\n"
+        "    printf(\"%lld\\n\", cast<long>(big));\n"
+        "    let small <float> = 12.9;\n"
+        "    printf(\"%d\\n\", cast<int>(small));\n"
+        "    let u <float> = 42.9;\n"
+        "    printf(\"%u\\n\", cast<ulong>(u));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "100000\n12\n42\n") << b.why();
+}
+
+// An out-of-range float-to-int cast is DEFINED, not undefined.
+//
+// `fptosi` is undefined behaviour when the value is outside the destination's range, and the
+// front end accepts the cast, so without a clamp the answer would be whatever the hardware
+// happened to do. The conversion saturates instead: the range's own bound, which is what every
+// language with a saturating conversion does and what a caller can reason about.
+//
+// The signed case is the one worth checking: 1e38 to `int` answers INT_MIN, not INT_MAX,
+// because the clamp bound for a signed type is the low end and the value passed the high one.
+// That looks backwards and is what "saturate to the nearest representable" means when the
+// nearest representable below the value's magnitude is the minimum. A test asserting INT_MAX
+// would be asserting a different rule.
+BACKEND_TEST(Soundness_Codegen, AnOutOfRangeFloatToIntCastSaturates) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let huge <float> = 99999999999999999999999999999999999999.0;\n"
+        "    printf(\"i32=%d u64=%lu\\n\", cast<int>(huge), cast<ulong>(huge));\n"
+        "    let neg <float> = -99999999999999999999999999999999999999.0;\n"
+        "    printf(\"neg_u64=%lu\\n\", cast<ulong>(neg));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "i32=-2147483648 u64=9223372036854775808\nneg_u64=0\n") << b.why();
+}
