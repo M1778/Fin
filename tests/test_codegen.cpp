@@ -10698,11 +10698,16 @@ BACKEND_TEST(Soundness_Codegen, AnEnumBindingSharesTheIntegerInstance) {
 BACKEND_TEST(Soundness_Codegen, AGenericFunctionsBodyIsCheckedAtEachBinding) {
     // A template whose body is only lowerable for *some* arguments refuses at the
     // instantiation and not at the declaration, which is the opposite of where a
-    // method or an attribute refuses. `cast<int>` of a float is not lowered yet, so
-    // the `double` instance is the one that fails -- and it says so at the call.
+    // method or an attribute refuses.
+    //
+    // This used to bind the float and rely on `cast<int>(float)` not lowering. That cast
+    // works now, so the witness needs a conversion that genuinely has no lowering:
+    // `cast<int>` of a struct. The property under test is unchanged -- the refusal names the
+    // instantiation and says "conversion" -- and it no longer depends on a gap closing.
     const Built b = build(std::string(kPrintf) +
+        "struct P { x <int>, y <int> }\n"
         "fun asint<T>(a: T) <int> { return cast<int>(a); }\n"
-        "fun main() <noret> { printf(\"%d\\n\", asint(1.5)); }\n");
+        "fun main() <noret> { printf(\"%d\\n\", asint(P{x: 1, y: 2})); }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_NE(b.compileErr.find("conversion"), std::string::npos) << b.why();
 }
