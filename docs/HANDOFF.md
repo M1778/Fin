@@ -913,6 +913,25 @@ The checks that catch this class: does the assertion name a property or a number
 pass on more than one platform? A test that passes only on the machine it was written on is
 usually testing the machine.
 
+## Verified at the end of 2026-11-22
+
+- Local suite: **3,282 tests, 100%**.
+- CI on `985d218`: **all nine lanes green** — linux x86_64/arm64, macOS x86_64/arm64, Windows
+  x86_64/arm64, sanitizers, `build.sh`, perf.
+- **The nightly fuzz job ran green for the first time**: Clang built the harness, the corpus
+  restored, 120 seconds of fuzzing, no crash.
+- Nine issues closed with reproductions (#159, #149, #140, #134, #133, #132, #131, #126, #123).
+  27 remain open and are real.
+
+Two things to know before trusting a lane's green:
+
+  * the index gate (`gen_stdlib_index.py --check`) fails when a `lib/std` module changes and
+    the projection is not regenerated. It caught me twice. Run it after any stdlib edit;
+  * the `macos-15-intel` lane stalls without a log roughly one run in three. Cancel and
+    re-dispatch — the tag and the commit do not change, so the verdict does not either.
+    `docs/known-issues.md` has the `BlobNotFound` signature that distinguishes it from a slow
+    build.
+
 ## Not settled, and deliberately
 
 `base64_decode` **blames** on malformed input rather than refusing with a value. That aborts a
