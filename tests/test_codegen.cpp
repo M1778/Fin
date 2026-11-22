@@ -17509,3 +17509,27 @@ BACKEND_TEST(Soundness_Codegen, AStringLengthLowersToTheByteCount) {
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "5 5\n0\n") << b.why();
 }
+
+// An integer literal above `int64` max is a legal `ulong`.
+//
+// `18446744073709551615` is ULONG_MAX and the front end accepts it -- the analyzer reads the
+// literal with the declared type, which is `ulong` here -- but codegen parsed every integer
+// literal with `std::stoll`, which throws above int64 max, so the value was refused as
+// "the integer literal '...' is not lowered yet". A language whose `ulong` cannot hold its own
+// maximum in a literal is a `ulong` with a hole in the top half of its range.
+//
+// The value is asserted by printing it back, which is the only check that distinguishes
+// ULONG_MAX from a truncated or sign-extended one.
+BACKEND_TEST(Soundness_Codegen, AUlongLiteralAboveInt64MaxLowers) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let top <ulong> = 18446744073709551615;\n"
+        "    printf(\"%lu\\n\", top);\n"
+        "    let mid <ulong> = 9223372036854775808;\n"
+        "    printf(\"%lu\\n\", mid);\n"
+        "    let small <ulong> = 42;\n"
+        "    printf(\"%lu\\n\", small);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "18446744073709551615\n9223372036854775808\n42\n") << b.why();
+}

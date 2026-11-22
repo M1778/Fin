@@ -9380,11 +9380,30 @@ private:
             case ASTTokenKind::INTEGER: {
                 // `int` unless the value does not fit, which is the same reading the
                 // analyzer gives a bare literal.
+                //
+                // Parsed as UNSIGNED when it does not fit a signed 64-bit value, because
+                // `ulong`'s upper half is exactly that: `18446744073709551615` is ULONG_MAX
+                // and a legal literal. `std::stoll` throws on it, which refused half of
+                // `ulong`'s range -- a `ulong` that cannot hold its own maximum. The declared
+                // type decides which reading is meant, and `node.resolved_type` carries it
+                // here because the analyzer already read the literal the same way.
+                unsigned long long u = 0;
+                bool signedFit = true;
                 long long n = 0;
                 try {
                     n = std::stoll(node.value);
                 } catch (const std::exception&) {
-                    unsupported(node, fmt::format("the integer literal '{}'", node.value));
+                    signedFit = false;
+                    try {
+                        u = std::stoull(node.value);
+                    } catch (const std::exception&) {
+                        unsupported(node, fmt::format("the integer literal '{}'", node.value));
+                        return;
+                    }
+                }
+                if (!signedFit) {
+                    CgType t = types_.intType(64, /*isSigned=*/false);
+                    value_ = CgVal{llvm::ConstantInt::get(t.llvmType, u, /*isSigned=*/false), t};
                     return;
                 }
                 CgType t = types_.intType(
