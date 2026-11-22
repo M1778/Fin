@@ -90,9 +90,15 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           # A fresh runner has no default profile; this machine had one left over from an
           # earlier build, which is why the workflow worked here and not in CI.
+          # The same four lines `ci.yml` runs, for the same reasons its comments give:
+          # the profile names C++20 (the default gives 17, which finc refuses by name),
+          # and `--output-folder=build` is what puts the toolchain somewhere `find` looks.
           conan profile detect --force
-          conan install . --build=missing -s build_type=Debug \
-            -c tools.cmake.cmaketoolchain:generator=Ninja
+          conan profile show -pr:a=conan/profiles/fin
+          conan install . --output-folder=build --build=missing \
+            -pr:a=conan/profiles/fin \
+            -c tools.cmake.cmaketoolchain:generator=Ninja \
+            -s build_type=Debug
 
       - name: Configure with FIN_FUZZ
         run: |
