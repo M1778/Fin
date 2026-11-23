@@ -201,13 +201,16 @@ def scenarios():
     """
     plan = [
         ("startup/--version", None, None),
-        ("startup/tiny", INPUTS / "startup" / "tiny.fin", "check"),
+        ("startup/tiny", INPUTS / "startup" / "tiny.bfin", "check"),
     ]
-    for path in sorted((INPUTS / "stdlib").glob("*.fin")):
+    # `.bfin`, not `.fin`: the corpus-discovery test (ADR 0008) refuses any `.fin` file in
+    # the tests tree that is neither a sample nor explicitly ruled on. A benchmark fixture is
+    # neither -- it is timing data -- so it does not get the extension at all.
+    for path in sorted((INPUTS / "stdlib").glob("*.bfin")):
         plan.append(("stdlib/" + path.stem, path, "check"))
     plan += [
-        ("program/check", INPUTS / "program" / "app.fin", "check"),
-        ("program/build", INPUTS / "program" / "app.fin", "build"),
+        ("program/check", INPUTS / "program" / "app.bfin", "check"),
+        ("program/build", INPUTS / "program" / "app.bfin", "build"),
     ]
     return plan
 
