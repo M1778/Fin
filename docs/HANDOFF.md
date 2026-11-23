@@ -913,6 +913,33 @@ The checks that catch this class: does the assertion name a property or a number
 pass on more than one platform? A test that passes only on the machine it was written on is
 usually testing the machine.
 
+## Compile-time performance work: measured, decided, merged (2026-11-23)
+
+The request was a parser/lexer rewrite, possibly in Fin. **Measured, the parser and lexer are
+0.08 ms of a 45 ms compile — 0.2%**, so the rewrite was rejected on evidence and the work went
+to where the time is. Full record: `docs/PERF-DECISIONS.md`.
+
+- **Debug vs Release is 3.6×** on a ten-module check (159.9 → 44.8 ms). Every perf number must
+  name its build type; `tests/tools/bench_compile.py` now refuses to measure a Debug binary.
+- **71% of a Release compile is semantic analysis of the ten stdlib modules**, parse 17%,
+  preprocess 6%. A `json::std` import pulls ten modules, every compile, unchanged between builds.
+- **7 ms of every invocation is libLLVM mapping**, used or not — 49% of a trivial check. A
+  frontend-only binary would cut a check by 21% and a build by 5%, but it weakens `finn`'s
+  install verification (`healthcheck` passes a backend-less binary; only the build refuses).
+  Not taken; recorded with numbers.
+- **The type-graph registry costs ~17%** — a global hash every `Type` joins and leaves, existing
+  to break leak islands (issue #101). The fix is arena allocation and needs a ruling.
+- **64 ms of a build is the external link**, `cc` at 77 ms against `ld` at 13 ms. Not taken in
+  this pass; it needs crt paths derived from `cc` rather than hardcoded.
+
+Shipped: the benchmark harness (`tests/tools/bench_compile.py`, 53 scenarios, three-outcome
+gate), a baseline, and the decision record. Its first compare reported everything 10-24% slower
+because the test suite was running concurrently — it answered "inconclusive" rather than
+guessing, which is the behaviour that makes a benchmark trustworthy.
+
+Merged to `master` with all nine CI lanes green, and the benchmark gate inconclusive-to-passing
+on the merged tree.
+
 ## Verified at the end of 2026-11-22
 
 - Local suite: **3,282 tests, 100%**.
