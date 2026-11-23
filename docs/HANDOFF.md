@@ -966,6 +966,29 @@ asserted something the platform does not promise (the raw wait status; a SIGKILL
 does not have). A test is a claim about a contract, and the contract has to be the one that
 holds on the machine it runs on.
 
+## Measured, and deliberately not shipped: the type-graph registry costs 17% of a compile
+
+`perf` on a Release `finc` compiling a `json::std` import puts **16.8% of the run** in the
+type-graph registry: `typeGraphRegister` on every `Type` construction, `typeGraphUnregister` on
+every destruction, plus the hash churn (`_M_emplace_uniq`, `_M_insert_unique_node`,
+`_Hash_bytes`) and part of `PrimitiveType::~PrimitiveType`.
+
+The registry exists for issue #101: the type graph is mutually recursive (a struct owns its
+methods' signatures, which name the struct back), so `shared_ptr` alone leaves reference islands
+that no ordinary destructor reclaims — 373,648 bytes leaked per `finc -c`. The registry breaks
+the islands at exit by walking every surviving `Type` and dropping its type-valued edges.
+
+There is no ADR for this. The header in `src/types/TypeSweep.hpp` is the whole record.
+
+The correct fix is not "remove the registry" — that brings the leak back and the leak check
+depends on it. It is to **arena-allocate types per compile**: an arena dies as a block at exit,
+so there are no per-node registrations, no per-node destructions, no islands, and no sweep. The
+obstacle is that types are `shared_ptr`-managed everywhere and hand out raw pointers that
+outlive the analyzer, so the change is wide and needs a ruling.
+
+Perf work on the analyzer should start here, not in the visitor: this 17% is structural, and the
+visitor's 23.7 ms sits on top of it.
+
 ## Not settled, and deliberately
 
 `base64_decode` **blames** on malformed input rather than refusing with a value. That aborts a
