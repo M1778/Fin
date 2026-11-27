@@ -291,7 +291,7 @@ jobs:
 
       - name: Upload compiler and test logs
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-${{ matrix.name }}
           if-no-files-found: ignore
@@ -381,7 +381,7 @@ jobs:
 
       - name: Upload sanitizer logs
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-sanitizers
           if-no-files-found: ignore
@@ -476,7 +476,7 @@ jobs:
 
       - name: Upload benchmark numbers
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-perf
           if-no-files-found: error

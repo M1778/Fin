@@ -513,7 +513,7 @@ jobs:
             cat "$asset.sha256"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: asset-${{ matrix.target }}
           if-no-files-found: error
@@ -638,7 +638,7 @@ jobs:
             cat "$f.sha256"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: asset-x86_64-unknown-linux-musl
           if-no-files-found: error
@@ -773,7 +773,7 @@ jobs:
             "${flags[@]}" \
             dist/* index.json
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: validated-release
           path: |
