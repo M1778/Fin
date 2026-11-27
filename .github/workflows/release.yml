@@ -425,7 +425,7 @@ jobs:
             && [ "$(./proof)" = "$(printf 'fin\n42')" ] )
 
       - name: CycloneDX SBOM (Conan graph)
-        uses: anchore/sbom-action@v0.24.3
+        uses: anchore/sbom-action@v0.24.4
         with:
           # syft's conan cataloger reads conan.lock, which the Build step above
           # wrote from the graph it actually resolved: fmt for the driver and
@@ -585,7 +585,7 @@ jobs:
           stage-musl/bin/finc --version
 
       - name: CycloneDX SBOM (Conan graph)
-        uses: anchore/sbom-action@v0.24.3
+        uses: anchore/sbom-action@v0.24.4
         with:
           # conan.lock came out of the Alpine container in the step above, so
           # the scan reads the same graph the musl binary was built against.
