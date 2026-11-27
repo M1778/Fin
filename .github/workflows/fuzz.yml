@@ -71,7 +71,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Cache the Conan dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.conan2
           key: fuzz-conan-${{ hashFiles('conanfile.py', 'conan/profiles/*') }}
@@ -136,7 +136,7 @@ jobs:
       # rather than the same hour again. Keyed on the commit so a cache restore cannot hide a
       # regression behind stale inputs; the prefix lets an older corpus still seed a new run.
       - name: Restore the corpus
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: corpus
           key: fuzz-corpus-${{ github.sha }}
